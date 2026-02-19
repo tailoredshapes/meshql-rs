@@ -45,6 +45,12 @@ pub struct CertWorld {
     pub farm_response: Option<serde_json::Value>,
 }
 
+impl Default for CertWorld {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CertWorld {
     pub fn new() -> Self {
         let mut world = Self {
