@@ -85,7 +85,7 @@ fn is_scalar(type_name: &str) -> bool {
 }
 
 /// Get the base type name (unwrapping List wrappers).
-fn base_type_name<'a>(ty: &'a pt::Type) -> &'a str {
+fn base_type_name(ty: &pt::Type) -> &str {
     match &ty.base {
         pt::BaseType::Named(n) => n.as_ref(),
         pt::BaseType::List(inner) => base_type_name(inner),
