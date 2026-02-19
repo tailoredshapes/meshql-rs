@@ -1,0 +1,22 @@
+[package]
+name = "meshql-cert"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+meshql-core = { path = "../meshql-core" }
+meshql-server = { path = "../meshql-server" }
+meshql-graphlette = { path = "../meshql-graphlette" }
+meshql-restlette = { path = "../meshql-restlette" }
+cucumber = "0.21"
+tokio = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+axum = { workspace = true }
+handlebars = { workspace = true }
+async-trait = { workspace = true }
+
+[lib]
+name = "meshql_cert"

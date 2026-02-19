@@ -1,0 +1,25 @@
+type Hen {
+    id: ID
+    coopId: String
+    name: String
+    dateOfBirth: String
+    coop: Coop
+    layReports: [LayReport]
+}
+
+type Coop {
+    id: ID
+    name: String
+}
+
+type LayReport {
+    id: ID
+    date: String
+    count: Int
+}
+
+type Query {
+    getHen(id: ID, at: Int): Hen
+    getHens(name: String, at: Int): [Hen]
+    getHensByCoop(id: ID, at: Int): [Hen]
+}

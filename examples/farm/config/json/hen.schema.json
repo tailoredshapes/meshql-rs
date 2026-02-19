@@ -1,0 +1,10 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "coopId": { "type": "string" },
+    "name": { "type": "string" },
+    "dateOfBirth": { "type": "string", "format": "date" }
+  },
+  "required": ["coopId", "name"]
+}

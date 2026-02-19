@@ -1,0 +1,40 @@
+[package]
+name = "meshql-mongo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+meshql-core = { path = "../meshql-core" }
+mongodb = "3"
+bson = { version = "2", features = ["chrono-0_4"] }
+handlebars = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+meshql-cert = { path = "../meshql-cert" }
+meshql-server = { path = "../meshql-server" }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["mongo"] }
+tokio = { workspace = true }
+uuid = { workspace = true }
+cucumber = "0.21"
+reqwest = { version = "0.12", features = ["json"] }
+axum = { workspace = true }
+serde_json = { workspace = true }
+
+[[test]]
+name = "repo_cert"
+harness = true
+
+[[test]]
+name = "searcher_cert"
+harness = true
+
+[[test]]
+name = "farm_cert"
+harness = false

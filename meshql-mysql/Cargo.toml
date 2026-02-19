@@ -1,0 +1,41 @@
+[package]
+name = "meshql-mysql"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+meshql-core = { path = "../meshql-core" }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "mysql"] }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+handlebars = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+uuid = { workspace = true }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["mysql"] }
+meshql-cert = { path = "../meshql-cert" }
+meshql-server = { path = "../meshql-server" }
+meshql-graphlette = { path = "../meshql-graphlette" }
+meshql-restlette = { path = "../meshql-restlette" }
+cucumber = "0.21"
+reqwest = { version = "0.12", features = ["json"] }
+axum = { workspace = true }
+serde_json = { workspace = true }
+
+[[test]]
+name = "repo_cert"
+harness = true
+
+[[test]]
+name = "searcher_cert"
+harness = true
+
+[[test]]
+name = "farm_cert"
+harness = false

@@ -1,0 +1,39 @@
+[package]
+name = "meshql-merkql"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+meshql-core = { path = "../meshql-core" }
+merkql = { path = "../../merkql" }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+handlebars = { workspace = true }
+tokio = { workspace = true }
+tempfile = "3"
+uuid = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+meshql-cert = { path = "../meshql-cert" }
+meshql-server = { path = "../meshql-server" }
+meshql-graphlette = { path = "../meshql-graphlette" }
+meshql-restlette = { path = "../meshql-restlette" }
+cucumber = "0.21"
+reqwest = { version = "0.12", features = ["json"] }
+axum = { workspace = true }
+tokio = { workspace = true }
+tempfile = "3"
+
+[[test]]
+name = "repo_cert"
+harness = false
+
+[[test]]
+name = "searcher_cert"
+harness = false
+
+[[test]]
+name = "farm_cert"
+harness = false

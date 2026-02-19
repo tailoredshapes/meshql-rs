@@ -1,0 +1,18 @@
+[package]
+name = "farm"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "farm"
+path = "src/main.rs"
+
+[dependencies]
+meshql-core = { path = "../../meshql-core" }
+meshql-mongo = { path = "../../meshql-mongo" }
+meshql-graphlette = { path = "../../meshql-graphlette" }
+meshql-restlette = { path = "../../meshql-restlette" }
+meshql-server = { path = "../../meshql-server" }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+anyhow = "1"
