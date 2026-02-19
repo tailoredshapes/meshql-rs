@@ -1,0 +1,34 @@
+scalar Date
+
+type Query {
+  getById(id: ID, at: Float): ConsumptionReport
+  getByConsumer(id: ID, at: Float): [ConsumptionReport]
+  getByContainer(id: ID, at: Float): [ConsumptionReport]
+  getAll(at: Float): [ConsumptionReport]
+}
+
+type Consumer {
+  id: ID
+  name: String!
+  consumer_type: String
+  zone: String
+}
+
+type Container {
+  id: ID
+  name: String!
+  container_type: String
+  zone: String
+}
+
+type ConsumptionReport {
+  id: ID
+  consumer_id: String!
+  container_id: String!
+  eggs: Int!
+  timestamp: String!
+  purpose: String
+  legacy_mblnr: String
+  consumer: Consumer
+  container: Container
+}

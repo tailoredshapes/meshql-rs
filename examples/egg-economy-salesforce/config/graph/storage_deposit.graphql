@@ -1,0 +1,25 @@
+scalar Date
+
+type Query {
+  getById(id: ID, at: Float): StorageDeposit
+  getByContainer(id: ID, at: Float): [StorageDeposit]
+  getAll(at: Float): [StorageDeposit]
+}
+
+type Container {
+  id: ID
+  name: String!
+  container_type: String
+  zone: String
+}
+
+type StorageDeposit {
+  id: ID
+  container_id: String!
+  source_type: String!
+  source_id: String!
+  eggs: Int!
+  timestamp: String!
+  legacy_sf_id: String
+  container: Container
+}

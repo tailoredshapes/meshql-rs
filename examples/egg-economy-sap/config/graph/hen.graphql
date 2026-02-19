@@ -1,0 +1,43 @@
+scalar Date
+
+type Query {
+  getById(id: ID, at: Float): Hen
+  getByCoop(id: ID, at: Float): [Hen]
+  getAll(at: Float): [Hen]
+}
+
+type Coop {
+  id: ID
+  name: String!
+  capacity: Int
+}
+
+type Hen {
+  id: ID
+  name: String!
+  coop_id: String!
+  breed: String!
+  dob: Date
+  status: String
+  legacy_equnr: String
+  coop: Coop
+  layReports: [LayReport]
+  productivity: [HenProductivity]
+}
+
+type LayReport {
+  id: ID
+  eggs: Int!
+  timestamp: String!
+  quality: String
+}
+
+type HenProductivity {
+  id: ID
+  eggs_today: Int
+  eggs_week: Int
+  eggs_month: Int
+  avg_per_week: Float
+  total_eggs: Int
+  quality_rate: Float
+}

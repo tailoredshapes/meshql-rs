@@ -11,6 +11,9 @@ members = [
     "meshql-postgres",
     "meshql-mysql",
     "examples/farm",
+    "examples/egg-economy",
+    "examples/egg-economy-sap",
+    "examples/egg-economy-salesforce",
 ]
 resolver = "2"
 

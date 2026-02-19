@@ -1,0 +1,27 @@
+scalar Date
+
+type Query {
+  getById(id: ID, at: Float): HenProductivity
+  getByHen(id: ID, at: Float): [HenProductivity]
+  getAll(at: Float): [HenProductivity]
+}
+
+type Hen {
+  id: ID
+  name: String!
+  breed: String
+  status: String
+}
+
+type HenProductivity {
+  id: ID
+  hen_id: String!
+  farm_id: String!
+  eggs_today: Int!
+  eggs_week: Int!
+  eggs_month: Int!
+  avg_per_week: Float!
+  total_eggs: Int!
+  quality_rate: Float
+  hen: Hen
+}

@@ -1,0 +1,13 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["name", "consumer_type", "zone"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "name": {"type": "string"},
+        "consumer_type": {"type": "string", "enum": ["household", "restaurant", "bakery"]},
+        "zone": {"type": "string"},
+        "weekly_demand": {"type": "integer", "minimum": 0},
+        "legacy_kunnr": {"type": "string"}
+    }
+}

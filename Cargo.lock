@@ -1049,6 +1049,48 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
+name = "egg-economy"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "meshql-core",
+ "meshql-graphlette",
+ "meshql-mongo",
+ "meshql-restlette",
+ "meshql-server",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "egg-economy-salesforce"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "meshql-core",
+ "meshql-graphlette",
+ "meshql-mongo",
+ "meshql-restlette",
+ "meshql-server",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "egg-economy-sap"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "meshql-core",
+ "meshql-graphlette",
+ "meshql-mongo",
+ "meshql-restlette",
+ "meshql-server",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "either"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

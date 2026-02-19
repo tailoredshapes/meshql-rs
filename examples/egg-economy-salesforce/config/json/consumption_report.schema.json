@@ -1,0 +1,14 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["consumer_id", "container_id", "eggs", "timestamp"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "consumer_id": {"type": "string", "format": "uuid"},
+        "container_id": {"type": "string", "format": "uuid"},
+        "eggs": {"type": "integer", "minimum": 1},
+        "timestamp": {"type": "string"},
+        "purpose": {"type": "string", "enum": ["cooking", "baking", "resale", "raw"]},
+        "legacy_sf_id": {"type": "string"}
+    }
+}

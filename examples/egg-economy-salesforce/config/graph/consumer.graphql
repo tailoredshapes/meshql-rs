@@ -1,0 +1,24 @@
+scalar Date
+
+type Query {
+  getById(id: ID, at: Float): Consumer
+  getAll(at: Float): [Consumer]
+  getByZone(zone: String, at: Float): [Consumer]
+}
+
+type Consumer {
+  id: ID
+  name: String!
+  consumer_type: String!
+  zone: String!
+  weekly_demand: Int
+  legacy_sf_id: String
+  consumptionReports: [ConsumptionReport]
+}
+
+type ConsumptionReport {
+  id: ID
+  eggs: Int!
+  timestamp: String!
+  purpose: String
+}

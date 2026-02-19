@@ -1,0 +1,16 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["container_id"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "container_id": {"type": "string", "format": "uuid"},
+        "current_eggs": {"type": "integer", "minimum": 0},
+        "total_deposits": {"type": "integer", "minimum": 0},
+        "total_withdrawals": {"type": "integer", "minimum": 0},
+        "total_transfers_in": {"type": "integer", "minimum": 0},
+        "total_transfers_out": {"type": "integer", "minimum": 0},
+        "total_consumed": {"type": "integer", "minimum": 0},
+        "utilization_pct": {"type": "number", "minimum": 0, "maximum": 100}
+    }
+}

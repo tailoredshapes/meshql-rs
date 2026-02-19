@@ -45,7 +45,10 @@ meshql-rs/
 ├── meshql-merkql/      # MerkQL adapter
 ├── meshql-cert/        # Cucumber BDD test suite
 └── examples/
-    └── farm/           # Hierarchical federation example
+    ├── farm/                    # Hierarchical federation (4 entities)
+    ├── egg-economy/             # Event sourcing + projections (13 entities)
+    ├── egg-economy-sap/         # Anti-corruption layer over SAP
+    └── egg-economy-salesforce/  # Anti-corruption layer over Salesforce
 ```
 
 ## Quick Start

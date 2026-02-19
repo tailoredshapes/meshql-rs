@@ -1,0 +1,14 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["name", "coop_id", "breed"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "name": {"type": "string"},
+        "coop_id": {"type": "string", "format": "uuid"},
+        "breed": {"type": "string"},
+        "dob": {"type": "string", "format": "date"},
+        "status": {"type": "string", "enum": ["active", "retired", "deceased"]},
+        "legacy_equnr": {"type": "string"}
+    }
+}

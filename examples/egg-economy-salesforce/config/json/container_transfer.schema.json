@@ -1,0 +1,14 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["source_container_id", "dest_container_id", "eggs", "timestamp"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "source_container_id": {"type": "string", "format": "uuid"},
+        "dest_container_id": {"type": "string", "format": "uuid"},
+        "eggs": {"type": "integer", "minimum": 1},
+        "timestamp": {"type": "string"},
+        "transport_method": {"type": "string", "enum": ["truck", "van", "cart"]},
+        "legacy_sf_id": {"type": "string"}
+    }
+}

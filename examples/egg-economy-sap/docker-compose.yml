@@ -1,0 +1,65 @@
+services:
+  # Legacy SAP PostgreSQL database
+  legacy-postgres:
+    image: postgres:16
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_DB: egg_economy_sap
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    command:
+      - "postgres"
+      - "-c"
+      - "wal_level=logical"
+      - "-c"
+      - "max_replication_slots=4"
+      - "-c"
+      - "max_wal_senders=4"
+    volumes:
+      - ./legacy-db/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - sap-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d egg_economy_sap"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # MongoDB for clean MeshQL storage
+  mongodb:
+    image: mongo:8
+    volumes:
+      - sap-mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Egg Economy SAP MeshQL application (Rust)
+  egg-economy-sap:
+    build:
+      context: ../..
+      dockerfile: examples/egg-economy-sap/Dockerfile
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    ports:
+      - "5089:5089"
+    environment:
+      - PORT=5089
+      - MONGO_URI=mongodb://mongodb:27017
+      - PREFIX=egg_economy_sap
+      - ENV=development
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5089/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+volumes:
+  sap-pg-data:
+  sap-mongo-data:

@@ -1,0 +1,27 @@
+scalar Date
+
+type Query {
+  getById(id: ID, at: Float): FarmOutput
+  getByFarm(id: ID, at: Float): [FarmOutput]
+  getAll(at: Float): [FarmOutput]
+}
+
+type Farm {
+  id: ID
+  name: String!
+  farm_type: String!
+  zone: String!
+}
+
+type FarmOutput {
+  id: ID
+  farm_id: String!
+  farm_type: String
+  eggs_today: Int!
+  eggs_week: Int!
+  eggs_month: Int!
+  active_hens: Int!
+  total_hens: Int!
+  avg_per_hen_per_week: Float
+  farm: Farm
+}

@@ -1,0 +1,13 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["name", "farm_type", "zone"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "name": {"type": "string"},
+        "farm_type": {"type": "string", "enum": ["megafarm", "local_farm", "homestead"]},
+        "zone": {"type": "string"},
+        "owner": {"type": "string"},
+        "legacy_sf_id": {"type": "string"}
+    }
+}

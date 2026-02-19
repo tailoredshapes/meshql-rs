@@ -1,0 +1,13 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["name", "farm_id", "capacity", "coop_type"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "name": {"type": "string"},
+        "farm_id": {"type": "string", "format": "uuid"},
+        "capacity": {"type": "integer", "minimum": 1},
+        "coop_type": {"type": "string"},
+        "legacy_stall_nr": {"type": "string"}
+    }
+}

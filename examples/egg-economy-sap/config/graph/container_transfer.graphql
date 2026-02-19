@@ -1,0 +1,27 @@
+scalar Date
+
+type Query {
+  getById(id: ID, at: Float): ContainerTransfer
+  getBySourceContainer(id: ID, at: Float): [ContainerTransfer]
+  getByDestContainer(id: ID, at: Float): [ContainerTransfer]
+  getAll(at: Float): [ContainerTransfer]
+}
+
+type Container {
+  id: ID
+  name: String!
+  container_type: String
+  zone: String
+}
+
+type ContainerTransfer {
+  id: ID
+  source_container_id: String!
+  dest_container_id: String!
+  eggs: Int!
+  timestamp: String!
+  transport_method: String
+  legacy_mblnr: String
+  sourceContainer: Container
+  destContainer: Container
+}

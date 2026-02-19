@@ -1,0 +1,24 @@
+scalar Date
+
+type Query {
+  getById(id: ID, at: Float): StorageWithdrawal
+  getByContainer(id: ID, at: Float): [StorageWithdrawal]
+  getAll(at: Float): [StorageWithdrawal]
+}
+
+type Container {
+  id: ID
+  name: String!
+  container_type: String
+  zone: String
+}
+
+type StorageWithdrawal {
+  id: ID
+  container_id: String!
+  reason: String!
+  eggs: Int!
+  timestamp: String!
+  legacy_sf_id: String
+  container: Container
+}

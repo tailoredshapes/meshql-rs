@@ -1,0 +1,51 @@
+version: "3.8"
+
+services:
+  legacy-postgres:
+    image: postgres:16
+    container_name: egg-economy-sf-postgres
+    environment:
+      POSTGRES_DB: salesforce_replica
+      POSTGRES_USER: salesforce
+      POSTGRES_PASSWORD: salesforce
+    ports:
+      - "5435:5432"
+    volumes:
+      - ./legacy-db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    command: >
+      postgres
+      -c wal_level=logical
+      -c max_replication_slots=4
+      -c max_wal_senders=4
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U salesforce -d salesforce_replica"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mongodb:
+    image: mongo:8
+    container_name: egg-economy-sf-mongo
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  egg-economy-salesforce:
+    build:
+      context: ../..
+      dockerfile: examples/egg-economy-salesforce/Dockerfile
+    container_name: egg-economy-sf-app
+    environment:
+      PORT: "5090"
+      MONGO_URI: "mongodb://mongodb:27017"
+      PREFIX: "egg_economy_salesforce"
+      ENV: "development"
+    ports:
+      - "5090:5090"
+    depends_on:
+      legacy-postgres:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
