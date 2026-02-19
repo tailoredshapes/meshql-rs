@@ -8,7 +8,10 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use axum::Router;
 use chrono::Utc;
-use meshql_core::{RootConfig, Searcher, SingletonResolverConfig, Stash, VectorResolverConfig};
+use meshql_core::{
+    InternalSingletonResolverConfig, InternalVectorResolverConfig, RootConfig, Searcher,
+    SingletonResolverConfig, Stash, VectorResolverConfig,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -243,6 +246,92 @@ fn vector_resolver_field(
     }))
 }
 
+/// Internal singleton relation field: look up foreign key in parent, call target searcher via registry.
+fn internal_singleton_resolver_field(
+    field_name: String,
+    type_ref: TypeRef,
+    resolver: &InternalSingletonResolverConfig,
+    registry: &ResolverRegistry,
+) -> Option<Field> {
+    let entry = registry.get_for_url(&resolver.graphlette_path)?;
+    let searcher = Arc::clone(&entry.searcher);
+    let template = entry
+        .root_config
+        .get_template(&resolver.query_name)?
+        .to_string();
+    let fk = resolver
+        .foreign_key
+        .clone()
+        .unwrap_or_else(|| "id".to_string());
+
+    Some(Field::new(field_name, type_ref, move |ctx| {
+        let s = Arc::clone(&searcher);
+        let tmpl = template.clone();
+        let fk = fk.clone();
+        FieldFuture::new(async move {
+            let parent = ctx.parent_value.try_downcast_ref::<Stash>()?;
+            let id_val = parent.get(&fk).and_then(|v| v.as_str()).unwrap_or("");
+            if id_val.is_empty() {
+                return Ok(FieldValue::NONE);
+            }
+            let mut args = Stash::new();
+            args.insert(
+                "id".to_string(),
+                serde_json::Value::String(id_val.to_string()),
+            );
+            let at = Utc::now().timestamp_millis();
+            match s.find(&tmpl, &args, &["*".to_string()], at).await {
+                Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stash))),
+                Ok(None) => Ok(FieldValue::NONE),
+                Err(e) => Err(async_graphql::Error::new(e.to_string())),
+            }
+        })
+    }))
+}
+
+/// Internal vector relation field: look up id in parent, call target searcher for list via registry.
+fn internal_vector_resolver_field(
+    field_name: String,
+    type_ref: TypeRef,
+    resolver: &InternalVectorResolverConfig,
+    registry: &ResolverRegistry,
+) -> Option<Field> {
+    let entry = registry.get_for_url(&resolver.graphlette_path)?;
+    let searcher = Arc::clone(&entry.searcher);
+    let template = entry
+        .root_config
+        .get_template(&resolver.query_name)?
+        .to_string();
+    let fk = resolver.foreign_key.clone();
+
+    Some(Field::new(field_name, type_ref, move |ctx| {
+        let s = Arc::clone(&searcher);
+        let tmpl = template.clone();
+        let fk = fk.clone();
+        FieldFuture::new(async move {
+            let parent = ctx.parent_value.try_downcast_ref::<Stash>()?;
+            let id_val = match &fk {
+                Some(key) => parent.get(key).and_then(|v| v.as_str()).unwrap_or(""),
+                None => parent.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+            };
+            let mut args = Stash::new();
+            args.insert(
+                "id".to_string(),
+                serde_json::Value::String(id_val.to_string()),
+            );
+            let at = Utc::now().timestamp_millis();
+            match s.find_all(&tmpl, &args, &["*".to_string()], at).await {
+                Ok(stashes) => {
+                    let items: Vec<FieldValue> =
+                        stashes.into_iter().map(FieldValue::owned_any).collect();
+                    Ok(Some(FieldValue::list(items)))
+                }
+                Err(e) => Err(async_graphql::Error::new(e.to_string())),
+            }
+        })
+    }))
+}
+
 /// Null field: returns None (for relation fields with no registered resolver).
 fn null_field(field_name: String, type_ref: TypeRef) -> Field {
     Field::new(field_name, type_ref, |_ctx| {
@@ -370,8 +459,23 @@ pub fn build_schema(
                     .iter()
                     .find(|r| r.field_name == field_name);
 
+                // Check internal singleton resolvers
+                let internal_singleton = root_config
+                    .internal_singleton_resolvers
+                    .iter()
+                    .find(|r| r.field_name == field_name);
+
                 // Check vector resolvers (exact match or nested path, e.g. "hens.layReports")
                 let vector = root_config.vector_resolvers.iter().find(|r| {
+                    r.field_name == field_name
+                        || r.field_name
+                            .rsplit_once('.')
+                            .map(|(_, suffix)| suffix == field_name)
+                            .unwrap_or(false)
+                });
+
+                // Check internal vector resolvers
+                let internal_vector = root_config.internal_vector_resolvers.iter().find(|r| {
                     r.field_name == field_name
                         || r.field_name
                             .rsplit_once('.')
@@ -382,9 +486,25 @@ pub fn build_schema(
                 let field = if let Some(r) = singleton {
                     singleton_resolver_field(field_name.clone(), field_type.clone(), r, registry)
                         .unwrap_or_else(|| null_field(field_name, field_type))
+                } else if let Some(r) = internal_singleton {
+                    internal_singleton_resolver_field(
+                        field_name.clone(),
+                        field_type.clone(),
+                        r,
+                        registry,
+                    )
+                    .unwrap_or_else(|| null_field(field_name, field_type))
                 } else if let Some(r) = vector {
                     vector_resolver_field(field_name.clone(), field_type.clone(), r, registry)
                         .unwrap_or_else(|| null_field(field_name, field_type))
+                } else if let Some(r) = internal_vector {
+                    internal_vector_resolver_field(
+                        field_name.clone(),
+                        field_type.clone(),
+                        r,
+                        registry,
+                    )
+                    .unwrap_or_else(|| null_field(field_name, field_type))
                 } else {
                     null_field(field_name, field_type)
                 };

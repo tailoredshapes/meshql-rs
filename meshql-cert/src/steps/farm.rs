@@ -53,22 +53,37 @@ async fn post_entity(
     let url = format!("{server_addr}/{entity_type}");
     let resp = client.post(&url).json(&data).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 201, "POST {entity_type} failed");
-    // Discover the UUID via GraphQL list query
     resp.text().await.unwrap(); // consume body
-                                // Use GET list to find the entity
+
+    // Use GET list to find the entity
     let list_resp: Value = client.get(&url).send().await.unwrap().json().await.unwrap();
-    // Find entity by name match in the list
-    let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("");
+
     if let Some(items) = list_resp.as_array() {
-        for item in items {
-            if item.get("name").and_then(|v| v.as_str()) == Some(name) {
-                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                    return id.to_string();
+        // Try matching by name first (for named entities)
+        let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("");
+        if !name.is_empty() {
+            for item in items {
+                if item.get("name").and_then(|v| v.as_str()) == Some(name) {
+                    if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                        return id.to_string();
+                    }
+                }
+            }
+        }
+
+        // Fallback: match by all posted data fields (for events/projections)
+        if let Some(obj) = data.as_object() {
+            for item in items.iter().rev() {
+                let all_match = obj.iter().all(|(k, v)| item.get(k) == Some(v));
+                if all_match {
+                    if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                        return id.to_string();
+                    }
                 }
             }
         }
     }
-    panic!("Could not find {entity_type} with name={name} after creation");
+    panic!("Could not find {entity_type} after creation");
 }
 
 async fn graphql_query(
@@ -91,9 +106,26 @@ async fn graphql_query(
     resp
 }
 
+/// Navigate a JSON value by dot-separated path (e.g., "data.getById.name")
+fn json_at_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+    let mut current = value;
+    for key in path.split('.') {
+        current = current.get(key)?;
+    }
+    Some(current)
+}
+
 #[given("a MeshQL farm server is running")]
 async fn server_running(world: &mut CertWorld) {
     // The server addr is injected by the test runner before hook
+    assert!(
+        world.server_addr.is_some(),
+        "server_addr must be set before this step"
+    );
+}
+
+#[given("a MeshQL egg economy server is running")]
+async fn egg_economy_server_running(world: &mut CertWorld) {
     assert!(
         world.server_addr.is_some(),
         "server_addr must be set before this step"
@@ -130,7 +162,7 @@ async fn create_entities(
 #[given(regex = r#"^I capture the current timestamp as "([^"]+)"$"#)]
 async fn capture_timestamp(world: &mut CertWorld, key: String) {
     let ms = Utc::now().timestamp_millis();
-    if key == "first_stamp" {
+    if key == "first_stamp" || key == "before_update" {
         world.first_stamp_ms = Some(ms);
     }
     world.timestamps.insert(key, Utc::now());
@@ -183,6 +215,7 @@ async fn query_graph_at_stamp(world: &mut CertWorld, entity_type: String, raw_qu
 
 // ---- Then assertions ----
 
+// Legacy assertion kept for backward compatibility with farm.feature
 #[then(regex = r#"^the response data\.([a-zA-Z]+)\.name should be "([^"]+)"$"#)]
 async fn assert_name(world: &mut CertWorld, field: String, expected: String) {
     let resp = world.farm_response.as_ref().expect("no response");
@@ -199,6 +232,30 @@ async fn assert_array_count(world: &mut CertWorld, root: String, field: String, 
         .as_array()
         .expect("not an array");
     assert_eq!(arr.len(), count, "array count mismatch for {root}.{field}");
+}
+
+// Generic path-based assertions for egg economy and beyond
+
+#[then(regex = r#"^the response at "([^"]+)" should be "([^"]+)"$"#)]
+async fn assert_path_string(world: &mut CertWorld, path: String, expected: String) {
+    let resp = world.farm_response.as_ref().expect("no response");
+    let value = json_at_path(resp, &path)
+        .unwrap_or_else(|| panic!("path '{path}' not found in response: {resp}"));
+    let actual = value
+        .as_str()
+        .unwrap_or_else(|| panic!("value at '{path}' is not a string: {value}"));
+    assert_eq!(actual, expected, "mismatch at path '{path}'");
+}
+
+#[then(regex = r#"^the response at "([^"]+)" should have (\d+) items?$"#)]
+async fn assert_path_array_count(world: &mut CertWorld, path: String, count: usize) {
+    let resp = world.farm_response.as_ref().expect("no response");
+    let value = json_at_path(resp, &path)
+        .unwrap_or_else(|| panic!("path '{path}' not found in response: {resp}"));
+    let arr = value
+        .as_array()
+        .unwrap_or_else(|| panic!("value at '{path}' is not an array: {value}"));
+    assert_eq!(arr.len(), count, "array count mismatch at path '{path}'");
 }
 
 #[then("there should be no GraphQL errors")]
