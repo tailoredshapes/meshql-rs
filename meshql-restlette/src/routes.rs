@@ -1,10 +1,9 @@
 use axum::{
-    Router,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Json,
+    Json, Router,
 };
 use meshql_core::{Auth, Envelope, Repository, Stash};
 use std::sync::Arc;
@@ -26,7 +25,10 @@ pub fn build_restlette_router(
 
     Router::new()
         .route(path, post(create_handler).get(list_handler))
-        .route(&item_path, get(read_handler).put(update_handler).delete(delete_handler))
+        .route(
+            &item_path,
+            get(read_handler).put(update_handler).delete(delete_handler),
+        )
         .with_state(state)
 }
 

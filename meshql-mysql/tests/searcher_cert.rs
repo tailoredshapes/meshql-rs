@@ -10,14 +10,10 @@ async fn create_searcher() -> (MysqlSearcher, impl std::any::Any) {
     let url = format!("mysql://root:@127.0.0.1:{port}/test");
     let table = format!("env_{}", uuid::Uuid::new_v4().simple());
 
-    let repo = MysqlRepository::new_with_table(&url, &table)
-        .await
-        .unwrap();
+    let repo = MysqlRepository::new_with_table(&url, &table).await.unwrap();
     cert::seed_searcher_data(&repo).await;
 
-    let searcher = MysqlSearcher::new_with_table(&url, &table)
-        .await
-        .unwrap();
+    let searcher = MysqlSearcher::new_with_table(&url, &table).await.unwrap();
     (searcher, container)
 }
 

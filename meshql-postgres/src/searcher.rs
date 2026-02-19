@@ -50,9 +50,9 @@ impl PostgresSearcher {
         let query_val: serde_json::Value =
             serde_json::from_str(&query_json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
 
-        let query_obj = query_val
-            .as_object()
-            .ok_or_else(|| MeshqlError::Parse("Query template must produce a JSON object".to_string()))?;
+        let query_obj = query_val.as_object().ok_or_else(|| {
+            MeshqlError::Parse("Query template must produce a JSON object".to_string())
+        })?;
 
         // $1 = cutoff_ms, dynamic params start at $2
         let where_part = build_where(query_obj, 2);
@@ -104,8 +104,8 @@ FROM latest WHERE rn = 1 AND deleted = FALSE",
                 .try_get("payload")
                 .map_err(|e| MeshqlError::Storage(e.to_string()))?;
 
-            let mut stash: Stash =
-                serde_json::from_str(&payload_json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
+            let mut stash: Stash = serde_json::from_str(&payload_json)
+                .map_err(|e| MeshqlError::Parse(e.to_string()))?;
             stash.insert("id".to_string(), json!(id));
             results.push(stash);
         }
@@ -123,7 +123,9 @@ impl Searcher for PostgresSearcher {
         creds: &[String],
         at: i64,
     ) -> Result<Option<Stash>> {
-        let mut results = self.execute_query(template, args, creds, at, Some(1)).await?;
+        let mut results = self
+            .execute_query(template, args, creds, at, Some(1))
+            .await?;
         Ok(results.pop())
     }
 

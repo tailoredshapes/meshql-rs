@@ -2,8 +2,8 @@ use crate::query::build_where;
 use async_trait::async_trait;
 use handlebars::Handlebars;
 use meshql_core::{MeshqlError, Result, Searcher, Stash};
-use sqlx::Row;
 use sqlx::MySqlPool;
+use sqlx::Row;
 
 pub struct MysqlSearcher {
     pool: MySqlPool,
@@ -43,8 +43,8 @@ impl MysqlSearcher {
         at: i64,
         limit: Option<i64>,
     ) -> Result<Vec<Stash>> {
-        let json_val: serde_json::Value = serde_json::from_str(query_json)
-            .map_err(|e| MeshqlError::Parse(e.to_string()))?;
+        let json_val: serde_json::Value =
+            serde_json::from_str(query_json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
 
         let obj = json_val
             .as_object()

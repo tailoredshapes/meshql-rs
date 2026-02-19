@@ -175,10 +175,7 @@ pub async fn test_list_shows_only_latest_version(repo: &dyn Repository) {
     let all = repo.list(&star()).await.unwrap();
     let for_id: Vec<_> = all.iter().filter(|e| e.id == "latest-test-id").collect();
     assert_eq!(for_id.len(), 1, "Should only show latest version");
-    assert_eq!(
-        for_id[0].payload.get("version").unwrap(),
-        &json!("new")
-    );
+    assert_eq!(for_id[0].payload.get("version").unwrap(), &json!("new"));
 }
 
 // ---- Searcher Certification Tests ----

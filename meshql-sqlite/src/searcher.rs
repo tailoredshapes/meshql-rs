@@ -42,12 +42,10 @@ impl SqliteSearcher {
         .await
         .map_err(|e| MeshqlError::Storage(e.to_string()))?;
 
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_envelopes_id ON envelopes(id)",
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_envelopes_id ON envelopes(id)")
+            .execute(pool)
+            .await
+            .map_err(|e| MeshqlError::Storage(e.to_string()))?;
 
         Ok(())
     }
@@ -75,8 +73,7 @@ impl SqliteSearcher {
             .try_get("payload")
             .map_err(|e| MeshqlError::Storage(e.to_string()))?;
 
-        let created_at =
-            chrono::DateTime::from_timestamp_millis(created_at_ms).unwrap_or_default();
+        let created_at = chrono::DateTime::from_timestamp_millis(created_at_ms).unwrap_or_default();
         let authorized_tokens: Vec<String> =
             serde_json::from_str(&tokens_json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
         let payload: meshql_core::Stash =
@@ -104,9 +101,9 @@ impl SqliteSearcher {
         let query_val: serde_json::Value =
             serde_json::from_str(&query_json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
 
-        let query_obj = query_val
-            .as_object()
-            .ok_or_else(|| MeshqlError::Parse("Query template must produce a JSON object".to_string()))?;
+        let query_obj = query_val.as_object().ok_or_else(|| {
+            MeshqlError::Parse("Query template must produce a JSON object".to_string())
+        })?;
 
         let where_part = build_where(query_obj);
 
@@ -168,7 +165,9 @@ impl Searcher for SqliteSearcher {
         creds: &[String],
         at: i64,
     ) -> Result<Option<Stash>> {
-        let mut results = self.execute_query(template, args, creds, at, Some(1)).await?;
+        let mut results = self
+            .execute_query(template, args, creds, at, Some(1))
+            .await?;
         Ok(results.pop())
     }
 

@@ -3,10 +3,10 @@ use async_graphql::dynamic::{
 };
 use async_graphql_parser::parse_schema;
 use async_graphql_parser::types as pt;
-use axum::Router;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::post;
+use axum::Router;
 use chrono::Utc;
 use meshql_core::{RootConfig, Searcher, SingletonResolverConfig, Stash, VectorResolverConfig};
 use std::collections::HashMap;
@@ -117,8 +117,16 @@ fn base64_encode(data: &[u8]) -> String {
     let mut result = String::new();
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as usize;
-        let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
+        let b1 = if chunk.len() > 1 {
+            chunk[1] as usize
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            chunk[2] as usize
+        } else {
+            0
+        };
         result.push(alphabet[b0 >> 2] as char);
         result.push(alphabet[((b0 & 3) << 4) | (b1 >> 4)] as char);
         if chunk.len() > 1 {
@@ -158,7 +166,10 @@ fn singleton_resolver_field(
 ) -> Option<Field> {
     let entry = registry.get_for_url(&resolver.url)?;
     let searcher = Arc::clone(&entry.searcher);
-    let template = entry.root_config.get_template(&resolver.query_name)?.to_string();
+    let template = entry
+        .root_config
+        .get_template(&resolver.query_name)?
+        .to_string();
     let fk = resolver
         .foreign_key
         .clone()
@@ -175,7 +186,10 @@ fn singleton_resolver_field(
                 return Ok(FieldValue::NONE);
             }
             let mut args = Stash::new();
-            args.insert("id".to_string(), serde_json::Value::String(id_val.to_string()));
+            args.insert(
+                "id".to_string(),
+                serde_json::Value::String(id_val.to_string()),
+            );
             let at = Utc::now().timestamp_millis();
             match s.find(&tmpl, &args, &["*".to_string()], at).await {
                 Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stash))),
@@ -195,7 +209,10 @@ fn vector_resolver_field(
 ) -> Option<Field> {
     let entry = registry.get_for_url(&resolver.url)?;
     let searcher = Arc::clone(&entry.searcher);
-    let template = entry.root_config.get_template(&resolver.query_name)?.to_string();
+    let template = entry
+        .root_config
+        .get_template(&resolver.query_name)?
+        .to_string();
     let fk = resolver.foreign_key.clone();
 
     Some(Field::new(field_name, type_ref, move |ctx| {
@@ -209,7 +226,10 @@ fn vector_resolver_field(
                 None => parent.get("id").and_then(|v| v.as_str()).unwrap_or(""),
             };
             let mut args = Stash::new();
-            args.insert("id".to_string(), serde_json::Value::String(id_val.to_string()));
+            args.insert(
+                "id".to_string(),
+                serde_json::Value::String(id_val.to_string()),
+            );
             let at = Utc::now().timestamp_millis();
             match s.find_all(&tmpl, &args, &["*".to_string()], at).await {
                 Ok(stashes) => {
@@ -304,10 +324,8 @@ pub fn build_schema(
                         } else {
                             match s.find_all(&tmpl, &args, creds, at).await {
                                 Ok(stashes) => {
-                                    let items: Vec<FieldValue> = stashes
-                                        .into_iter()
-                                        .map(FieldValue::owned_any)
-                                        .collect();
+                                    let items: Vec<FieldValue> =
+                                        stashes.into_iter().map(FieldValue::owned_any).collect();
                                     Ok(Some(FieldValue::list(items)))
                                 }
                                 Err(e) => Err(async_graphql::Error::new(e.to_string())),

@@ -46,8 +46,8 @@ impl MerkqlRepository {
             for rec in batch {
                 let json: Value = serde_json::from_str(&rec.value)
                     .map_err(|e| MeshqlError::Parse(e.to_string()))?;
-                let env: Envelope = serde_json::from_value(json)
-                    .map_err(|e| MeshqlError::Parse(e.to_string()))?;
+                let env: Envelope =
+                    serde_json::from_value(json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
                 envelopes.push(env);
             }
         }
@@ -56,11 +56,7 @@ impl MerkqlRepository {
 
     /// Find the latest version of an envelope by ID, filtered by created_at milliseconds <= cutoff_ms.
     /// Uses millisecond precision to avoid sub-millisecond precision issues.
-    fn latest_for_id(
-        envelopes: &[Envelope],
-        id: &str,
-        cutoff_ms: i64,
-    ) -> Option<Envelope> {
+    fn latest_for_id(envelopes: &[Envelope], id: &str, cutoff_ms: i64) -> Option<Envelope> {
         envelopes
             .iter()
             .filter(|env| env.id == id && env.created_at.timestamp_millis() <= cutoff_ms)
@@ -82,8 +78,8 @@ impl MerkqlRepository {
 
     fn write_envelope(&self, envelope: &Envelope) -> Result<()> {
         let producer = merkql::broker::Broker::producer(&self.broker);
-        let value = serde_json::to_string(envelope)
-            .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+        let value =
+            serde_json::to_string(envelope).map_err(|e| MeshqlError::Storage(e.to_string()))?;
         let record = ProducerRecord::new(&self.topic, Some(envelope.id.clone()), value);
         producer
             .send(&record)
@@ -106,9 +102,7 @@ impl Repository for MerkqlRepository {
         at: Option<DateTime<Utc>>,
     ) -> Result<Option<Envelope>> {
         // Convert optional cutoff to milliseconds; use current time if None
-        let cutoff_ms = at
-            .unwrap_or_else(Utc::now)
-            .timestamp_millis();
+        let cutoff_ms = at.unwrap_or_else(Utc::now).timestamp_millis();
         // Add 1ms to handle sub-millisecond precision when reading "now"
         // (records created at the same millisecond should be included)
         let cutoff_ms = if at.is_none() {
@@ -157,11 +151,7 @@ impl Repository for MerkqlRepository {
         Ok(results)
     }
 
-    async fn read_many(
-        &self,
-        ids: &[String],
-        tokens: &[String],
-    ) -> Result<Vec<Envelope>> {
+    async fn read_many(&self, ids: &[String], tokens: &[String]) -> Result<Vec<Envelope>> {
         let mut results = Vec::new();
         for id in ids {
             if let Some(env) = self.read(id, tokens, None).await? {

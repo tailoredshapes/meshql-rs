@@ -1,7 +1,7 @@
-use meshql_core::{Auth, NoAuth, ServerConfig};
-use meshql_graphlette::{GraphletteRouter, ResolverRegistry, build_schema};
-use meshql_restlette::build_restlette_router;
 use axum::Router;
+use meshql_core::{Auth, NoAuth, ServerConfig};
+use meshql_graphlette::{build_schema, GraphletteRouter, ResolverRegistry};
+use meshql_restlette::build_restlette_router;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 

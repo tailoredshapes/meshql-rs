@@ -83,8 +83,10 @@ impl CertWorld {
             .insert("findById".into(), r#"{"id": "{{id}}"}"#.into());
         self.templates
             .insert("findByName".into(), r#"{"payload.name": "{{id}}"}"#.into());
-        self.templates
-            .insert("findAllByType".into(), r#"{"payload.type": "{{id}}"}"#.into());
+        self.templates.insert(
+            "findAllByType".into(),
+            r#"{"payload.type": "{{id}}"}"#.into(),
+        );
         self.templates.insert(
             "findByNameAndType".into(),
             r#"{"payload.name": "{{name}}", "payload.type": "{{type}}"}"#.into(),

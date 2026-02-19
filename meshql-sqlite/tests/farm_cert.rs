@@ -79,9 +79,21 @@ async fn build_farm_server() -> String {
     let coop_pool = make_pool().await;
     let hen_pool = make_pool().await;
 
-    let farm_repo = Arc::new(SqliteRepository::new_with_pool(farm_pool.clone()).await.unwrap());
-    let coop_repo = Arc::new(SqliteRepository::new_with_pool(coop_pool.clone()).await.unwrap());
-    let hen_repo = Arc::new(SqliteRepository::new_with_pool(hen_pool.clone()).await.unwrap());
+    let farm_repo = Arc::new(
+        SqliteRepository::new_with_pool(farm_pool.clone())
+            .await
+            .unwrap(),
+    );
+    let coop_repo = Arc::new(
+        SqliteRepository::new_with_pool(coop_pool.clone())
+            .await
+            .unwrap(),
+    );
+    let hen_repo = Arc::new(
+        SqliteRepository::new_with_pool(hen_pool.clone())
+            .await
+            .unwrap(),
+    );
 
     let farm_searcher: Arc<dyn meshql_core::Searcher> =
         Arc::new(SqliteSearcher::new_with_pool(farm_pool).await.unwrap());

@@ -1,4 +1,4 @@
-use bson::{Bson, Document, doc};
+use bson::{doc, Bson, Document};
 use chrono::DateTime;
 use meshql_core::{Envelope, Stash};
 use serde_json::{Map, Value};
@@ -81,7 +81,10 @@ pub fn json_to_bson(value: &Value) -> Bson {
         Value::String(s) => Bson::String(s.clone()),
         Value::Array(arr) => Bson::Array(arr.iter().map(json_to_bson).collect()),
         Value::Object(obj) => {
-            let doc: Document = obj.iter().map(|(k, v)| (k.clone(), json_to_bson(v))).collect();
+            let doc: Document = obj
+                .iter()
+                .map(|(k, v)| (k.clone(), json_to_bson(v)))
+                .collect();
             Bson::Document(doc)
         }
     }

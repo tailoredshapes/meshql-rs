@@ -19,9 +19,7 @@ async fn create_envelope_named(world: &mut CertWorld, name: String) {
     let id = format!("env-{}", uuid::Uuid::new_v4().simple());
     let env = Envelope::new(id, payload, CertWorld::star());
     let result = world.repo().create(env, &CertWorld::star()).await.unwrap();
-    world
-        .envelopes_by_name
-        .insert(name, result.clone());
+    world.envelopes_by_name.insert(name, result.clone());
     world.last_envelopes = vec![result];
 }
 
@@ -42,7 +40,10 @@ async fn create_n_envelopes(world: &mut CertWorld, count: usize, base_name: Stri
 
 #[when(regex = r#"^I read the envelope named "([^"]+)"$"#)]
 async fn read_by_name(world: &mut CertWorld, name: String) {
-    let env = world.envelopes_by_name.get(&name).expect("envelope not found");
+    let env = world
+        .envelopes_by_name
+        .get(&name)
+        .expect("envelope not found");
     let id = env.id.clone();
     let result = world
         .repo()
@@ -64,13 +65,12 @@ async fn list_all(world: &mut CertWorld) {
 
 #[when(regex = r#"^I remove the envelope named "([^"]+)"$"#)]
 async fn remove_by_name(world: &mut CertWorld, name: String) {
-    let env = world.envelopes_by_name.get(&name).expect("envelope not found");
+    let env = world
+        .envelopes_by_name
+        .get(&name)
+        .expect("envelope not found");
     let id = env.id.clone();
-    let result = world
-        .repo()
-        .remove(&id, &CertWorld::star())
-        .await
-        .unwrap();
+    let result = world.repo().remove(&id, &CertWorld::star()).await.unwrap();
     world.last_remove = result;
 }
 
@@ -129,7 +129,9 @@ async fn remove_many_by_prefix(world: &mut CertWorld, prefix: String) {
     world.remove_results = results;
 }
 
-#[when(regex = r#"^I create a version 1 envelope named "([^"]+)" with value "([^"]+)" dated (\d+) seconds ago$"#)]
+#[when(
+    regex = r#"^I create a version 1 envelope named "([^"]+)" with value "([^"]+)" dated (\d+) seconds ago$"#
+)]
 async fn create_v1(world: &mut CertWorld, name: String, value: String, seconds_ago: i64) {
     let mut payload = Stash::new();
     payload.insert("version".to_string(), json!(value));
@@ -144,9 +146,10 @@ async fn create_v1(world: &mut CertWorld, name: String, value: String, seconds_a
     let result = world.repo().create(env, &CertWorld::star()).await.unwrap();
     world.envelopes_by_name.insert(name.clone(), result);
     // Record the midpoint timestamp
-    world
-        .timestamps
-        .insert(format!("before_{name}"), Utc::now() - chrono::Duration::seconds(seconds_ago / 2));
+    world.timestamps.insert(
+        format!("before_{name}"),
+        Utc::now() - chrono::Duration::seconds(seconds_ago / 2),
+    );
 }
 
 #[when(regex = r#"^I create a version 2 envelope for "([^"]+)" with value "([^"]+)"$"#)]
@@ -162,7 +165,10 @@ async fn create_v2(world: &mut CertWorld, name: String, value: String) {
 
 #[when(regex = r#"^I read envelope "([^"]+)" at timestamp "([^"]+)"$"#)]
 async fn read_at_timestamp(world: &mut CertWorld, name: String, ts_key: String) {
-    let env = world.envelopes_by_name.get(&name).expect("envelope not found");
+    let env = world
+        .envelopes_by_name
+        .get(&name)
+        .expect("envelope not found");
     let id = env.id.clone();
     let at = *world.timestamps.get(&ts_key).expect("timestamp not found");
     let result = world
@@ -179,7 +185,10 @@ async fn read_at_timestamp(world: &mut CertWorld, name: String, ts_key: String) 
 
 #[when(regex = r#"^I read envelope "([^"]+)" now$"#)]
 async fn read_now(world: &mut CertWorld, name: String) {
-    let env = world.envelopes_by_name.get(&name).expect("envelope not found");
+    let env = world
+        .envelopes_by_name
+        .get(&name)
+        .expect("envelope not found");
     let id = env.id.clone();
     let result = world
         .repo()
@@ -193,7 +202,9 @@ async fn read_now(world: &mut CertWorld, name: String) {
     }));
 }
 
-#[when(regex = r#"^I create two versions of envelope "([^"]+)" with old value "([^"]+)" and new value "([^"]+)"$"#)]
+#[when(
+    regex = r#"^I create two versions of envelope "([^"]+)" with old value "([^"]+)" and new value "([^"]+)"$"#
+)]
 async fn create_two_versions(
     world: &mut CertWorld,
     name: String,
@@ -211,12 +222,20 @@ async fn create_two_versions(
         deleted: false,
         authorized_tokens: CertWorld::star(),
     };
-    world.repo().create(env_v1, &CertWorld::star()).await.unwrap();
+    world
+        .repo()
+        .create(env_v1, &CertWorld::star())
+        .await
+        .unwrap();
 
     let mut payload_v2 = Stash::new();
     payload_v2.insert("version".to_string(), json!(new_value));
     let env_v2 = Envelope::new(id.clone(), payload_v2, CertWorld::star());
-    let result_v2 = world.repo().create(env_v2, &CertWorld::star()).await.unwrap();
+    let result_v2 = world
+        .repo()
+        .create(env_v2, &CertWorld::star())
+        .await
+        .unwrap();
     world.envelopes_by_name.insert(name, result_v2);
 }
 
@@ -264,7 +283,11 @@ async fn assert_list_contains(world: &mut CertWorld, name: String) {
 #[then("the read should succeed")]
 async fn assert_read_success(world: &mut CertWorld) {
     assert!(
-        world.last_search_result.as_ref().map(|r| r.is_some()).unwrap_or(false),
+        world
+            .last_search_result
+            .as_ref()
+            .map(|r| r.is_some())
+            .unwrap_or(false),
         "expected a result but got None"
     );
 }
@@ -276,7 +299,10 @@ async fn assert_remove_true(world: &mut CertWorld) {
 
 #[then(regex = r#"^reading "([^"]+)" should return None$"#)]
 async fn assert_reading_returns_none(world: &mut CertWorld, name: String) {
-    let env = world.envelopes_by_name.get(&name).expect("envelope not found");
+    let env = world
+        .envelopes_by_name
+        .get(&name)
+        .expect("envelope not found");
     let id = env.id.clone();
     let result = world
         .repo()
@@ -330,9 +356,10 @@ async fn assert_list_one_for(world: &mut CertWorld, name: String) {
 #[then(regex = r#"^the listed version should have value "([^"]+)"$"#)]
 async fn assert_listed_version(world: &mut CertWorld, expected: String) {
     // Find the first envelope that has a "version" field
-    let found = world.last_envelopes.iter().find(|e| {
-        e.payload.contains_key("version")
-    });
+    let found = world
+        .last_envelopes
+        .iter()
+        .find(|e| e.payload.contains_key("version"));
     let env = found.expect("no envelope with version field");
     assert_eq!(
         env.payload.get("version").unwrap(),

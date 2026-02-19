@@ -28,13 +28,23 @@ async fn seed_data(world: &mut CertWorld) {
         let env = Envelope::new(id, payload, CertWorld::star());
         world.repo().create(env, &CertWorld::star()).await.unwrap();
         // Track in envelopes_by_name so findById substitution works
-        let stored = world.repo().read(id, &CertWorld::star(), None).await.unwrap().unwrap();
+        let stored = world
+            .repo()
+            .read(id, &CertWorld::star(), None)
+            .await
+            .unwrap()
+            .unwrap();
         world.envelopes_by_name.insert(name.to_string(), stored);
     }
 }
 
 #[when(regex = r#"^I search using template "([^"]+)" with arg "([^"]+)" = "([^"]+)"$"#)]
-async fn search_find(world: &mut CertWorld, template_name: String, arg_key: String, arg_value: String) {
+async fn search_find(
+    world: &mut CertWorld,
+    template_name: String,
+    arg_key: String,
+    arg_value: String,
+) {
     let template = world
         .templates
         .get(&template_name)
@@ -56,7 +66,12 @@ async fn search_find(world: &mut CertWorld, template_name: String, arg_key: Stri
 
     let result = world
         .searcher()
-        .find(&template, &args, &CertWorld::star(), Utc::now().timestamp_millis())
+        .find(
+            &template,
+            &args,
+            &CertWorld::star(),
+            Utc::now().timestamp_millis(),
+        )
         .await
         .unwrap();
     world.last_search_result = Some(result);
@@ -81,14 +96,24 @@ async fn search_find_multi_args(world: &mut CertWorld, template_name: String, ar
 
     let result = world
         .searcher()
-        .find(&template, &args, &CertWorld::star(), Utc::now().timestamp_millis())
+        .find(
+            &template,
+            &args,
+            &CertWorld::star(),
+            Utc::now().timestamp_millis(),
+        )
         .await
         .unwrap();
     world.last_search_result = Some(result);
 }
 
 #[when(regex = r#"^I search all using template "([^"]+)" with arg "([^"]+)" = "([^"]+)"$"#)]
-async fn search_find_all(world: &mut CertWorld, template_name: String, arg_key: String, arg_value: String) {
+async fn search_find_all(
+    world: &mut CertWorld,
+    template_name: String,
+    arg_key: String,
+    arg_value: String,
+) {
     let template = world
         .templates
         .get(&template_name)
@@ -100,7 +125,12 @@ async fn search_find_all(world: &mut CertWorld, template_name: String, arg_key: 
 
     let results = world
         .searcher()
-        .find_all(&template, &args, &CertWorld::star(), Utc::now().timestamp_millis())
+        .find_all(
+            &template,
+            &args,
+            &CertWorld::star(),
+            Utc::now().timestamp_millis(),
+        )
         .await
         .unwrap();
     world.search_results = results;
@@ -124,7 +154,12 @@ async fn search_find_all_multi(world: &mut CertWorld, template_name: String, arg
 
     let results = world
         .searcher()
-        .find_all(&template, &args, &CertWorld::star(), Utc::now().timestamp_millis())
+        .find_all(
+            &template,
+            &args,
+            &CertWorld::star(),
+            Utc::now().timestamp_millis(),
+        )
         .await
         .unwrap();
     world.search_results = results;
@@ -135,7 +170,12 @@ async fn search_literal(world: &mut CertWorld, template: String) {
     let args = Stash::new();
     let result = world
         .searcher()
-        .find(&template, &args, &CertWorld::star(), Utc::now().timestamp_millis())
+        .find(
+            &template,
+            &args,
+            &CertWorld::star(),
+            Utc::now().timestamp_millis(),
+        )
         .await
         .unwrap();
     world.last_search_result = Some(result);
@@ -146,7 +186,12 @@ async fn search_all_literal(world: &mut CertWorld, template: String) {
     let args = Stash::new();
     let results = world
         .searcher()
-        .find_all(&template, &args, &CertWorld::star(), Utc::now().timestamp_millis())
+        .find_all(
+            &template,
+            &args,
+            &CertWorld::star(),
+            Utc::now().timestamp_millis(),
+        )
         .await
         .unwrap();
     world.search_results = results;
@@ -158,7 +203,12 @@ async fn search_all_literal_limit(world: &mut CertWorld, template: String, limit
     args.insert("limit".to_string(), json!(limit));
     let results = world
         .searcher()
-        .find_all(&template, &args, &CertWorld::star(), Utc::now().timestamp_millis())
+        .find_all(
+            &template,
+            &args,
+            &CertWorld::star(),
+            Utc::now().timestamp_millis(),
+        )
         .await
         .unwrap();
     world.search_results = results;
@@ -219,7 +269,10 @@ async fn assert_results_empty(world: &mut CertWorld) {
 
 #[then("the search results should not be empty")]
 async fn assert_results_not_empty(world: &mut CertWorld) {
-    assert!(!world.search_results.is_empty(), "expected non-empty results");
+    assert!(
+        !world.search_results.is_empty(),
+        "expected non-empty results"
+    );
 }
 
 #[then(regex = r#"^all search results should have "([^"]+)" = "([^"]+)"$"#)]

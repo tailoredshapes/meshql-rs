@@ -9,9 +9,7 @@ async fn create_repo() -> (MysqlRepository, impl std::any::Any) {
     // testcontainers-modules mysql defaults: root with empty password, db = "test"
     let url = format!("mysql://root:@127.0.0.1:{port}/test");
     let table = format!("env_{}", uuid::Uuid::new_v4().simple());
-    let repo = MysqlRepository::new_with_table(&url, &table)
-        .await
-        .unwrap();
+    let repo = MysqlRepository::new_with_table(&url, &table).await.unwrap();
     (repo, container)
 }
 

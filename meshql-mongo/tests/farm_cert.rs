@@ -63,13 +63,37 @@ async fn build_farm_server(mongo_uri: &str) -> String {
     let db = format!("farm_{}", uuid::Uuid::new_v4().simple());
     let auth: Arc<dyn meshql_core::Auth> = Arc::new(NoAuth);
 
-    let farm_repo = Arc::new(MongoRepository::new(mongo_uri, &db, "farms", Arc::clone(&auth)).await.unwrap());
-    let coop_repo = Arc::new(MongoRepository::new(mongo_uri, &db, "coops", Arc::clone(&auth)).await.unwrap());
-    let hen_repo = Arc::new(MongoRepository::new(mongo_uri, &db, "hens", Arc::clone(&auth)).await.unwrap());
+    let farm_repo = Arc::new(
+        MongoRepository::new(mongo_uri, &db, "farms", Arc::clone(&auth))
+            .await
+            .unwrap(),
+    );
+    let coop_repo = Arc::new(
+        MongoRepository::new(mongo_uri, &db, "coops", Arc::clone(&auth))
+            .await
+            .unwrap(),
+    );
+    let hen_repo = Arc::new(
+        MongoRepository::new(mongo_uri, &db, "hens", Arc::clone(&auth))
+            .await
+            .unwrap(),
+    );
 
-    let farm_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(MongoSearcher::new(mongo_uri, &db, "farms", Arc::clone(&auth)).await.unwrap());
-    let coop_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(MongoSearcher::new(mongo_uri, &db, "coops", Arc::clone(&auth)).await.unwrap());
-    let hen_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(MongoSearcher::new(mongo_uri, &db, "hens", Arc::clone(&auth)).await.unwrap());
+    let farm_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(
+        MongoSearcher::new(mongo_uri, &db, "farms", Arc::clone(&auth))
+            .await
+            .unwrap(),
+    );
+    let coop_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(
+        MongoSearcher::new(mongo_uri, &db, "coops", Arc::clone(&auth))
+            .await
+            .unwrap(),
+    );
+    let hen_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(
+        MongoSearcher::new(mongo_uri, &db, "hens", Arc::clone(&auth))
+            .await
+            .unwrap(),
+    );
 
     let farm_config = RootConfig::builder()
         .singleton("getFarm", r#"{"id": "{{id}}"}"#)
@@ -95,21 +119,50 @@ async fn build_farm_server(mongo_uri: &str) -> String {
     let server_config = ServerConfig {
         port: 0,
         graphlettes: vec![
-            GraphletteConfig { path: "/farm/graph".into(), schema_text: FARM_GRAPHQL.into(), root_config: farm_config, searcher: farm_searcher },
-            GraphletteConfig { path: "/coop/graph".into(), schema_text: COOP_GRAPHQL.into(), root_config: coop_config, searcher: coop_searcher },
-            GraphletteConfig { path: "/hen/graph".into(), schema_text: HEN_GRAPHQL.into(), root_config: hen_config, searcher: hen_searcher },
+            GraphletteConfig {
+                path: "/farm/graph".into(),
+                schema_text: FARM_GRAPHQL.into(),
+                root_config: farm_config,
+                searcher: farm_searcher,
+            },
+            GraphletteConfig {
+                path: "/coop/graph".into(),
+                schema_text: COOP_GRAPHQL.into(),
+                root_config: coop_config,
+                searcher: coop_searcher,
+            },
+            GraphletteConfig {
+                path: "/hen/graph".into(),
+                schema_text: HEN_GRAPHQL.into(),
+                root_config: hen_config,
+                searcher: hen_searcher,
+            },
         ],
         restlettes: vec![
-            RestletteConfig { path: "/farm".into(), schema_json: serde_json::json!({}), repository: farm_repo },
-            RestletteConfig { path: "/coop".into(), schema_json: serde_json::json!({}), repository: coop_repo },
-            RestletteConfig { path: "/hen".into(), schema_json: serde_json::json!({}), repository: hen_repo },
+            RestletteConfig {
+                path: "/farm".into(),
+                schema_json: serde_json::json!({}),
+                repository: farm_repo,
+            },
+            RestletteConfig {
+                path: "/coop".into(),
+                schema_json: serde_json::json!({}),
+                repository: coop_repo,
+            },
+            RestletteConfig {
+                path: "/hen".into(),
+                schema_json: serde_json::json!({}),
+                repository: hen_repo,
+            },
         ],
     };
 
     let app = build_app(server_config).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
     format!("http://127.0.0.1:{}", addr.port())
 }
 

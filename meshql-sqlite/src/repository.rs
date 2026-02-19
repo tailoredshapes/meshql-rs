@@ -36,12 +36,10 @@ impl SqliteRepository {
         .await
         .map_err(|e| MeshqlError::Storage(e.to_string()))?;
 
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_envelopes_id ON envelopes(id)",
-        )
-        .execute(pool)
-        .await
-        .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_envelopes_id ON envelopes(id)")
+            .execute(pool)
+            .await
+            .map_err(|e| MeshqlError::Storage(e.to_string()))?;
 
         Ok(())
     }
@@ -90,8 +88,8 @@ impl Repository for SqliteRepository {
 
         let created_at_ms = env.created_at.timestamp_millis();
         let deleted_i: i64 = if env.deleted { 1 } else { 0 };
-        let tokens_json =
-            serde_json::to_string(&env.authorized_tokens).map_err(|e| MeshqlError::Parse(e.to_string()))?;
+        let tokens_json = serde_json::to_string(&env.authorized_tokens)
+            .map_err(|e| MeshqlError::Parse(e.to_string()))?;
         let payload_json =
             serde_json::to_string(&env.payload).map_err(|e| MeshqlError::Parse(e.to_string()))?;
 

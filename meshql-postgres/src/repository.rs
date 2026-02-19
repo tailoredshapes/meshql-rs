@@ -73,8 +73,7 @@ impl PostgresRepository {
             .try_get("payload")
             .map_err(|e| MeshqlError::Storage(e.to_string()))?;
 
-        let created_at =
-            DateTime::from_timestamp_millis(created_at_ms).unwrap_or_default();
+        let created_at = DateTime::from_timestamp_millis(created_at_ms).unwrap_or_default();
         let authorized_tokens: Vec<String> =
             serde_json::from_str(&tokens_json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
         let payload: meshql_core::Stash =
@@ -100,8 +99,8 @@ impl Repository for PostgresRepository {
         env.authorized_tokens = tokens.to_vec();
 
         let created_at_ms = env.created_at.timestamp_millis();
-        let tokens_json =
-            serde_json::to_string(&env.authorized_tokens).map_err(|e| MeshqlError::Parse(e.to_string()))?;
+        let tokens_json = serde_json::to_string(&env.authorized_tokens)
+            .map_err(|e| MeshqlError::Parse(e.to_string()))?;
         let payload_json =
             serde_json::to_string(&env.payload).map_err(|e| MeshqlError::Parse(e.to_string()))?;
 

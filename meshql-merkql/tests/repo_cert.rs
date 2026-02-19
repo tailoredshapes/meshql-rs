@@ -1,9 +1,9 @@
 use cucumber::World as _;
+use merkql::broker::{Broker, BrokerConfig};
 #[allow(unused_imports)]
 use meshql_cert::steps::repo;
 use meshql_cert::CertWorld;
 use meshql_merkql::MerkqlRepository;
-use merkql::broker::{Broker, BrokerConfig};
 use std::sync::Arc;
 
 #[tokio::main]

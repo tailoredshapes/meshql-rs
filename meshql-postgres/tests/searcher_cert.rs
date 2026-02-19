@@ -8,9 +8,13 @@ async fn create_searcher() -> (PostgresSearcher, impl std::any::Any) {
     let port = container.get_host_port_ipv4(5432).await.unwrap();
     let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
     let table = format!("env_{}", uuid::Uuid::new_v4().simple());
-    let repo = PostgresRepository::new_with_table(&url, &table).await.unwrap();
+    let repo = PostgresRepository::new_with_table(&url, &table)
+        .await
+        .unwrap();
     cert::seed_searcher_data(&repo).await;
-    let searcher = PostgresSearcher::new_with_table(&url, &table).await.unwrap();
+    let searcher = PostgresSearcher::new_with_table(&url, &table)
+        .await
+        .unwrap();
     (searcher, container)
 }
 

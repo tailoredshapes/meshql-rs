@@ -1,5 +1,5 @@
 use crate::converters::{document_to_envelope, envelope_to_document};
-use bson::{Bson, Document, doc};
+use bson::{doc, Bson, Document};
 use chrono::{DateTime, Utc};
 use meshql_core::{Auth, Envelope, MeshqlError, Repository, Result};
 use mongodb::Collection;

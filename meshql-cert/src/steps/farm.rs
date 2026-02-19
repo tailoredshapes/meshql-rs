@@ -21,7 +21,7 @@ fn resolve_ids(s: &str, ids: &HashMap<String, HashMap<String, String>>) -> Strin
             if let Some(close) = new_result[open_pos..].find('>') {
                 let placeholder = &new_result[open_pos..open_pos + close + 1];
                 let inner = &placeholder[1..placeholder.len() - 1]; // strip < >
-                // inner = "ids.entity_type.name"
+                                                                    // inner = "ids.entity_type.name"
                 let parts: Vec<&str> = inner.splitn(3, '.').collect();
                 if parts.len() == 3 {
                     let entity_type = parts[1];
@@ -51,24 +51,12 @@ async fn post_entity(
     data: Value,
 ) -> String {
     let url = format!("{server_addr}/{entity_type}");
-    let resp = client
-        .post(&url)
-        .json(&data)
-        .send()
-        .await
-        .unwrap();
+    let resp = client.post(&url).json(&data).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 201, "POST {entity_type} failed");
     // Discover the UUID via GraphQL list query
     resp.text().await.unwrap(); // consume body
-    // Use GET list to find the entity
-    let list_resp: Value = client
-        .get(&url)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+                                // Use GET list to find the entity
+    let list_resp: Value = client.get(&url).send().await.unwrap().json().await.unwrap();
     // Find entity by name match in the list
     let name = data.get("name").and_then(|v| v.as_str()).unwrap_or("");
     if let Some(items) = list_resp.as_array() {
@@ -106,11 +94,18 @@ async fn graphql_query(
 #[given("a MeshQL farm server is running")]
 async fn server_running(world: &mut CertWorld) {
     // The server addr is injected by the test runner before hook
-    assert!(world.server_addr.is_some(), "server_addr must be set before this step");
+    assert!(
+        world.server_addr.is_some(),
+        "server_addr must be set before this step"
+    );
 }
 
 #[given(regex = r#"^I have created "([^"]+)" entities:$"#)]
-async fn create_entities(world: &mut CertWorld, entity_type: String, step: &cucumber::gherkin::Step) {
+async fn create_entities(
+    world: &mut CertWorld,
+    entity_type: String,
+    step: &cucumber::gherkin::Step,
+) {
     let client = reqwest::Client::new();
     let server_addr = world.server_addr.clone().unwrap();
 
@@ -191,14 +186,18 @@ async fn query_graph_at_stamp(world: &mut CertWorld, entity_type: String, raw_qu
 #[then(regex = r#"^the response data\.([a-zA-Z]+)\.name should be "([^"]+)"$"#)]
 async fn assert_name(world: &mut CertWorld, field: String, expected: String) {
     let resp = world.farm_response.as_ref().expect("no response");
-    let value = resp["data"][&field]["name"].as_str().expect("no name field");
+    let value = resp["data"][&field]["name"]
+        .as_str()
+        .expect("no name field");
     assert_eq!(value, expected, "name mismatch");
 }
 
 #[then(regex = r#"^the response data\.([a-zA-Z]+)\.([a-zA-Z]+) should have (\d+) items?$"#)]
 async fn assert_array_count(world: &mut CertWorld, root: String, field: String, count: usize) {
     let resp = world.farm_response.as_ref().expect("no response");
-    let arr = resp["data"][&root][&field].as_array().expect("not an array");
+    let arr = resp["data"][&root][&field]
+        .as_array()
+        .expect("not an array");
     assert_eq!(arr.len(), count, "array count mismatch for {root}.{field}");
 }
 

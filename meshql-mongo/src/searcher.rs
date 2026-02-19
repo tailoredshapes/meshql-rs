@@ -1,5 +1,5 @@
 use crate::converters::{document_to_result_stash, stash_to_doc};
-use bson::{Bson, Document, doc};
+use bson::{doc, Bson, Document};
 use handlebars::Handlebars;
 use meshql_core::{Auth, MeshqlError, Result, Searcher, Stash};
 use mongodb::Collection;
@@ -49,8 +49,8 @@ impl MongoSearcher {
         let at_bson = bson::DateTime::from_millis(at);
         let bson_tokens: Vec<Bson> = creds.iter().map(|s| Bson::String(s.clone())).collect();
 
-        let json_val: serde_json::Value = serde_json::from_str(query_json)
-            .map_err(|e| MeshqlError::Parse(e.to_string()))?;
+        let json_val: serde_json::Value =
+            serde_json::from_str(query_json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
         let obj = json_val
             .as_object()
             .ok_or_else(|| MeshqlError::Parse("Query must be a JSON object".to_string()))?;

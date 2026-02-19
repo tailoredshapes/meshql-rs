@@ -55,11 +55,8 @@ pub trait Repository: Send + Sync {
         tokens: &[String],
     ) -> Result<Vec<Envelope>>;
     async fn read_many(&self, ids: &[String], tokens: &[String]) -> Result<Vec<Envelope>>;
-    async fn remove_many(
-        &self,
-        ids: &[String],
-        tokens: &[String],
-    ) -> Result<HashMap<String, bool>>;
+    async fn remove_many(&self, ids: &[String], tokens: &[String])
+        -> Result<HashMap<String, bool>>;
 }
 
 #[async_trait::async_trait]

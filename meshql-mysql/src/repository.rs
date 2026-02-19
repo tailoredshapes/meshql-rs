@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use meshql_core::{Envelope, MeshqlError, Repository, Result, Stash};
-use sqlx::Row;
 use sqlx::MySqlPool;
+use sqlx::Row;
 use std::collections::HashMap;
 
 pub struct MysqlRepository {
@@ -53,11 +53,11 @@ impl MysqlRepository {
         let created_at = DateTime::from_timestamp_millis(created_at_ms)
             .ok_or_else(|| MeshqlError::Parse(format!("Invalid timestamp: {created_at_ms}")))?;
 
-        let authorized_tokens: Vec<String> = serde_json::from_str(&tokens_json)
-            .map_err(|e| MeshqlError::Parse(e.to_string()))?;
+        let authorized_tokens: Vec<String> =
+            serde_json::from_str(&tokens_json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
 
-        let payload: Stash = serde_json::from_str(&payload_json)
-            .map_err(|e| MeshqlError::Parse(e.to_string()))?;
+        let payload: Stash =
+            serde_json::from_str(&payload_json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
 
         Ok(Envelope {
             id: env_id,
@@ -108,10 +108,7 @@ impl Repository for MysqlRepository {
         _tokens: &[String],
         at: Option<DateTime<Utc>>,
     ) -> Result<Option<Envelope>> {
-        let cutoff_ms = at
-            .unwrap_or_else(Utc::now)
-            .timestamp_millis()
-            + 1;
+        let cutoff_ms = at.unwrap_or_else(Utc::now).timestamp_millis() + 1;
 
         let table = &self.table;
         let sql = format!(
@@ -132,13 +129,29 @@ impl Repository for MysqlRepository {
         match row {
             None => Ok(None),
             Some(r) => {
-                let env_id: String = r.try_get("id").map_err(|e| MeshqlError::Storage(e.to_string()))?;
-                let created_at_ms: i64 = r.try_get("created_at_ms").map_err(|e| MeshqlError::Storage(e.to_string()))?;
-                let deleted_flag: i8 = r.try_get("deleted").map_err(|e| MeshqlError::Storage(e.to_string()))?;
-                let tokens_json: String = r.try_get("authorized_tokens").map_err(|e| MeshqlError::Storage(e.to_string()))?;
-                let payload_json: String = r.try_get("payload").map_err(|e| MeshqlError::Storage(e.to_string()))?;
+                let env_id: String = r
+                    .try_get("id")
+                    .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+                let created_at_ms: i64 = r
+                    .try_get("created_at_ms")
+                    .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+                let deleted_flag: i8 = r
+                    .try_get("deleted")
+                    .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+                let tokens_json: String = r
+                    .try_get("authorized_tokens")
+                    .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+                let payload_json: String = r
+                    .try_get("payload")
+                    .map_err(|e| MeshqlError::Storage(e.to_string()))?;
 
-                let env = Self::row_to_envelope(env_id, created_at_ms, deleted_flag, tokens_json, payload_json)?;
+                let env = Self::row_to_envelope(
+                    env_id,
+                    created_at_ms,
+                    deleted_flag,
+                    tokens_json,
+                    payload_json,
+                )?;
 
                 if env.deleted {
                     Ok(None)
@@ -167,13 +180,29 @@ impl Repository for MysqlRepository {
 
         let mut results = Vec::new();
         for r in rows {
-            let env_id: String = r.try_get("id").map_err(|e| MeshqlError::Storage(e.to_string()))?;
-            let created_at_ms: i64 = r.try_get("created_at_ms").map_err(|e| MeshqlError::Storage(e.to_string()))?;
-            let deleted_flag: i8 = r.try_get("deleted").map_err(|e| MeshqlError::Storage(e.to_string()))?;
-            let tokens_json: String = r.try_get("authorized_tokens").map_err(|e| MeshqlError::Storage(e.to_string()))?;
-            let payload_json: String = r.try_get("payload").map_err(|e| MeshqlError::Storage(e.to_string()))?;
+            let env_id: String = r
+                .try_get("id")
+                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+            let created_at_ms: i64 = r
+                .try_get("created_at_ms")
+                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+            let deleted_flag: i8 = r
+                .try_get("deleted")
+                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+            let tokens_json: String = r
+                .try_get("authorized_tokens")
+                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+            let payload_json: String = r
+                .try_get("payload")
+                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
 
-            let env = Self::row_to_envelope(env_id, created_at_ms, deleted_flag, tokens_json, payload_json)?;
+            let env = Self::row_to_envelope(
+                env_id,
+                created_at_ms,
+                deleted_flag,
+                tokens_json,
+                payload_json,
+            )?;
             results.push(env);
         }
 
