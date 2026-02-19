@@ -1,0 +1,47 @@
+# Mirrors the Java egg-economy docker-compose.yml infrastructure.
+# 3 MongoDB replica sets, same shard layout.
+#
+# Usage:
+#   docker compose -f performance/docker-compose.yml up -d
+#   cargo run -p meshql-mongo --features perf --bin perf_server --release
+#   bash performance/run-all.sh http://localhost:5088 smoke
+
+services:
+  # Shard 1: Actors (farms, coops, hens, containers, consumers)
+  mongodb-actors:
+    image: mongo:8
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: echo "try { rs.status() } catch(err) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongodb-actors:27017'}]}) }" | mongosh --quiet
+      interval: 5s
+      timeout: 30s
+      start_period: 0s
+      retries: 30
+
+  # Shard 2: Events (lay_report, storage_deposit, storage_withdrawal, container_transfer, consumption_report)
+  mongodb-events:
+    image: mongo:8
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27018:27017"
+    healthcheck:
+      test: echo "try { rs.status() } catch(err) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongodb-events:27017'}]}) }" | mongosh --quiet
+      interval: 5s
+      timeout: 30s
+      start_period: 0s
+      retries: 30
+
+  # Shard 3: Projections (container_inventory, hen_productivity, farm_output)
+  mongodb-projections:
+    image: mongo:8
+    command: ["--replSet", "rs0", "--bind_ip_all"]
+    ports:
+      - "27019:27017"
+    healthcheck:
+      test: echo "try { rs.status() } catch(err) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongodb-projections:27017'}]}) }" | mongosh --quiet
+      interval: 5s
+      timeout: 30s
+      start_period: 0s
+      retries: 30

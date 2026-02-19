@@ -56,6 +56,11 @@ impl ResolverRegistry {
         };
         self.entries.get(&path)
     }
+
+    /// Iterate over all registered entries.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &RegistryEntry)> {
+        self.entries.iter().map(|(k, v)| (k.as_str(), v))
+    }
 }
 
 /// Convert parser Type (struct with base+nullable) to dynamic TypeRef.
@@ -339,6 +344,84 @@ fn null_field(field_name: String, type_ref: TypeRef) -> Field {
     })
 }
 
+/// Search across all registry entries for a resolver matching the given field name.
+/// This enables deep federation: e.g. farm schema defines Coop type with a `hens` field,
+/// and the coop graphlette's root_config has an internal_vector_resolver for `hens`.
+fn find_resolver_in_registry(
+    field_name: &str,
+    type_ref: TypeRef,
+    registry: &ResolverRegistry,
+) -> Option<Field> {
+    for (_path, entry) in registry.iter() {
+        // Check internal singleton resolvers
+        if let Some(r) = entry
+            .root_config
+            .internal_singleton_resolvers
+            .iter()
+            .find(|r| r.field_name == field_name)
+        {
+            if let Some(f) = internal_singleton_resolver_field(
+                field_name.to_string(),
+                type_ref.clone(),
+                r,
+                registry,
+            ) {
+                return Some(f);
+            }
+        }
+        // Check internal vector resolvers
+        if let Some(r) = entry
+            .root_config
+            .internal_vector_resolvers
+            .iter()
+            .find(|r| {
+                r.field_name == field_name
+                    || r.field_name
+                        .rsplit_once('.')
+                        .map(|(_, suffix)| suffix == field_name)
+                        .unwrap_or(false)
+            })
+        {
+            if let Some(f) = internal_vector_resolver_field(
+                field_name.to_string(),
+                type_ref.clone(),
+                r,
+                registry,
+            ) {
+                return Some(f);
+            }
+        }
+        // Check singleton resolvers (HTTP-based)
+        if let Some(r) = entry
+            .root_config
+            .singleton_resolvers
+            .iter()
+            .find(|r| r.field_name == field_name)
+        {
+            if let Some(f) =
+                singleton_resolver_field(field_name.to_string(), type_ref.clone(), r, registry)
+            {
+                return Some(f);
+            }
+        }
+        // Check vector resolvers (HTTP-based)
+        if let Some(r) = entry.root_config.vector_resolvers.iter().find(|r| {
+            r.field_name == field_name
+                || r.field_name
+                    .rsplit_once('.')
+                    .map(|(_, suffix)| suffix == field_name)
+                    .unwrap_or(false)
+        }) {
+            if let Some(f) =
+                vector_resolver_field(field_name.to_string(), type_ref.clone(), r, registry)
+            {
+                return Some(f);
+            }
+        }
+    }
+    None
+}
+
 /// Build a complete dynamic Schema from a GraphQL SDL + RootConfig + Searcher.
 pub fn build_schema(
     schema_text: &str,
@@ -506,7 +589,10 @@ pub fn build_schema(
                     )
                     .unwrap_or_else(|| null_field(field_name, field_type))
                 } else {
-                    null_field(field_name, field_type)
+                    // Fall through to registry: check other graphlettes' root_configs
+                    // for resolvers that match this field (enables deep federation).
+                    find_resolver_in_registry(&field_name, field_type.clone(), registry)
+                        .unwrap_or_else(|| null_field(field_name, field_type))
                 };
 
                 entity_obj = entity_obj.field(field);
