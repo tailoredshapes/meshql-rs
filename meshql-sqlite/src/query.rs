@@ -1,5 +1,3 @@
-use serde_json;
-
 pub struct QueryPart {
     pub clause: String,
     pub values: Vec<String>,
