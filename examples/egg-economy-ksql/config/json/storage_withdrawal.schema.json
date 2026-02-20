@@ -1,0 +1,12 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["container_id", "reason", "eggs", "timestamp"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "container_id": {"type": "string", "format": "uuid"},
+        "reason": {"type": "string", "enum": ["spoilage", "breakage", "quality_check"]},
+        "eggs": {"type": "integer", "minimum": 1},
+        "timestamp": {"type": "string"}
+    }
+}

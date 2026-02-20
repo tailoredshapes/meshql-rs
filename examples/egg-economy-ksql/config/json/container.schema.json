@@ -1,0 +1,12 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["name", "container_type", "capacity", "zone"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "name": {"type": "string"},
+        "container_type": {"type": "string", "enum": ["warehouse", "market_shelf", "fridge"]},
+        "capacity": {"type": "integer", "minimum": 1},
+        "zone": {"type": "string"}
+    }
+}

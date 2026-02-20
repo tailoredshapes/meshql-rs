@@ -1,0 +1,28 @@
+scalar Date
+
+type Query {
+  getById(id: ID, at: Float): ContainerInventory
+  getByContainer(id: ID, at: Float): [ContainerInventory]
+  getAll(at: Float): [ContainerInventory]
+}
+
+type Container {
+  id: ID
+  name: String!
+  container_type: String
+  capacity: Int
+  zone: String
+}
+
+type ContainerInventory {
+  id: ID
+  container_id: String!
+  current_eggs: Int!
+  total_deposits: Int!
+  total_withdrawals: Int!
+  total_transfers_in: Int!
+  total_transfers_out: Int!
+  total_consumed: Int!
+  utilization_pct: Float
+  container: Container
+}

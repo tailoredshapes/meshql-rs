@@ -1,0 +1,16 @@
+[package]
+name = "egg-economy-ksql"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+meshql-core = { path = "../../meshql-core" }
+meshql-ksql = { path = "../../meshql-ksql" }
+meshql-graphlette = { path = "../../meshql-graphlette" }
+meshql-restlette = { path = "../../meshql-restlette" }
+meshql-server = { path = "../../meshql-server" }
+meshql-lambda = { path = "../../meshql-lambda" }
+lambda_http = "0.13"
+tokio = { workspace = true }
+serde_json = { workspace = true }
+anyhow = "1"

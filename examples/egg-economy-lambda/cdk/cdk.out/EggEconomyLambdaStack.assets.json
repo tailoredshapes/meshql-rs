@@ -1,0 +1,36 @@
+{
+  "version": "50.0.0",
+  "files": {
+    "0b5f21243dcc2213bfdf5b0948224314ba2914e5b5d571f599ac7cf6697efb4e": {
+      "displayName": "EggEconomy/Code",
+      "source": {
+        "path": "asset.0b5f21243dcc2213bfdf5b0948224314ba2914e5b5d571f599ac7cf6697efb4e",
+        "packaging": "zip"
+      },
+      "destinations": {
+        "890764614009-us-east-1-1ddb67b9": {
+          "bucketName": "cdk-hnb659fds-assets-890764614009-us-east-1",
+          "objectKey": "0b5f21243dcc2213bfdf5b0948224314ba2914e5b5d571f599ac7cf6697efb4e.zip",
+          "region": "us-east-1",
+          "assumeRoleArn": "arn:${AWS::Partition}:iam::890764614009:role/cdk-hnb659fds-file-publishing-role-890764614009-us-east-1"
+        }
+      }
+    },
+    "59b8ced5d27d823793cc28c9f5431fe4745345bb643c6fdd201c498aee891033": {
+      "displayName": "EggEconomyLambdaStack Template",
+      "source": {
+        "path": "EggEconomyLambdaStack.template.json",
+        "packaging": "file"
+      },
+      "destinations": {
+        "890764614009-us-east-1-8e402d7f": {
+          "bucketName": "cdk-hnb659fds-assets-890764614009-us-east-1",
+          "objectKey": "59b8ced5d27d823793cc28c9f5431fe4745345bb643c6fdd201c498aee891033.json",
+          "region": "us-east-1",
+          "assumeRoleArn": "arn:${AWS::Partition}:iam::890764614009:role/cdk-hnb659fds-file-publishing-role-890764614009-us-east-1"
+        }
+      }
+    }
+  },
+  "dockerImages": {}
+}

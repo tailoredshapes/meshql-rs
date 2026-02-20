@@ -2,7 +2,7 @@
 
 Define schemas. Wire resolvers. Get a full data API with REST, GraphQL, and federation — no boilerplate.
 
-MeshQL-RS is a Rust port of [MeshQL](https://github.com/tsmarsh/meshql), a framework for building data services where every entity gets its own REST endpoint, its own GraphQL endpoint, and federation resolvers that connect them. You write configuration, not plumbing.
+MeshQL-RS is the Rust implementation of [MeshQL](https://tailoredshapes.github.io/meshql/), a framework for building data services where every entity gets its own REST endpoint, its own GraphQL endpoint, and federation resolvers that connect them. You write configuration, not plumbing.
 
 ## What You Get
 
@@ -78,8 +78,9 @@ cargo run -p farm
 
 ## Also See
 
-- [MeshQL (Java)](https://github.com/tsmarsh/meshql) — the original Java 21 implementation
-- [MeshQL Documentation](https://tsmarsh.github.io/meshql/)
+- [MeshQL Documentation](https://tailoredshapes.github.io/meshql/) — product docs
+- [MeshQL-Java](https://github.com/tailoredshapes/meshql-java) — the Java 21 implementation
+- [MeshQL-TS](https://github.com/tailoredshapes/meshql-ts) — the TypeScript implementation (the OG)
 
 ## License
 

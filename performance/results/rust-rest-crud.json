@@ -1,0 +1,751 @@
+{
+    "setup_data": {
+        "consumers": [
+            {
+                "id": "0f60c5be-f284-40a3-9abc-7d78bf9486f1",
+                "name": "consumer-0-1771532001833"
+            },
+            {
+                "id": "83019e68-d5f9-400e-9926-4cc5c8997480",
+                "name": "consumer-2-1771532001834"
+            },
+            {
+                "id": "a45adbe4-ddff-4164-a6d4-9a2520785cad",
+                "name": "consumer-0-1771531996330"
+            },
+            {
+                "name": "consumer-1-1771532001834",
+                "id": "c4774d90-702e-40f4-aa33-b36cfb1a6a36"
+            },
+            {
+                "id": "f701ccf0-24fa-45a2-9d7c-20575b5177c9",
+                "name": "consumer-1-1771531996334"
+            }
+        ],
+        "containers": [
+            {
+                "id": "4902b915-0a88-482e-b728-6b680ed83561",
+                "name": "container-2-1771532001832"
+            },
+            {
+                "id": "4523841f-db36-4e20-ac11-26be36e91a60",
+                "name": "container-0-1771531996321"
+            },
+            {
+                "id": "bd40f6bb-e360-42f6-afbc-26dec348ea62",
+                "name": "container-1-1771532001831"
+            },
+            {
+                "id": "c923d1e1-35bc-4d69-9d04-8ca190e01ea5",
+                "name": "container-2-1771531996328"
+            },
+            {
+                "id": "dbcb736a-4289-4a76-9ce5-b7818acd2f03",
+                "name": "container-1-1771531996327"
+            },
+            {
+                "name": "container-0-1771532001830",
+                "id": "73ada061-0031-49b1-8a10-840b23885441"
+            }
+        ],
+        "coops": [
+            {
+                "id": "4326181b-1704-4355-a3fe-19cd3a5f3137",
+                "name": "coop-5-1771532001769"
+            },
+            {
+                "id": "bdca6d17-9316-4325-a6f6-6952a880a49e",
+                "name": "coop-7-1771532001771"
+            },
+            {
+                "id": "c8bf1996-7727-40f5-a23a-3ff3593d657c",
+                "name": "coop-8-1771532001772"
+            },
+            {
+                "id": "02ce0d01-17db-4610-914e-a4fe32cb9e0a",
+                "name": "coop-9-1771532001773"
+            },
+            {
+                "id": "4c13c86a-3f44-4c02-b9c3-3512f38ab2f3",
+                "name": "coop-0-1771531996305"
+            },
+            {
+                "id": "dbec7f1f-0fce-4c83-bb8c-707e90f391e5",
+                "name": "coop-10-1771532001774"
+            },
+            {
+                "id": "c528c53e-24cb-412c-99c8-fca862856578",
+                "name": "coop-3-1771532001767"
+            },
+            {
+                "name": "coop-0-1771531996307",
+                "id": "e6b8a5c4-bf90-4c59-9c0d-50639bc3abed"
+            },
+            {
+                "id": "db2d34c5-3b69-4914-8752-66ee27075151",
+                "name": "coop-0-1771532001763"
+            },
+            {
+                "id": "d933e1a1-d363-4837-a5b2-e3f759796f7a",
+                "name": "coop-1-1771531996306"
+            },
+            {
+                "id": "5bfe49dd-ed3d-434a-99ee-b0c59d065ca3",
+                "name": "coop-1-1771532001764"
+            },
+            {
+                "name": "coop-1-1771531996304",
+                "id": "9f77465c-2074-4dba-af76-b22a41ffa633"
+            },
+            {
+                "id": "8a3bc1b2-4bab-4a25-a55c-2248526b9128",
+                "name": "coop-0-1771531996299"
+            },
+            {
+                "name": "coop-6-1771532001770",
+                "id": "7644a73b-88cf-4ab5-b4a1-e7b02bed564d"
+            },
+            {
+                "id": "4b3cebc4-3149-4ad1-a431-820a2160d2f2",
+                "name": "coop-1-1771531996308"
+            },
+            {
+                "name": "coop-11-1771532001775",
+                "id": "ae60b8e1-ffba-44a9-a58f-b2feefbe287e"
+            },
+            {
+                "name": "coop-4-1771532001768",
+                "id": "fbc19a3a-3951-413b-b00f-7a850a47e0ab"
+            },
+            {
+                "id": "37cfa2b7-864d-440d-a36f-6e9c417ebf98",
+                "name": "coop-2-1771532001765"
+            }
+        ],
+        "farms": [
+            {
+                "id": "3adf1637-0bed-4d65-9e75-5bc0452a6494",
+                "name": "farm-901-1771531996293"
+            },
+            {
+                "id": "07b3fac9-0463-4e5e-a64b-a9500784de93",
+                "name": "farm-1-1771532001760"
+            },
+            {
+                "id": "9014a91c-b70c-45b1-8d82-1b96e31a5128",
+                "name": "farm-900-1771531996287"
+            },
+            {
+                "id": "5b6c8c3d-b5e9-4753-aa3b-192bb1837084",
+                "name": "farm-2-1771532001761"
+            },
+            {
+                "id": "917c84ca-c2ee-4c32-bc52-662db301ad2b",
+                "name": "updated-1771531996297"
+            },
+            {
+                "id": "6eeda1e4-a574-47f6-a1f7-7661fec2aed4",
+                "name": "farm-0-1771532001757"
+            }
+        ],
+        "hens": [
+            {
+                "id": "144e2fb2-b02d-4bb2-9d91-fad5fe297267",
+                "name": "hen-7-1771532001784"
+            },
+            {
+                "id": "d31b303d-93b3-4ec3-8753-5930300b74c9",
+                "name": "hen-37-1771532001813"
+            },
+            {
+                "id": "14ecccf7-5479-4277-bb49-dc0bee3533bb",
+                "name": "hen-1-1771531996320"
+            },
+            {
+                "id": "5036f98d-5411-4245-93a4-2b0cbf7710c1",
+                "name": "hen-28-1771532001804"
+            },
+            {
+                "id": "3067c583-7479-43c1-a1e4-956056a8b1f5",
+                "name": "hen-9-1771532001786"
+            },
+            {
+                "id": "856896ad-1929-40ad-a64b-51f584d7af5c",
+                "name": "hen-26-1771532001802"
+            },
+            {
+                "id": "6fb05b99-9cbe-4b6c-a1de-b3f0ee10c715",
+                "name": "hen-29-1771532001805"
+            },
+            {
+                "id": "fb3150c3-c092-4ae8-b713-98db88cfd275",
+                "name": "hen-0-1771531996320"
+            },
+            {
+                "id": "83fa9e0a-d59a-4bd3-b7f6-6669365faa61",
+                "name": "hen-1-1771531996314"
+            },
+            {
+                "id": "a2ca4bf0-a132-4959-aae1-39a05fd7bc18",
+                "name": "hen-52-1771532001828"
+            },
+            {
+                "id": "4d198952-343e-4381-b582-34350f8170b2",
+                "name": "hen-2-1771532001779"
+            },
+            {
+                "id": "f6e04163-42da-4f9a-970e-82a25cb86583",
+                "name": "hen-36-1771532001812"
+            },
+            {
+                "id": "3b0ba12a-2bfe-4233-85c9-bb715c65ce31",
+                "name": "hen-1-1771531996319"
+            },
+            {
+                "id": "86bf020e-d79d-4423-9418-715b730d2bba",
+                "name": "hen-40-1771532001816"
+            },
+            {
+                "id": "e2026826-befc-4575-a777-974e3b5435c7",
+                "name": "hen-33-1771532001809"
+            },
+            {
+                "id": "124cbc3a-8dc8-47a0-b3cb-3c3cc1121388",
+                "name": "hen-12-1771532001789"
+            },
+            {
+                "name": "hen-0-1771531996310",
+                "id": "637a4d66-5058-4a87-8196-82d9c9615d16"
+            },
+            {
+                "id": "b8b5909f-cbed-44e9-b4f1-c1e7c59f7323",
+                "name": "hen-42-1771532001818"
+            },
+            {
+                "id": "74b14880-8799-4b29-bd79-55fea2fc1f0f",
+                "name": "hen-1-1771531996317"
+            },
+            {
+                "name": "hen-53-1771532001828",
+                "id": "a3981b5d-5817-45be-bb2b-deb70d6000ac"
+            },
+            {
+                "id": "f889ed4b-c89c-48b3-8bce-d7c75212c626",
+                "name": "hen-49-1771532001825"
+            },
+            {
+                "name": "hen-35-1771532001811",
+                "id": "992668dd-6690-49c6-90d2-cdc986b0634d"
+            },
+            {
+                "id": "0314e1e9-6c33-4a8a-9849-fc337ecd10bd",
+                "name": "hen-32-1771532001808"
+            },
+            {
+                "id": "900173d9-4004-4258-88f9-deb0e39510ed",
+                "name": "hen-5-1771532001782"
+            },
+            {
+                "id": "65ccfe7b-1ab1-4f1b-96d0-b50715f3fb02",
+                "name": "hen-30-1771532001806"
+            },
+            {
+                "id": "d8aeca33-b180-4a6b-979d-78304f67d706",
+                "name": "hen-11-1771532001788"
+            },
+            {
+                "id": "ece92de5-5adc-4a65-ad1e-4a596000d986",
+                "name": "hen-6-1771532001783"
+            },
+            {
+                "id": "5328996a-234f-4a0a-b1f0-f63f4fecfaa2",
+                "name": "hen-0-1771531996318"
+            },
+            {
+                "id": "b7b959ed-89c8-4456-98c8-6285e6d30f57",
+                "name": "hen-0-1771531996319"
+            },
+            {
+                "id": "caf8c6e2-03a0-40ba-8e40-27aaff7d39a1",
+                "name": "hen-39-1771532001815"
+            },
+            {
+                "id": "beea9e41-90ac-40bd-ab23-2bb6df424d5b",
+                "name": "hen-51-1771532001827"
+            },
+            {
+                "name": "hen-20-1771532001796",
+                "id": "a48a251e-0732-461a-938d-2c81b02513b8"
+            },
+            {
+                "id": "85aa3b13-8e9b-4239-80c5-274e9a8936cc",
+                "name": "hen-3-1771532001780"
+            },
+            {
+                "id": "3efc32a8-1708-4152-9f40-37b6b61d5554",
+                "name": "hen-44-1771532001820"
+            },
+            {
+                "id": "af6a2684-c5e3-4f02-a696-ceebd403e122",
+                "name": "hen-10-1771532001787"
+            },
+            {
+                "id": "f8aee039-1993-4296-b1f2-35332feee050",
+                "name": "hen-21-1771532001797"
+            },
+            {
+                "id": "02f52a66-515d-4e97-99fa-c420a6acee10",
+                "name": "hen-1-1771531996316"
+            },
+            {
+                "id": "15b6f413-6541-4980-af62-a7e9629ad1aa",
+                "name": "hen-19-1771532001795"
+            },
+            {
+                "id": "362860b0-15e2-4c47-a0dc-474b53e24f07",
+                "name": "hen-38-1771532001814"
+            },
+            {
+                "id": "606f365e-75aa-49a3-888a-0cb0cef5244f",
+                "name": "hen-45-1771532001821"
+            },
+            {
+                "id": "c1f1bdf0-1a59-4e69-be79-d8967293c8fa",
+                "name": "hen-43-1771532001819"
+            },
+            {
+                "id": "32d9cb2e-b708-4c72-8890-f731c828fb1f",
+                "name": "hen-0-1771531996316"
+            },
+            {
+                "id": "815087b6-3c19-40f6-8621-74c3cbd6f9e1",
+                "name": "hen-1-1771532001778"
+            },
+            {
+                "id": "1a34285e-d3d5-4237-addd-a9a83c835189",
+                "name": "hen-4-1771532001781"
+            },
+            {
+                "id": "6b1bc220-e660-42f7-8e8b-84b4a5712c6d",
+                "name": "hen-31-1771532001807"
+            },
+            {
+                "id": "51c28e8a-ec4d-4587-9f9c-833f042a37f3",
+                "name": "hen-47-1771532001823"
+            },
+            {
+                "id": "d9b02ff0-2d29-490e-8580-fd76e7963ed1",
+                "name": "hen-24-1771532001800"
+            },
+            {
+                "name": "hen-18-1771532001794",
+                "id": "09dd5131-4cee-4b88-8231-b088cc602c8b"
+            },
+            {
+                "id": "bd230ea9-1b6d-4a8e-bbdb-7bc4b1a288e8",
+                "name": "hen-13-1771532001790"
+            },
+            {
+                "id": "7784c123-8202-4167-8f93-681eeae88cdb",
+                "name": "hen-16-1771532001792"
+            },
+            {
+                "id": "3ce52e36-5c0c-4b9c-99f7-78aa266ed4a5",
+                "name": "hen-22-1771532001798"
+            },
+            {
+                "id": "3addfbad-03c1-4454-b2e8-2159701d4cf6",
+                "name": "hen-14-1771532001791"
+            },
+            {
+                "id": "6cb4665a-de01-4f3b-b147-12402902c335",
+                "name": "hen-8-1771532001785"
+            },
+            {
+                "id": "9dbcc19b-7d27-4f50-8bd2-2d90534afd70",
+                "name": "hen-15-1771532001791"
+            },
+            {
+                "id": "f15b986b-08fe-44b0-b9b7-d8a818f19a68",
+                "name": "hen-0-1771532001777"
+            },
+            {
+                "id": "57486b6e-62ce-46ce-bebe-c3e09df8615b",
+                "name": "hen-34-1771532001810"
+            },
+            {
+                "id": "39597145-f909-4365-9c2b-db2198a72fca",
+                "name": "hen-27-1771532001803"
+            },
+            {
+                "name": "hen-0-1771531996315",
+                "id": "e18527b1-6eac-4e50-9095-74e8cef29969"
+            },
+            {
+                "name": "hen-48-1771532001824",
+                "id": "33278852-d494-4575-9bd9-d13a4500de3d"
+            },
+            {
+                "id": "215a4163-3b6a-41d5-ac63-621d7dcbdcb1",
+                "name": "hen-1-1771531996320"
+            },
+            {
+                "id": "28e83e3d-6298-4a3b-a4e3-002062f07ca6",
+                "name": "hen-41-1771532001817"
+            },
+            {
+                "id": "32ecf346-c859-4b51-bef6-321d223116b3",
+                "name": "hen-46-1771532001822"
+            },
+            {
+                "id": "9885162a-95df-49f9-ad22-1998cdb4001d",
+                "name": "hen-17-1771532001793"
+            },
+            {
+                "name": "hen-25-1771532001801",
+                "id": "11256dd7-1feb-48e3-939c-27da9db355c1"
+            },
+            {
+                "id": "1fce8983-e673-4fbb-8e9d-faa7db12c5a3",
+                "name": "hen-50-1771532001826"
+            },
+            {
+                "id": "e227ee65-cd0f-4648-846c-cace4abbfd59",
+                "name": "hen-23-1771532001799"
+            }
+        ]
+    },
+    "root_group": {
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {
+            "setup": {
+                "name": "setup",
+                "path": "::setup",
+                "id": "5c0f8025f7e0b6654089e5b00e950f1a",
+                "groups": {},
+                "checks": {
+                        "POST farm → 201": {
+                            "fails": 0,
+                            "name": "POST farm → 201",
+                            "path": "::setup::POST farm → 201",
+                            "id": "acf3501436b46a852429d00ec4790761",
+                            "passes": 3
+                        },
+                        "GraphQL farm → 200": {
+                            "name": "GraphQL farm → 200",
+                            "path": "::setup::GraphQL farm → 200",
+                            "id": "23e4f77e798eb79692c96f65d2d07ca8",
+                            "passes": 1,
+                            "fails": 0
+                        },
+                        "POST coop → 201": {
+                            "path": "::setup::POST coop → 201",
+                            "id": "7b472cec1d7ea0917106fc63fdaff6cd",
+                            "passes": 12,
+                            "fails": 0,
+                            "name": "POST coop → 201"
+                        },
+                        "GraphQL coop → 200": {
+                            "name": "GraphQL coop → 200",
+                            "path": "::setup::GraphQL coop → 200",
+                            "id": "39a968891feea6f74d95b5da1333d66d",
+                            "passes": 1,
+                            "fails": 0
+                        },
+                        "POST hen → 201": {
+                            "fails": 0,
+                            "name": "POST hen → 201",
+                            "path": "::setup::POST hen → 201",
+                            "id": "60c48218be5b86c534efc0108508d2f4",
+                            "passes": 54
+                        },
+                        "GraphQL hen → 200": {
+                            "path": "::setup::GraphQL hen → 200",
+                            "id": "41f9aa92f73ba9cca6c0b46cd37acf49",
+                            "passes": 1,
+                            "fails": 0,
+                            "name": "GraphQL hen → 200"
+                        },
+                        "POST container → 201": {
+                            "name": "POST container → 201",
+                            "path": "::setup::POST container → 201",
+                            "id": "a867cc89e64ea3dfa25a987e253ed555",
+                            "passes": 3,
+                            "fails": 0
+                        },
+                        "GraphQL container → 200": {
+                            "name": "GraphQL container → 200",
+                            "path": "::setup::GraphQL container → 200",
+                            "id": "1ede104a569e44f24a3ed6f591ee1e75",
+                            "passes": 1,
+                            "fails": 0
+                        },
+                        "POST consumer → 201": {
+                            "name": "POST consumer → 201",
+                            "path": "::setup::POST consumer → 201",
+                            "id": "0b376238b0d4fe9a01b9009b7dd9b276",
+                            "passes": 3,
+                            "fails": 0
+                        },
+                        "GraphQL consumer → 200": {
+                            "name": "GraphQL consumer → 200",
+                            "path": "::setup::GraphQL consumer → 200",
+                            "id": "402a2019a79f108629c24d663abcb259",
+                            "passes": 1,
+                            "fails": 0
+                        }
+                    }
+            },
+            "Create": {
+                "name": "Create",
+                "path": "::Create",
+                "id": "6a699f82581f942425f62b0a0253e28e",
+                "groups": {},
+                "checks": {
+                        "POST farm → 201": {
+                            "name": "POST farm → 201",
+                            "path": "::Create::POST farm → 201",
+                            "id": "efd59feea0cc9dc45382f702a4e2bb5a",
+                            "passes": 615,
+                            "fails": 0
+                        },
+                        "POST coop → 201": {
+                            "name": "POST coop → 201",
+                            "path": "::Create::POST coop → 201",
+                            "id": "fd07f39940c8cb9f66dc0c4987d25856",
+                            "passes": 615,
+                            "fails": 0
+                        },
+                        "POST container → 201": {
+                            "id": "6c5b0f1c4a4435c592bced0533c5a19a",
+                            "passes": 615,
+                            "fails": 0,
+                            "name": "POST container → 201",
+                            "path": "::Create::POST container → 201"
+                        },
+                        "POST consumer → 201": {
+                            "name": "POST consumer → 201",
+                            "path": "::Create::POST consumer → 201",
+                            "id": "06d683823783b6065f509948a4a8d144",
+                            "passes": 615,
+                            "fails": 0
+                        }
+                    }
+            },
+            "Read": {
+                "groups": {},
+                "checks": {
+                        "GET farm → 200": {
+                            "name": "GET farm → 200",
+                            "path": "::Read::GET farm → 200",
+                            "id": "8afa8eb005dcf0ae7636b87c68a1f2c2",
+                            "passes": 615,
+                            "fails": 0
+                        },
+                        "GET coop → 200": {
+                            "fails": 0,
+                            "name": "GET coop → 200",
+                            "path": "::Read::GET coop → 200",
+                            "id": "533b028cc15971dfec0800814691efd2",
+                            "passes": 615
+                        },
+                        "GET container → 200": {
+                            "name": "GET container → 200",
+                            "path": "::Read::GET container → 200",
+                            "id": "3f768f993a46ea6be8e8134eddd2690f",
+                            "passes": 615,
+                            "fails": 0
+                        },
+                        "GET consumer → 200": {
+                            "passes": 615,
+                            "fails": 0,
+                            "name": "GET consumer → 200",
+                            "path": "::Read::GET consumer → 200",
+                            "id": "fbed1b7d4f4fe023a95642f4fc0fd316"
+                        }
+                    },
+                "name": "Read",
+                "path": "::Read",
+                "id": "38722c09319112e1723362b789440f97"
+            },
+            "Update": {
+                "id": "05a48f8d6d1da5438a86e521dc631d60",
+                "groups": {},
+                "checks": {
+                        "PUT farm → 200": {
+                            "name": "PUT farm → 200",
+                            "path": "::Update::PUT farm → 200",
+                            "id": "311f670bfab4e5b8d17e799985ba6d0f",
+                            "passes": 615,
+                            "fails": 0
+                        },
+                        "PUT container → 200": {
+                            "name": "PUT container → 200",
+                            "path": "::Update::PUT container → 200",
+                            "id": "e0aff91ced68e4a3b2f71600dac8d331",
+                            "passes": 615,
+                            "fails": 0
+                        }
+                    },
+                "name": "Update",
+                "path": "::Update"
+            },
+            "Delete+Recreate": {
+                "path": "::Delete+Recreate",
+                "id": "f0e68dceba755581fb0576da20a26143",
+                "groups": {},
+                "checks": {
+                        "POST consumer → 201": {
+                            "passes": 1230,
+                            "fails": 0,
+                            "name": "POST consumer → 201",
+                            "path": "::Delete+Recreate::POST consumer → 201",
+                            "id": "deafabac5c0aca86275081da41f1afea"
+                        },
+                        "GraphQL consumer → 200": {
+                            "passes": 615,
+                            "fails": 0,
+                            "name": "GraphQL consumer → 200",
+                            "path": "::Delete+Recreate::GraphQL consumer → 200",
+                            "id": "7879df0eb3ad8361b1442f9e02b4d851"
+                        },
+                        "DELETE consumer → 200": {
+                            "name": "DELETE consumer → 200",
+                            "path": "::Delete+Recreate::DELETE consumer → 200",
+                            "id": "89e1f1fbf8ed7f73e5eb3f52f350c820",
+                            "passes": 568,
+                            "fails": 47
+                        }
+                    },
+                "name": "Delete+Recreate"
+            }
+        },
+        "checks": {},
+        "name": ""
+    },
+    "metrics": {
+        "http_req_waiting": {
+            "avg": 1.324289008285386,
+            "min": 0.128235,
+            "med": 0.868128,
+            "max": 20.501524,
+            "p(90)": 1.9534790000000004,
+            "p(95)": 3.913332299999989
+        },
+        "iteration_duration": {
+            "p(95)": 536.3588601,
+            "avg": 520.5221770552847,
+            "min": 508.729,
+            "med": 518.793165,
+            "max": 543.628716,
+            "p(90)": 532.3769598
+        },
+        "vus_max": {
+            "value": 10,
+            "min": 10,
+            "max": 10
+        },
+        "http_req_duration": {
+            "p(95)": 3.9354215999999873,
+            "avg": 1.3476266380897595,
+            "min": 0.144549,
+            "med": 0.889722,
+            "max": 20.531272,
+            "p(90)": 1.980058300000001,
+            "thresholds": {
+                "p(95)<500": false
+            }
+        },
+        "http_req_blocked": {
+            "avg": 0.0017209266973532817,
+            "min": 0.000349,
+            "med": 0.0014515,
+            "max": 0.206274,
+            "p(90)": 0.002208,
+            "p(95)": 0.002828
+        },
+        "vus": {
+            "max": 10,
+            "value": 1,
+            "min": 1
+        },
+        "http_reqs": {
+            "count": 8690,
+            "rate": 157.52458573369222
+        },
+        "data_sent": {
+            "count": 1613956,
+            "rate": 29256.357916272376
+        },
+        "data_received": {
+            "count": 35224659,
+            "rate": 638521.2677313663
+        },
+        "http_req_sending": {
+            "min": 0.001168,
+            "med": 0.004806,
+            "max": 0.295332,
+            "p(90)": 0.007914,
+            "p(95)": 0.011124549999999999,
+            "avg": 0.005547703107019573
+        },
+        "http_req_receiving": {
+            "min": 0.002931,
+            "med": 0.016134000000000003,
+            "max": 0.421883,
+            "p(90)": 0.0250224,
+            "p(95)": 0.03292624999999999,
+            "avg": 0.017789926697353287
+        },
+        "http_req_tls_handshaking": {
+            "avg": 0,
+            "min": 0,
+            "med": 0,
+            "max": 0,
+            "p(90)": 0,
+            "p(95)": 0
+        },
+        "checks": {
+            "passes": 8643,
+            "fails": 47,
+            "value": 0.9945914844649022
+        },
+        "http_req_connecting": {
+            "min": 0,
+            "med": 0,
+            "max": 0.152809,
+            "p(90)": 0,
+            "p(95)": 0,
+            "avg": 0.00011567974683544305
+        },
+        "group_duration": {
+            "avg": 5.006511416666678,
+            "min": 0.724958,
+            "med": 3.5515274999999997,
+            "max": 25.283514,
+            "p(90)": 11.044977399999999,
+            "p(95)": 15.882016649999967
+        },
+        "http_req_duration{expected_response:true}": {
+            "min": 0.144549,
+            "med": 0.888958,
+            "max": 20.531272,
+            "p(90)": 1.9826186000000001,
+            "p(95)": 3.951771599999997,
+            "avg": 1.348761382853176
+        },
+        "iterations": {
+            "count": 615,
+            "rate": 11.148172638230232
+        },
+        "http_req_failed": {
+            "fails": 8643,
+            "passes": 47,
+            "thresholds": {
+                "rate<0.01": false
+            },
+            "value": 0.005408515535097813
+        }
+    }
+}

@@ -1,0 +1,16 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["hen_id", "farm_id"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "hen_id": {"type": "string", "format": "uuid"},
+        "farm_id": {"type": "string", "format": "uuid"},
+        "eggs_today": {"type": "integer", "minimum": 0},
+        "eggs_week": {"type": "integer", "minimum": 0},
+        "eggs_month": {"type": "integer", "minimum": 0},
+        "avg_per_week": {"type": "number", "minimum": 0},
+        "total_eggs": {"type": "integer", "minimum": 0},
+        "quality_rate": {"type": "number", "minimum": 0, "maximum": 1}
+    }
+}

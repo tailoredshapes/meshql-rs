@@ -15,7 +15,9 @@ members = [
     "examples/egg-economy-sap",
     "examples/egg-economy-salesforce",
     "meshql-lambda",
+    "meshql-ksql",
     "examples/egg-economy-lambda",
+    "examples/egg-economy-ksql",
 ]
 resolver = "2"
 

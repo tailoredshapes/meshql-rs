@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars and fill in values
+# aws_region             = "us-east-1"
+# confluent_cloud_region = "us-east-1"
+# environment_name       = "egg-economy"
+# lambda_memory_size     = 512
+# lambda_timeout         = 30
+# topic_partitions       = 6
+
+# Required environment variables:
+# export CONFLUENT_CLOUD_API_KEY="..."
+# export CONFLUENT_CLOUD_API_SECRET="..."
+# export AWS_ACCESS_KEY_ID="..."
+# export AWS_SECRET_ACCESS_KEY="..."

@@ -1,0 +1,14 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["hen_id", "coop_id", "farm_id", "eggs", "timestamp"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "hen_id": {"type": "string", "format": "uuid"},
+        "coop_id": {"type": "string", "format": "uuid"},
+        "farm_id": {"type": "string", "format": "uuid"},
+        "eggs": {"type": "integer", "minimum": 0},
+        "timestamp": {"type": "string"},
+        "quality": {"type": "string", "enum": ["grade_a", "grade_b", "cracked", "double_yolk"]}
+    }
+}
