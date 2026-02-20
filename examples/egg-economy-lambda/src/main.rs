@@ -16,12 +16,9 @@ const CONSUMER_GRAPHQL: &str = include_str!("../config/graph/consumer.graphql");
 // Events
 const LAY_REPORT_GRAPHQL: &str = include_str!("../config/graph/lay_report.graphql");
 const STORAGE_DEPOSIT_GRAPHQL: &str = include_str!("../config/graph/storage_deposit.graphql");
-const STORAGE_WITHDRAWAL_GRAPHQL: &str =
-    include_str!("../config/graph/storage_withdrawal.graphql");
-const CONTAINER_TRANSFER_GRAPHQL: &str =
-    include_str!("../config/graph/container_transfer.graphql");
-const CONSUMPTION_REPORT_GRAPHQL: &str =
-    include_str!("../config/graph/consumption_report.graphql");
+const STORAGE_WITHDRAWAL_GRAPHQL: &str = include_str!("../config/graph/storage_withdrawal.graphql");
+const CONTAINER_TRANSFER_GRAPHQL: &str = include_str!("../config/graph/container_transfer.graphql");
+const CONSUMPTION_REPORT_GRAPHQL: &str = include_str!("../config/graph/consumption_report.graphql");
 
 // Projections
 const CONTAINER_INVENTORY_GRAPHQL: &str =
@@ -41,12 +38,9 @@ const CONSUMER_JSON: &str = include_str!("../config/json/consumer.schema.json");
 // Events
 const LAY_REPORT_JSON: &str = include_str!("../config/json/lay_report.schema.json");
 const STORAGE_DEPOSIT_JSON: &str = include_str!("../config/json/storage_deposit.schema.json");
-const STORAGE_WITHDRAWAL_JSON: &str =
-    include_str!("../config/json/storage_withdrawal.schema.json");
-const CONTAINER_TRANSFER_JSON: &str =
-    include_str!("../config/json/container_transfer.schema.json");
-const CONSUMPTION_REPORT_JSON: &str =
-    include_str!("../config/json/consumption_report.schema.json");
+const STORAGE_WITHDRAWAL_JSON: &str = include_str!("../config/json/storage_withdrawal.schema.json");
+const CONTAINER_TRANSFER_JSON: &str = include_str!("../config/json/container_transfer.schema.json");
+const CONSUMPTION_REPORT_JSON: &str = include_str!("../config/json/consumption_report.schema.json");
 
 // Projections
 const CONTAINER_INVENTORY_JSON: &str =
@@ -56,8 +50,7 @@ const FARM_OUTPUT_JSON: &str = include_str!("../config/json/farm_output.schema.j
 
 #[tokio::main]
 async fn main() -> Result<(), lambda_http::Error> {
-    let efs_path =
-        std::env::var("EFS_MOUNT_PATH").unwrap_or_else(|_| "/mnt/efs".to_string());
+    let efs_path = std::env::var("EFS_MOUNT_PATH").unwrap_or_else(|_| "/mnt/efs".to_string());
 
     let broker = Broker::open(BrokerConfig::new(PathBuf::from(&efs_path)))
         .map_err(|e| lambda_http::Error::from(format!("broker open failed: {e}")))?;
@@ -87,8 +80,7 @@ async fn main() -> Result<(), lambda_http::Error> {
     // Projections
     let container_inventory_repo =
         Arc::new(MerkqlRepository::new(broker.clone(), "container_inventory"));
-    let hen_productivity_repo =
-        Arc::new(MerkqlRepository::new(broker.clone(), "hen_productivity"));
+    let hen_productivity_repo = Arc::new(MerkqlRepository::new(broker.clone(), "hen_productivity"));
     let farm_output_repo = Arc::new(MerkqlRepository::new(broker.clone(), "farm_output"));
 
     // ===== SEARCHERS (13) =====
