@@ -44,7 +44,7 @@ export class EggEconomyLambdaStack extends cdk.Stack {
       runtime: lambda.Runtime.PROVIDED_AL2023,
       architecture: lambda.Architecture.ARM_64,
       handler: "bootstrap",
-      code: lambda.Code.fromAsset("../target/lambda/egg-economy-lambda/"),
+      code: lambda.Code.fromAsset("../../../target/lambda/egg-economy-lambda/"),
       memorySize: 512,
       timeout: cdk.Duration.seconds(30),
       filesystem: lambda.FileSystem.fromEfsAccessPoint(accessPoint, "/mnt/efs"),
