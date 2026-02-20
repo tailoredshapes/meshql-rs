@@ -50,7 +50,7 @@ async fn post_entity(
     entity_type: &str,
     data: Value,
 ) -> String {
-    let url = format!("{server_addr}/{entity_type}");
+    let url = format!("{server_addr}/{entity_type}/api");
     let resp = client.post(&url).json(&data).send().await.unwrap();
     assert_eq!(resp.status().as_u16(), 201, "POST {entity_type} failed");
     resp.text().await.unwrap(); // consume body
@@ -185,7 +185,7 @@ async fn update_entity(world: &mut CertWorld, entity_type: String, name: String,
     let resolved_data = resolve_ids(&raw_data, &world.ids);
     let data: Value = serde_json::from_str(&resolved_data).expect("invalid JSON");
 
-    let url = format!("{server_addr}/{entity_type}/{id}");
+    let url = format!("{server_addr}/{entity_type}/api/{id}");
     let resp = client.put(&url).json(&data).send().await.unwrap();
     assert!(resp.status().is_success(), "PUT {entity_type}/{id} failed");
 }

@@ -147,17 +147,17 @@ async fn build_farm_server() -> String {
         ],
         restlettes: vec![
             RestletteConfig {
-                path: "/farm".into(),
+                path: "/farm/api".into(),
                 schema_json: serde_json::json!({}),
                 repository: farm_repo,
             },
             RestletteConfig {
-                path: "/coop".into(),
+                path: "/coop/api".into(),
                 schema_json: serde_json::json!({}),
                 repository: coop_repo,
             },
             RestletteConfig {
-                path: "/hen".into(),
+                path: "/hen/api".into(),
                 schema_json: serde_json::json!({}),
                 repository: hen_repo,
             },

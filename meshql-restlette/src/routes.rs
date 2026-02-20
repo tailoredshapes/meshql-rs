@@ -102,7 +102,10 @@ async fn delete_handler(
 ) -> impl IntoResponse {
     let tokens = state.auth.get_auth_token(&Stash::new());
     match state.repo.remove(&id, &tokens).await {
-        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(true) => {
+            let body = serde_json::json!({"id": id, "status": "deleted"});
+            (StatusCode::OK, Json(body)).into_response()
+        }
         Ok(false) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }

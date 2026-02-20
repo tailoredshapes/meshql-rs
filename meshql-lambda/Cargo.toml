@@ -1,0 +1,11 @@
+[package]
+name = "meshql-lambda"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+meshql-server = { path = "../meshql-server" }
+meshql-core = { path = "../meshql-core" }
+lambda_http = "0.13"
+tokio = { workspace = true }
+anyhow = "1"

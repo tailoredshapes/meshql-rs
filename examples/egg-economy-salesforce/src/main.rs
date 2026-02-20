@@ -441,78 +441,78 @@ async fn main() -> anyhow::Result<()> {
         restlettes: vec![
             // Actors (5)
             RestletteConfig {
-                path: "/farm".to_string(),
+                path: "/farm/api".to_string(),
                 schema_json: serde_json::from_str(FARM_JSON).expect("invalid farm JSON schema"),
                 repository: farm_repo,
             },
             RestletteConfig {
-                path: "/coop".to_string(),
+                path: "/coop/api".to_string(),
                 schema_json: serde_json::from_str(COOP_JSON).expect("invalid coop JSON schema"),
                 repository: coop_repo,
             },
             RestletteConfig {
-                path: "/hen".to_string(),
+                path: "/hen/api".to_string(),
                 schema_json: serde_json::from_str(HEN_JSON).expect("invalid hen JSON schema"),
                 repository: hen_repo,
             },
             RestletteConfig {
-                path: "/container".to_string(),
+                path: "/container/api".to_string(),
                 schema_json: serde_json::from_str(CONTAINER_JSON)
                     .expect("invalid container JSON schema"),
                 repository: container_repo,
             },
             RestletteConfig {
-                path: "/consumer".to_string(),
+                path: "/consumer/api".to_string(),
                 schema_json: serde_json::from_str(CONSUMER_JSON)
                     .expect("invalid consumer JSON schema"),
                 repository: consumer_repo,
             },
             // Events (5)
             RestletteConfig {
-                path: "/lay_report".to_string(),
+                path: "/lay_report/api".to_string(),
                 schema_json: serde_json::from_str(LAY_REPORT_JSON)
                     .expect("invalid lay_report JSON schema"),
                 repository: lay_report_repo,
             },
             RestletteConfig {
-                path: "/storage_deposit".to_string(),
+                path: "/storage_deposit/api".to_string(),
                 schema_json: serde_json::from_str(STORAGE_DEPOSIT_JSON)
                     .expect("invalid storage_deposit JSON schema"),
                 repository: storage_deposit_repo,
             },
             RestletteConfig {
-                path: "/storage_withdrawal".to_string(),
+                path: "/storage_withdrawal/api".to_string(),
                 schema_json: serde_json::from_str(STORAGE_WITHDRAWAL_JSON)
                     .expect("invalid storage_withdrawal JSON schema"),
                 repository: storage_withdrawal_repo,
             },
             RestletteConfig {
-                path: "/container_transfer".to_string(),
+                path: "/container_transfer/api".to_string(),
                 schema_json: serde_json::from_str(CONTAINER_TRANSFER_JSON)
                     .expect("invalid container_transfer JSON schema"),
                 repository: container_transfer_repo,
             },
             RestletteConfig {
-                path: "/consumption_report".to_string(),
+                path: "/consumption_report/api".to_string(),
                 schema_json: serde_json::from_str(CONSUMPTION_REPORT_JSON)
                     .expect("invalid consumption_report JSON schema"),
                 repository: consumption_report_repo,
             },
             // Projections (3)
             RestletteConfig {
-                path: "/container_inventory".to_string(),
+                path: "/container_inventory/api".to_string(),
                 schema_json: serde_json::from_str(CONTAINER_INVENTORY_JSON)
                     .expect("invalid container_inventory JSON schema"),
                 repository: container_inventory_repo,
             },
             RestletteConfig {
-                path: "/hen_productivity".to_string(),
+                path: "/hen_productivity/api".to_string(),
                 schema_json: serde_json::from_str(HEN_PRODUCTIVITY_JSON)
                     .expect("invalid hen_productivity JSON schema"),
                 repository: hen_productivity_repo,
             },
             RestletteConfig {
-                path: "/farm_output".to_string(),
+                path: "/farm_output/api".to_string(),
                 schema_json: serde_json::from_str(FARM_OUTPUT_JSON)
                     .expect("invalid farm_output JSON schema"),
                 repository: farm_output_repo,

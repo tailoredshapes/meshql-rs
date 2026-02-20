@@ -1,6 +1,7 @@
+use merkql::broker::{Broker, BrokerConfig};
 use meshql_core::{GraphletteConfig, NoAuth, RestletteConfig, RootConfig, ServerConfig};
-use meshql_mongo::{MongoRepository, MongoSearcher};
-use meshql_server::run;
+use meshql_merkql::{MerkqlRepository, MerkqlSearcher};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 // --- GraphQL schemas (13) ---
@@ -15,9 +16,12 @@ const CONSUMER_GRAPHQL: &str = include_str!("../config/graph/consumer.graphql");
 // Events
 const LAY_REPORT_GRAPHQL: &str = include_str!("../config/graph/lay_report.graphql");
 const STORAGE_DEPOSIT_GRAPHQL: &str = include_str!("../config/graph/storage_deposit.graphql");
-const STORAGE_WITHDRAWAL_GRAPHQL: &str = include_str!("../config/graph/storage_withdrawal.graphql");
-const CONTAINER_TRANSFER_GRAPHQL: &str = include_str!("../config/graph/container_transfer.graphql");
-const CONSUMPTION_REPORT_GRAPHQL: &str = include_str!("../config/graph/consumption_report.graphql");
+const STORAGE_WITHDRAWAL_GRAPHQL: &str =
+    include_str!("../config/graph/storage_withdrawal.graphql");
+const CONTAINER_TRANSFER_GRAPHQL: &str =
+    include_str!("../config/graph/container_transfer.graphql");
+const CONSUMPTION_REPORT_GRAPHQL: &str =
+    include_str!("../config/graph/consumption_report.graphql");
 
 // Projections
 const CONTAINER_INVENTORY_GRAPHQL: &str =
@@ -37,9 +41,12 @@ const CONSUMER_JSON: &str = include_str!("../config/json/consumer.schema.json");
 // Events
 const LAY_REPORT_JSON: &str = include_str!("../config/json/lay_report.schema.json");
 const STORAGE_DEPOSIT_JSON: &str = include_str!("../config/json/storage_deposit.schema.json");
-const STORAGE_WITHDRAWAL_JSON: &str = include_str!("../config/json/storage_withdrawal.schema.json");
-const CONTAINER_TRANSFER_JSON: &str = include_str!("../config/json/container_transfer.schema.json");
-const CONSUMPTION_REPORT_JSON: &str = include_str!("../config/json/consumption_report.schema.json");
+const STORAGE_WITHDRAWAL_JSON: &str =
+    include_str!("../config/json/storage_withdrawal.schema.json");
+const CONTAINER_TRANSFER_JSON: &str =
+    include_str!("../config/json/container_transfer.schema.json");
+const CONSUMPTION_REPORT_JSON: &str =
+    include_str!("../config/json/consumption_report.schema.json");
 
 // Projections
 const CONTAINER_INVENTORY_JSON: &str =
@@ -48,149 +55,75 @@ const HEN_PRODUCTIVITY_JSON: &str = include_str!("../config/json/hen_productivit
 const FARM_OUTPUT_JSON: &str = include_str!("../config/json/farm_output.schema.json");
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let mongo_uri =
-        std::env::var("MONGO_URI").unwrap_or_else(|_| "mongodb://127.0.0.1:27017".to_string());
-    let prefix = std::env::var("PREFIX").unwrap_or_else(|_| "eggs".to_string());
-    let env = std::env::var("ENV").unwrap_or_else(|_| "development".to_string());
-    let port: u16 = std::env::var("PORT")
-        .unwrap_or_else(|_| "5088".to_string())
-        .parse()
-        .expect("PORT must be a valid u16");
+async fn main() -> Result<(), lambda_http::Error> {
+    let efs_path =
+        std::env::var("EFS_MOUNT_PATH").unwrap_or_else(|_| "/mnt/efs".to_string());
 
-    let db_name = format!("{}_{}", prefix, env);
+    let broker = Broker::open(BrokerConfig::new(PathBuf::from(&efs_path)))
+        .map_err(|e| lambda_http::Error::from(format!("broker open failed: {e}")))?;
 
     let auth: Arc<dyn meshql_core::Auth> = Arc::new(NoAuth);
+    let _ = auth; // NoAuth used implicitly via MerkqlRepository
 
     // ===== REPOSITORIES (13) =====
 
     // Actors
-    let farm_repo =
-        Arc::new(MongoRepository::new(&mongo_uri, &db_name, "farm", Arc::clone(&auth)).await?);
-    let coop_repo =
-        Arc::new(MongoRepository::new(&mongo_uri, &db_name, "coop", Arc::clone(&auth)).await?);
-    let hen_repo =
-        Arc::new(MongoRepository::new(&mongo_uri, &db_name, "hen", Arc::clone(&auth)).await?);
-    let container_repo =
-        Arc::new(MongoRepository::new(&mongo_uri, &db_name, "container", Arc::clone(&auth)).await?);
-    let consumer_repo =
-        Arc::new(MongoRepository::new(&mongo_uri, &db_name, "consumer", Arc::clone(&auth)).await?);
+    let farm_repo = Arc::new(MerkqlRepository::new(broker.clone(), "farm"));
+    let coop_repo = Arc::new(MerkqlRepository::new(broker.clone(), "coop"));
+    let hen_repo = Arc::new(MerkqlRepository::new(broker.clone(), "hen"));
+    let container_repo = Arc::new(MerkqlRepository::new(broker.clone(), "container"));
+    let consumer_repo = Arc::new(MerkqlRepository::new(broker.clone(), "consumer"));
 
     // Events
-    let lay_report_repo = Arc::new(
-        MongoRepository::new(&mongo_uri, &db_name, "lay_report", Arc::clone(&auth)).await?,
-    );
-    let storage_deposit_repo = Arc::new(
-        MongoRepository::new(&mongo_uri, &db_name, "storage_deposit", Arc::clone(&auth)).await?,
-    );
-    let storage_withdrawal_repo = Arc::new(
-        MongoRepository::new(
-            &mongo_uri,
-            &db_name,
-            "storage_withdrawal",
-            Arc::clone(&auth),
-        )
-        .await?,
-    );
-    let container_transfer_repo = Arc::new(
-        MongoRepository::new(
-            &mongo_uri,
-            &db_name,
-            "container_transfer",
-            Arc::clone(&auth),
-        )
-        .await?,
-    );
-    let consumption_report_repo = Arc::new(
-        MongoRepository::new(
-            &mongo_uri,
-            &db_name,
-            "consumption_report",
-            Arc::clone(&auth),
-        )
-        .await?,
-    );
+    let lay_report_repo = Arc::new(MerkqlRepository::new(broker.clone(), "lay_report"));
+    let storage_deposit_repo = Arc::new(MerkqlRepository::new(broker.clone(), "storage_deposit"));
+    let storage_withdrawal_repo =
+        Arc::new(MerkqlRepository::new(broker.clone(), "storage_withdrawal"));
+    let container_transfer_repo =
+        Arc::new(MerkqlRepository::new(broker.clone(), "container_transfer"));
+    let consumption_report_repo =
+        Arc::new(MerkqlRepository::new(broker.clone(), "consumption_report"));
 
     // Projections
-    let container_inventory_repo = Arc::new(
-        MongoRepository::new(
-            &mongo_uri,
-            &db_name,
-            "container_inventory",
-            Arc::clone(&auth),
-        )
-        .await?,
-    );
-    let hen_productivity_repo = Arc::new(
-        MongoRepository::new(&mongo_uri, &db_name, "hen_productivity", Arc::clone(&auth)).await?,
-    );
-    let farm_output_repo = Arc::new(
-        MongoRepository::new(&mongo_uri, &db_name, "farm_output", Arc::clone(&auth)).await?,
-    );
+    let container_inventory_repo =
+        Arc::new(MerkqlRepository::new(broker.clone(), "container_inventory"));
+    let hen_productivity_repo =
+        Arc::new(MerkqlRepository::new(broker.clone(), "hen_productivity"));
+    let farm_output_repo = Arc::new(MerkqlRepository::new(broker.clone(), "farm_output"));
 
     // ===== SEARCHERS (13) =====
 
     // Actors
     let farm_searcher: Arc<dyn meshql_core::Searcher> =
-        Arc::new(MongoSearcher::new(&mongo_uri, &db_name, "farm", Arc::clone(&auth)).await?);
+        Arc::new(MerkqlSearcher::new(broker.clone(), "farm"));
     let coop_searcher: Arc<dyn meshql_core::Searcher> =
-        Arc::new(MongoSearcher::new(&mongo_uri, &db_name, "coop", Arc::clone(&auth)).await?);
+        Arc::new(MerkqlSearcher::new(broker.clone(), "coop"));
     let hen_searcher: Arc<dyn meshql_core::Searcher> =
-        Arc::new(MongoSearcher::new(&mongo_uri, &db_name, "hen", Arc::clone(&auth)).await?);
+        Arc::new(MerkqlSearcher::new(broker.clone(), "hen"));
     let container_searcher: Arc<dyn meshql_core::Searcher> =
-        Arc::new(MongoSearcher::new(&mongo_uri, &db_name, "container", Arc::clone(&auth)).await?);
+        Arc::new(MerkqlSearcher::new(broker.clone(), "container"));
     let consumer_searcher: Arc<dyn meshql_core::Searcher> =
-        Arc::new(MongoSearcher::new(&mongo_uri, &db_name, "consumer", Arc::clone(&auth)).await?);
+        Arc::new(MerkqlSearcher::new(broker.clone(), "consumer"));
 
     // Events
     let lay_report_searcher: Arc<dyn meshql_core::Searcher> =
-        Arc::new(MongoSearcher::new(&mongo_uri, &db_name, "lay_report", Arc::clone(&auth)).await?);
-    let storage_deposit_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(
-        MongoSearcher::new(&mongo_uri, &db_name, "storage_deposit", Arc::clone(&auth)).await?,
-    );
-    let storage_withdrawal_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(
-        MongoSearcher::new(
-            &mongo_uri,
-            &db_name,
-            "storage_withdrawal",
-            Arc::clone(&auth),
-        )
-        .await?,
-    );
-    let container_transfer_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(
-        MongoSearcher::new(
-            &mongo_uri,
-            &db_name,
-            "container_transfer",
-            Arc::clone(&auth),
-        )
-        .await?,
-    );
-    let consumption_report_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(
-        MongoSearcher::new(
-            &mongo_uri,
-            &db_name,
-            "consumption_report",
-            Arc::clone(&auth),
-        )
-        .await?,
-    );
+        Arc::new(MerkqlSearcher::new(broker.clone(), "lay_report"));
+    let storage_deposit_searcher: Arc<dyn meshql_core::Searcher> =
+        Arc::new(MerkqlSearcher::new(broker.clone(), "storage_deposit"));
+    let storage_withdrawal_searcher: Arc<dyn meshql_core::Searcher> =
+        Arc::new(MerkqlSearcher::new(broker.clone(), "storage_withdrawal"));
+    let container_transfer_searcher: Arc<dyn meshql_core::Searcher> =
+        Arc::new(MerkqlSearcher::new(broker.clone(), "container_transfer"));
+    let consumption_report_searcher: Arc<dyn meshql_core::Searcher> =
+        Arc::new(MerkqlSearcher::new(broker.clone(), "consumption_report"));
 
     // Projections
-    let container_inventory_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(
-        MongoSearcher::new(
-            &mongo_uri,
-            &db_name,
-            "container_inventory",
-            Arc::clone(&auth),
-        )
-        .await?,
-    );
-    let hen_productivity_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(
-        MongoSearcher::new(&mongo_uri, &db_name, "hen_productivity", Arc::clone(&auth)).await?,
-    );
+    let container_inventory_searcher: Arc<dyn meshql_core::Searcher> =
+        Arc::new(MerkqlSearcher::new(broker.clone(), "container_inventory"));
+    let hen_productivity_searcher: Arc<dyn meshql_core::Searcher> =
+        Arc::new(MerkqlSearcher::new(broker.clone(), "hen_productivity"));
     let farm_output_searcher: Arc<dyn meshql_core::Searcher> =
-        Arc::new(MongoSearcher::new(&mongo_uri, &db_name, "farm_output", Arc::clone(&auth)).await?);
+        Arc::new(MerkqlSearcher::new(broker.clone(), "farm_output"));
 
     // ===== ROOT CONFIGS (13) =====
 
@@ -354,7 +287,7 @@ async fn main() -> anyhow::Result<()> {
     // ===== SERVER CONFIG =====
 
     let config = ServerConfig {
-        port,
+        port: 0, // unused in Lambda mode
         graphlettes: vec![
             // Actors (5)
             GraphletteConfig {
@@ -520,5 +453,5 @@ async fn main() -> anyhow::Result<()> {
         ],
     };
 
-    run(config).await
+    meshql_lambda::run_lambda(config).await
 }

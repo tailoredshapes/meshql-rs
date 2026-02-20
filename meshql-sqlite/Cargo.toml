@@ -14,6 +14,22 @@ tokio = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
 
+[[bin]]
+name = "perf_server"
+path = "src/bin/perf_server.rs"
+required-features = ["perf"]
+
+[features]
+perf = ["dep:meshql-server", "dep:anyhow"]
+
+[dependencies.meshql-server]
+path = "../meshql-server"
+optional = true
+
+[dependencies.anyhow]
+version = "1"
+optional = true
+
 [dev-dependencies]
 tokio = { workspace = true }
 uuid = { workspace = true }

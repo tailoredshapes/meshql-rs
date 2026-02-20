@@ -568,69 +568,69 @@ async fn build_egg_economy_server() -> String {
         restlettes: vec![
             // Actors
             RestletteConfig {
-                path: "/farm".into(),
+                path: "/farm/api".into(),
                 schema_json: serde_json::json!({}),
                 repository: farm.repo,
             },
             RestletteConfig {
-                path: "/coop".into(),
+                path: "/coop/api".into(),
                 schema_json: serde_json::json!({}),
                 repository: coop.repo,
             },
             RestletteConfig {
-                path: "/hen".into(),
+                path: "/hen/api".into(),
                 schema_json: serde_json::json!({}),
                 repository: hen.repo,
             },
             RestletteConfig {
-                path: "/container".into(),
+                path: "/container/api".into(),
                 schema_json: serde_json::json!({}),
                 repository: container.repo,
             },
             RestletteConfig {
-                path: "/consumer".into(),
+                path: "/consumer/api".into(),
                 schema_json: serde_json::json!({}),
                 repository: consumer.repo,
             },
             // Events
             RestletteConfig {
-                path: "/lay_report".into(),
+                path: "/lay_report/api".into(),
                 schema_json: serde_json::json!({}),
                 repository: lay_report.repo,
             },
             RestletteConfig {
-                path: "/storage_deposit".into(),
+                path: "/storage_deposit/api".into(),
                 schema_json: serde_json::json!({}),
                 repository: storage_deposit.repo,
             },
             RestletteConfig {
-                path: "/storage_withdrawal".into(),
+                path: "/storage_withdrawal/api".into(),
                 schema_json: serde_json::json!({}),
                 repository: storage_withdrawal.repo,
             },
             RestletteConfig {
-                path: "/container_transfer".into(),
+                path: "/container_transfer/api".into(),
                 schema_json: serde_json::json!({}),
                 repository: container_transfer.repo,
             },
             RestletteConfig {
-                path: "/consumption_report".into(),
+                path: "/consumption_report/api".into(),
                 schema_json: serde_json::json!({}),
                 repository: consumption_report.repo,
             },
             // Projections
             RestletteConfig {
-                path: "/container_inventory".into(),
+                path: "/container_inventory/api".into(),
                 schema_json: serde_json::json!({}),
                 repository: container_inventory.repo,
             },
             RestletteConfig {
-                path: "/hen_productivity".into(),
+                path: "/hen_productivity/api".into(),
                 schema_json: serde_json::json!({}),
                 repository: hen_productivity.repo,
             },
             RestletteConfig {
-                path: "/farm_output".into(),
+                path: "/farm_output/api".into(),
                 schema_json: serde_json::json!({}),
                 repository: farm_output.repo,
             },

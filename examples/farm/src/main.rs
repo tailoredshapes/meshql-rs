@@ -106,22 +106,22 @@ async fn main() -> anyhow::Result<()> {
         ],
         restlettes: vec![
             RestletteConfig {
-                path: "/farm".to_string(),
+                path: "/farm/api".to_string(),
                 schema_json: serde_json::json!({}),
                 repository: farm_repo,
             },
             RestletteConfig {
-                path: "/coop".to_string(),
+                path: "/coop/api".to_string(),
                 schema_json: serde_json::json!({}),
                 repository: coop_repo,
             },
             RestletteConfig {
-                path: "/hen".to_string(),
+                path: "/hen/api".to_string(),
                 schema_json: serde_json::json!({}),
                 repository: hen_repo,
             },
             RestletteConfig {
-                path: "/lay_report".to_string(),
+                path: "/lay_report/api".to_string(),
                 schema_json: serde_json::json!({}),
                 repository: lay_report_repo,
             },
