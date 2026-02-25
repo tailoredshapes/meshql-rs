@@ -25,8 +25,7 @@ async fn main() -> anyhow::Result<()> {
         .expect("FUNCTIONS_CUSTOMHANDLER_PORT must be a valid port number");
 
     // merkql data directory — Azure Files NFS mount, or local for dev
-    let data_path =
-        std::env::var("MERKQL_DATA_PATH").unwrap_or_else(|_| "/mnt/merkql".to_string());
+    let data_path = std::env::var("MERKQL_DATA_PATH").unwrap_or_else(|_| "/mnt/merkql".to_string());
 
     let broker = Broker::open(BrokerConfig::new(PathBuf::from(&data_path)))?;
 
@@ -69,7 +68,12 @@ async fn main() -> anyhow::Result<()> {
         .vector("getHens", "{}")
         .vector("getHensByCoop", r#"{"payload.coopId": "{{id}}"}"#)
         .internal_singleton_resolver("coop", Some("coopId"), "getCoop", "/coop/graph")
-        .internal_vector_resolver("layReports", None, "getLayReportsByHen", "/lay_report/graph")
+        .internal_vector_resolver(
+            "layReports",
+            None,
+            "getLayReportsByHen",
+            "/lay_report/graph",
+        )
         .build();
 
     let lay_report_config = RootConfig::builder()
@@ -81,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
 
     // ===== SERVER CONFIG =====
     let config = ServerConfig {
-        port: port.into(),
+        port,
         graphlettes: vec![
             GraphletteConfig {
                 path: "/farm/graph".to_string(),
