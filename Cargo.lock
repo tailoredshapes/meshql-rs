@@ -1274,6 +1274,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "farm-azure"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "merkql",
+ "meshql-core",
+ "meshql-graphlette",
+ "meshql-merkql",
+ "meshql-restlette",
+ "meshql-server",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "fast_chemail"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

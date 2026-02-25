@@ -1,0 +1,18 @@
+type LayReport {
+    id: ID
+    henId: String
+    date: String
+    count: Int
+    hen: Hen
+}
+
+type Hen {
+    id: ID
+    name: String
+}
+
+type Query {
+    getLayReport(id: ID, at: Int): LayReport
+    getLayReports(date: String, at: Int): [LayReport]
+    getLayReportsByHen(id: ID, at: Int): [LayReport]
+}

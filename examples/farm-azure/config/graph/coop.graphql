@@ -1,0 +1,24 @@
+type Coop {
+    id: ID
+    farmId: String
+    name: String
+    capacity: Int
+    farm: Farm
+    hens: [Hen]
+}
+
+type Farm {
+    id: ID
+    name: String
+}
+
+type Hen {
+    id: ID
+    name: String
+}
+
+type Query {
+    getCoop(id: ID, at: Int): Coop
+    getCoops(name: String, at: Int): [Coop]
+    getCoopsByFarm(id: ID, at: Int): [Coop]
+}

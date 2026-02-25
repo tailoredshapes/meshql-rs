@@ -19,6 +19,7 @@ members = [
     "meshql-ksql",
     "examples/egg-economy-lambda",
     "examples/egg-economy-ksql",
+    "examples/farm-azure",
 ]
 resolver = "2"
 
