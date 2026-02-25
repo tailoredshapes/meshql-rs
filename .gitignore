@@ -1,2 +1,4 @@
 /target
-examples/egg-economy-ksql/terraform/.terraform/
+node_modules/
+.terraform/
+terraform.tfstate*
