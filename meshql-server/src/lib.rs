@@ -5,11 +5,20 @@ use meshql_restlette::build_restlette_router;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
+pub use meshql_restlette::{
+    build_restlette_router_ext, PostCreateFn, SideEffectContext, ValidatorContext, ValidatorFn,
+};
+
 /// Build the full Axum application from a ServerConfig.
 ///
 /// For each graphlette, it also registers the searcher in the ResolverRegistry under the
 /// graphlette path so that inter-graphlette resolution works without HTTP.
 pub async fn build_app(config: ServerConfig) -> anyhow::Result<Router> {
+    build_app_ext(config, Router::new()).await
+}
+
+/// Build the full Axum application, merging in extra custom routes.
+pub async fn build_app_ext(config: ServerConfig, extra: Router) -> anyhow::Result<Router> {
     let mut registry = ResolverRegistry::new();
 
     // First pass: register all graphlette searchers in the registry
@@ -34,6 +43,9 @@ pub async fn build_app(config: ServerConfig) -> anyhow::Result<Router> {
         app = app.merge(router);
     }
 
+    // Merge extra custom routes (these take priority for overlapping paths)
+    app = extra.merge(app);
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
@@ -46,6 +58,16 @@ pub async fn build_app(config: ServerConfig) -> anyhow::Result<Router> {
 pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
     let port = config.port;
     let app = build_app(config).await?;
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    println!("meshql-rs listening on port {port}");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Start the server with extra custom routes.
+pub async fn run_ext(config: ServerConfig, extra: Router) -> anyhow::Result<()> {
+    let port = config.port;
+    let app = build_app_ext(config, extra).await?;
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     println!("meshql-rs listening on port {port}");
     axum::serve(listener, app).await?;
