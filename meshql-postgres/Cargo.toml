@@ -24,7 +24,7 @@ meshql-server = { path = "../meshql-server" }
 meshql-graphlette = { path = "../meshql-graphlette" }
 meshql-restlette = { path = "../meshql-restlette" }
 cucumber = "0.21"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 axum = { workspace = true }
 
 [[test]]
