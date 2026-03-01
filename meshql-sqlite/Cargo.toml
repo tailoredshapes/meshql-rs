@@ -56,3 +56,7 @@ harness = false
 [[test]]
 name = "egg_economy_cert"
 harness = false
+
+[[test]]
+name = "cross_service_cert"
+harness = false

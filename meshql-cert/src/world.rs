@@ -40,6 +40,7 @@ pub struct CertWorld {
 
     // Farm E2E state
     pub server_addr: Option<String>,
+    pub server_b_addr: Option<String>,
     pub ids: HashMap<String, HashMap<String, String>>,
     pub first_stamp_ms: Option<i64>,
     pub farm_response: Option<serde_json::Value>,
@@ -66,6 +67,7 @@ impl CertWorld {
             test_start: Utc::now(),
             templates: HashMap::new(),
             server_addr: None,
+            server_b_addr: None,
             ids: HashMap::new(),
             first_stamp_ms: None,
             farm_response: None,

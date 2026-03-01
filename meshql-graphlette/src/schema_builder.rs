@@ -15,6 +15,142 @@ use meshql_core::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn is_http_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
+/// Collect the names of the selected subfields from the GraphQL execution context.
+fn collect_selected_fields(ctx: &async_graphql::dynamic::ResolverContext) -> Vec<String> {
+    ctx.ctx
+        .field()
+        .selection_set()
+        .map(|f| f.name().to_string())
+        .collect()
+}
+
+/// Build a GraphQL selection set string from field names: "{ id name address }"
+fn build_selection_set(fields: &[String]) -> String {
+    if fields.is_empty() {
+        "{ id }".to_string()
+    } else {
+        format!("{{ {} }}", fields.join(" "))
+    }
+}
+
+/// Execute a singleton HTTP GraphQL query against a remote service.
+async fn http_graphql_find(
+    client: &reqwest::Client,
+    url: &str,
+    query_name: &str,
+    id_val: &str,
+    at: i64,
+    fields: &[String],
+) -> Result<Option<Stash>, async_graphql::Error> {
+    let selection = build_selection_set(fields);
+    let query = format!("{{ {query_name}(id: \"{id_val}\", at: {at}) {selection} }}");
+    let body = serde_json::json!({ "query": query });
+    let resp = client
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("HTTP resolver error: {e}")))?;
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("HTTP resolver parse error: {e}")))?;
+
+    // Surface errors from the remote service
+    if let Some(errors) = json.get("errors") {
+        if !errors.is_null() {
+            if let Some(arr) = errors.as_array() {
+                if !arr.is_empty() {
+                    let msgs: Vec<String> = arr
+                        .iter()
+                        .filter_map(|e| e.get("message").and_then(|m| m.as_str()).map(String::from))
+                        .collect();
+                    return Err(async_graphql::Error::new(format!(
+                        "Remote GraphQL error: {}",
+                        msgs.join("; ")
+                    )));
+                }
+            }
+        }
+    }
+
+    let data = json.get("data").and_then(|d| d.get(query_name));
+
+    match data {
+        Some(serde_json::Value::Object(map)) => Ok(Some(map.clone())),
+        Some(serde_json::Value::Null) | None => Ok(None),
+        Some(other) => Err(async_graphql::Error::new(format!(
+            "Unexpected response shape for {query_name}: {other}"
+        ))),
+    }
+}
+
+/// Execute a vector HTTP GraphQL query against a remote service.
+async fn http_graphql_find_all(
+    client: &reqwest::Client,
+    url: &str,
+    query_name: &str,
+    id_val: &str,
+    at: i64,
+    fields: &[String],
+) -> Result<Vec<Stash>, async_graphql::Error> {
+    let selection = build_selection_set(fields);
+    let query = format!("{{ {query_name}(id: \"{id_val}\", at: {at}) {selection} }}");
+    let body = serde_json::json!({ "query": query });
+    let resp = client
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("HTTP resolver error: {e}")))?;
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| async_graphql::Error::new(format!("HTTP resolver parse error: {e}")))?;
+
+    // Surface errors from the remote service
+    if let Some(errors) = json.get("errors") {
+        if !errors.is_null() {
+            if let Some(arr) = errors.as_array() {
+                if !arr.is_empty() {
+                    let msgs: Vec<String> = arr
+                        .iter()
+                        .filter_map(|e| e.get("message").and_then(|m| m.as_str()).map(String::from))
+                        .collect();
+                    return Err(async_graphql::Error::new(format!(
+                        "Remote GraphQL error: {}",
+                        msgs.join("; ")
+                    )));
+                }
+            }
+        }
+    }
+
+    let data = json.get("data").and_then(|d| d.get(query_name));
+
+    match data {
+        Some(serde_json::Value::Array(arr)) => {
+            let mut stashes = Vec::new();
+            for item in arr {
+                if let serde_json::Value::Object(map) = item {
+                    stashes.push(map.clone());
+                }
+            }
+            Ok(stashes)
+        }
+        Some(serde_json::Value::Null) | None => Ok(vec![]),
+        Some(other) => Err(async_graphql::Error::new(format!(
+            "Unexpected response shape for {query_name}: {other}"
+        ))),
+    }
+}
+
 /// Maps graphlette path → searcher + root config for inter-graphlette resolution.
 #[derive(Clone, Default)]
 pub struct ResolverRegistry {
@@ -166,89 +302,153 @@ fn scalar_field(field_name: String, type_ref: TypeRef) -> Field {
 }
 
 /// Singleton relation field: look up foreign key in parent, call target searcher.
+/// If the URL starts with http(s), makes a real HTTP GraphQL call.
+/// Otherwise, uses the in-process registry lookup.
 fn singleton_resolver_field(
     field_name: String,
     type_ref: TypeRef,
     resolver: &SingletonResolverConfig,
     registry: &ResolverRegistry,
 ) -> Option<Field> {
-    let entry = registry.get_for_url(&resolver.url)?;
-    let searcher = Arc::clone(&entry.searcher);
-    let template = entry
-        .root_config
-        .get_template(&resolver.query_name)?
-        .to_string();
-    let fk = resolver
-        .foreign_key
-        .clone()
-        .unwrap_or_else(|| "id".to_string());
+    if is_http_url(&resolver.url) {
+        let url = resolver.url.clone();
+        let query_name = resolver.query_name.clone();
+        let fk = resolver
+            .foreign_key
+            .clone()
+            .unwrap_or_else(|| "id".to_string());
 
-    Some(Field::new(field_name, type_ref, move |ctx| {
-        let s = Arc::clone(&searcher);
-        let tmpl = template.clone();
-        let fk = fk.clone();
-        FieldFuture::new(async move {
-            let parent = ctx.parent_value.try_downcast_ref::<Stash>()?;
-            let id_val = parent.get(&fk).and_then(|v| v.as_str()).unwrap_or("");
-            if id_val.is_empty() {
-                return Ok(FieldValue::NONE);
-            }
-            let mut args = Stash::new();
-            args.insert(
-                "id".to_string(),
-                serde_json::Value::String(id_val.to_string()),
-            );
-            let at = Utc::now().timestamp_millis();
-            match s.find(&tmpl, &args, &["*".to_string()], at).await {
-                Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stash))),
-                Ok(None) => Ok(FieldValue::NONE),
-                Err(e) => Err(async_graphql::Error::new(e.to_string())),
-            }
-        })
-    }))
+        Some(Field::new(field_name, type_ref, move |ctx| {
+            let url = url.clone();
+            let query_name = query_name.clone();
+            let fk = fk.clone();
+            let fields = collect_selected_fields(&ctx);
+            FieldFuture::new(async move {
+                let parent = ctx.parent_value.try_downcast_ref::<Stash>()?;
+                let id_val = parent.get(&fk).and_then(|v| v.as_str()).unwrap_or("");
+                if id_val.is_empty() {
+                    return Ok(FieldValue::NONE);
+                }
+                let at = Utc::now().timestamp_millis();
+                let client = reqwest::Client::new();
+                match http_graphql_find(&client, &url, &query_name, id_val, at, &fields).await {
+                    Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stash))),
+                    Ok(None) => Ok(FieldValue::NONE),
+                    Err(e) => Err(e),
+                }
+            })
+        }))
+    } else {
+        let entry = registry.get_for_url(&resolver.url)?;
+        let searcher = Arc::clone(&entry.searcher);
+        let template = entry
+            .root_config
+            .get_template(&resolver.query_name)?
+            .to_string();
+        let fk = resolver
+            .foreign_key
+            .clone()
+            .unwrap_or_else(|| "id".to_string());
+
+        Some(Field::new(field_name, type_ref, move |ctx| {
+            let s = Arc::clone(&searcher);
+            let tmpl = template.clone();
+            let fk = fk.clone();
+            FieldFuture::new(async move {
+                let parent = ctx.parent_value.try_downcast_ref::<Stash>()?;
+                let id_val = parent.get(&fk).and_then(|v| v.as_str()).unwrap_or("");
+                if id_val.is_empty() {
+                    return Ok(FieldValue::NONE);
+                }
+                let mut args = Stash::new();
+                args.insert(
+                    "id".to_string(),
+                    serde_json::Value::String(id_val.to_string()),
+                );
+                let at = Utc::now().timestamp_millis();
+                match s.find(&tmpl, &args, &["*".to_string()], at).await {
+                    Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stash))),
+                    Ok(None) => Ok(FieldValue::NONE),
+                    Err(e) => Err(async_graphql::Error::new(e.to_string())),
+                }
+            })
+        }))
+    }
 }
 
 /// Vector relation field: look up id in parent, call target searcher for list.
+/// If the URL starts with http(s), makes a real HTTP GraphQL call.
+/// Otherwise, uses the in-process registry lookup.
 fn vector_resolver_field(
     field_name: String,
     type_ref: TypeRef,
     resolver: &VectorResolverConfig,
     registry: &ResolverRegistry,
 ) -> Option<Field> {
-    let entry = registry.get_for_url(&resolver.url)?;
-    let searcher = Arc::clone(&entry.searcher);
-    let template = entry
-        .root_config
-        .get_template(&resolver.query_name)?
-        .to_string();
-    let fk = resolver.foreign_key.clone();
+    if is_http_url(&resolver.url) {
+        let url = resolver.url.clone();
+        let query_name = resolver.query_name.clone();
+        let fk = resolver.foreign_key.clone();
 
-    Some(Field::new(field_name, type_ref, move |ctx| {
-        let s = Arc::clone(&searcher);
-        let tmpl = template.clone();
-        let fk = fk.clone();
-        FieldFuture::new(async move {
-            let parent = ctx.parent_value.try_downcast_ref::<Stash>()?;
-            let id_val = match &fk {
-                Some(key) => parent.get(key).and_then(|v| v.as_str()).unwrap_or(""),
-                None => parent.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-            };
-            let mut args = Stash::new();
-            args.insert(
-                "id".to_string(),
-                serde_json::Value::String(id_val.to_string()),
-            );
-            let at = Utc::now().timestamp_millis();
-            match s.find_all(&tmpl, &args, &["*".to_string()], at).await {
-                Ok(stashes) => {
-                    let items: Vec<FieldValue> =
-                        stashes.into_iter().map(FieldValue::owned_any).collect();
-                    Ok(Some(FieldValue::list(items)))
+        Some(Field::new(field_name, type_ref, move |ctx| {
+            let url = url.clone();
+            let query_name = query_name.clone();
+            let fk = fk.clone();
+            let fields = collect_selected_fields(&ctx);
+            FieldFuture::new(async move {
+                let parent = ctx.parent_value.try_downcast_ref::<Stash>()?;
+                let id_val = match &fk {
+                    Some(key) => parent.get(key).and_then(|v| v.as_str()).unwrap_or(""),
+                    None => parent.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                };
+                let at = Utc::now().timestamp_millis();
+                let client = reqwest::Client::new();
+                match http_graphql_find_all(&client, &url, &query_name, id_val, at, &fields).await {
+                    Ok(stashes) => {
+                        let items: Vec<FieldValue> =
+                            stashes.into_iter().map(FieldValue::owned_any).collect();
+                        Ok(Some(FieldValue::list(items)))
+                    }
+                    Err(e) => Err(e),
                 }
-                Err(e) => Err(async_graphql::Error::new(e.to_string())),
-            }
-        })
-    }))
+            })
+        }))
+    } else {
+        let entry = registry.get_for_url(&resolver.url)?;
+        let searcher = Arc::clone(&entry.searcher);
+        let template = entry
+            .root_config
+            .get_template(&resolver.query_name)?
+            .to_string();
+        let fk = resolver.foreign_key.clone();
+
+        Some(Field::new(field_name, type_ref, move |ctx| {
+            let s = Arc::clone(&searcher);
+            let tmpl = template.clone();
+            let fk = fk.clone();
+            FieldFuture::new(async move {
+                let parent = ctx.parent_value.try_downcast_ref::<Stash>()?;
+                let id_val = match &fk {
+                    Some(key) => parent.get(key).and_then(|v| v.as_str()).unwrap_or(""),
+                    None => parent.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                };
+                let mut args = Stash::new();
+                args.insert(
+                    "id".to_string(),
+                    serde_json::Value::String(id_val.to_string()),
+                );
+                let at = Utc::now().timestamp_millis();
+                match s.find_all(&tmpl, &args, &["*".to_string()], at).await {
+                    Ok(stashes) => {
+                        let items: Vec<FieldValue> =
+                            stashes.into_iter().map(FieldValue::owned_any).collect();
+                        Ok(Some(FieldValue::list(items)))
+                    }
+                    Err(e) => Err(async_graphql::Error::new(e.to_string())),
+                }
+            })
+        }))
+    }
 }
 
 /// Internal singleton relation field: look up foreign key in parent, call target searcher via registry.

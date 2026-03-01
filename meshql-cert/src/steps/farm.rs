@@ -267,3 +267,52 @@ async fn assert_no_errors(world: &mut CertWorld) {
         }
     }
 }
+
+// ---- Cross-service steps ----
+
+#[given("a cross-service MeshQL server pair is running")]
+async fn cross_service_running(world: &mut CertWorld) {
+    assert!(
+        world.server_addr.is_some(),
+        "server_addr must be set before this step"
+    );
+    assert!(
+        world.server_b_addr.is_some(),
+        "server_b_addr must be set before this step"
+    );
+}
+
+#[given(regex = r#"^I have created "([^"]+)" entities on server B:$"#)]
+async fn create_entities_on_server_b(
+    world: &mut CertWorld,
+    entity_type: String,
+    step: &cucumber::gherkin::Step,
+) {
+    let client = reqwest::Client::new();
+    let server_addr = world.server_b_addr.clone().unwrap();
+
+    let table = step.table.as_ref().expect("expected a table");
+    for row in table.rows.iter().skip(1) {
+        let name = row[0].trim().to_string();
+        let raw_data = row[1].trim().to_string();
+        let resolved_data = resolve_ids(&raw_data, &world.ids);
+        let data: Value = serde_json::from_str(&resolved_data).expect("invalid JSON in table");
+
+        let id = post_entity(&client, &server_addr, &entity_type, data).await;
+        world
+            .ids
+            .entry(entity_type.clone())
+            .or_default()
+            .insert(name, id);
+    }
+}
+
+#[when(regex = r#"^I query the "([^"]+)" graph on server B with: (.+)$"#)]
+async fn query_graph_on_server_b(world: &mut CertWorld, entity_type: String, raw_query: String) {
+    let client = reqwest::Client::new();
+    let server_addr = world.server_b_addr.clone().unwrap();
+
+    let resolved_query = resolve_ids(&raw_query, &world.ids);
+    let response = graphql_query(&client, &server_addr, &entity_type, &resolved_query).await;
+    world.farm_response = Some(response);
+}
