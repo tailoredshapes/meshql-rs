@@ -2,12 +2,15 @@
 name = "meshql-cert"
 version = "0.1.0"
 edition = "2021"
+description = "meshql-cert — part of the meshql framework"
+license = "MIT"
+repository = "https://github.com/tailoredshapes/meshql-rs"
 
 [dependencies]
-meshql-core = { path = "../meshql-core" }
-meshql-server = { path = "../meshql-server" }
-meshql-graphlette = { path = "../meshql-graphlette" }
-meshql-restlette = { path = "../meshql-restlette" }
+meshql-core = { version = "0.1.0", path = "../meshql-core" }
+meshql-server = { version = "0.1.0", path = "../meshql-server" }
+meshql-graphlette = { version = "0.1.0", path = "../meshql-graphlette" }
+meshql-restlette = { version = "0.1.0", path = "../meshql-restlette" }
 cucumber = "0.21"
 tokio = { workspace = true }
 serde_json = { workspace = true }

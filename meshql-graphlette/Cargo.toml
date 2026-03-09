@@ -2,9 +2,12 @@
 name = "meshql-graphlette"
 version = "0.1.0"
 edition = "2021"
+description = "meshql-graphlette — part of the meshql framework"
+license = "MIT"
+repository = "https://github.com/tailoredshapes/meshql-rs"
 
 [dependencies]
-meshql-core = { path = "../meshql-core" }
+meshql-core = { version = "0.1.0", path = "../meshql-core" }
 async-graphql = { version = "7", features = ["dynamic-schema"] }
 async-graphql-parser = "7"
 axum = { workspace = true }

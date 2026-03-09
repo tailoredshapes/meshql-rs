@@ -2,9 +2,12 @@
 name = "meshql-sqlite"
 version = "0.1.0"
 edition = "2021"
+description = "meshql-sqlite — part of the meshql framework"
+license = "MIT"
+repository = "https://github.com/tailoredshapes/meshql-rs"
 
 [dependencies]
-meshql-core = { path = "../meshql-core" }
+meshql-core = { version = "0.1.0", path = "../meshql-core" }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 serde_json = { workspace = true }
 chrono = { workspace = true }
@@ -23,6 +26,7 @@ required-features = ["perf"]
 perf = ["dep:meshql-server", "dep:anyhow"]
 
 [dependencies.meshql-server]
+version = "0.1.0"
 path = "../meshql-server"
 optional = true
 
@@ -33,8 +37,8 @@ optional = true
 [dev-dependencies]
 tokio = { workspace = true }
 uuid = { workspace = true }
-meshql-cert = { path = "../meshql-cert" }
-meshql-server = { path = "../meshql-server" }
+meshql-cert = { version = "0.1.0", path = "../meshql-cert" }
+meshql-server = { version = "0.1.0", path = "../meshql-server" }
 cucumber = "0.21"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 axum = { workspace = true }

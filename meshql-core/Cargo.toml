@@ -2,6 +2,9 @@
 name = "meshql-core"
 version = "0.1.0"
 edition = "2021"
+description = "meshql-core — part of the meshql framework"
+license = "MIT"
+repository = "https://github.com/tailoredshapes/meshql-rs"
 
 [dependencies]
 serde = { workspace = true }

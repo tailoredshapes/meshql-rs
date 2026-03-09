@@ -2,10 +2,13 @@
 name = "meshql-lambda"
 version = "0.1.0"
 edition = "2021"
+description = "meshql-lambda — part of the meshql framework"
+license = "MIT"
+repository = "https://github.com/tailoredshapes/meshql-rs"
 
 [dependencies]
-meshql-server = { path = "../meshql-server" }
-meshql-core = { path = "../meshql-core" }
+meshql-server = { version = "0.1.0", path = "../meshql-server" }
+meshql-core = { version = "0.1.0", path = "../meshql-core" }
 lambda_http = "0.13"
 tokio = { workspace = true }
 anyhow = "1"

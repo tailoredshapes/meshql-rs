@@ -2,11 +2,14 @@
 name = "meshql-server"
 version = "0.1.0"
 edition = "2021"
+description = "meshql-server — part of the meshql framework"
+license = "MIT"
+repository = "https://github.com/tailoredshapes/meshql-rs"
 
 [dependencies]
-meshql-core = { path = "../meshql-core" }
-meshql-graphlette = { path = "../meshql-graphlette" }
-meshql-restlette = { path = "../meshql-restlette" }
+meshql-core = { version = "0.1.0", path = "../meshql-core" }
+meshql-graphlette = { version = "0.1.0", path = "../meshql-graphlette" }
+meshql-restlette = { version = "0.1.0", path = "../meshql-restlette" }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }

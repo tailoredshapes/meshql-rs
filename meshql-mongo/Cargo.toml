@@ -2,9 +2,12 @@
 name = "meshql-mongo"
 version = "0.1.0"
 edition = "2021"
+description = "meshql-mongo — part of the meshql framework"
+license = "MIT"
+repository = "https://github.com/tailoredshapes/meshql-rs"
 
 [dependencies]
-meshql-core = { path = "../meshql-core" }
+meshql-core = { version = "0.1.0", path = "../meshql-core" }
 mongodb = "3"
 bson = { version = "2", features = ["chrono-0_4"] }
 handlebars = { workspace = true }
@@ -24,6 +27,7 @@ required-features = ["perf"]
 perf = ["dep:meshql-server", "dep:anyhow"]
 
 [dependencies.meshql-server]
+version = "0.1.0"
 path = "../meshql-server"
 optional = true
 
@@ -32,8 +36,8 @@ version = "1"
 optional = true
 
 [dev-dependencies]
-meshql-cert = { path = "../meshql-cert" }
-meshql-server = { path = "../meshql-server" }
+meshql-cert = { version = "0.1.0", path = "../meshql-cert" }
+meshql-server = { version = "0.1.0", path = "../meshql-server" }
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["mongo"] }
 tokio = { workspace = true }

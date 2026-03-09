@@ -2,10 +2,13 @@
 name = "meshql-merkql"
 version = "0.1.0"
 edition = "2021"
+description = "meshql-merkql — part of the meshql framework"
+license = "MIT"
+repository = "https://github.com/tailoredshapes/meshql-rs"
 
 [dependencies]
-meshql-core = { path = "../meshql-core" }
-merkql = { path = "../../merkql" }
+meshql-core = { version = "0.1.0", path = "../meshql-core" }
+merkql = { version = "0.2", path = "../../merkql" }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }
@@ -16,10 +19,10 @@ uuid = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
-meshql-cert = { path = "../meshql-cert" }
-meshql-server = { path = "../meshql-server" }
-meshql-graphlette = { path = "../meshql-graphlette" }
-meshql-restlette = { path = "../meshql-restlette" }
+meshql-cert = { version = "0.1.0", path = "../meshql-cert" }
+meshql-server = { version = "0.1.0", path = "../meshql-server" }
+meshql-graphlette = { version = "0.1.0", path = "../meshql-graphlette" }
+meshql-restlette = { version = "0.1.0", path = "../meshql-restlette" }
 cucumber = "0.21"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 axum = { workspace = true }

@@ -2,9 +2,12 @@
 name = "meshql-ksql"
 version = "0.1.0"
 edition = "2021"
+description = "meshql-ksql — part of the meshql framework"
+license = "MIT"
+repository = "https://github.com/tailoredshapes/meshql-rs"
 
 [dependencies]
-meshql-core = { path = "../meshql-core" }
+meshql-core = { version = "0.1.0", path = "../meshql-core" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 handlebars = { workspace = true }
 tokio = { workspace = true }
@@ -18,7 +21,7 @@ tracing = "0.1"
 anyhow = "1"
 
 [dev-dependencies]
-meshql-cert = { path = "../meshql-cert" }
+meshql-cert = { version = "0.1.0", path = "../meshql-cert" }
 cucumber = "0.21"
 tokio = { workspace = true }
 
