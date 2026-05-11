@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+# Pre-push hook: cargo fmt, clippy, build, and tests.
+#
+# Tests run in two passes:
+#   1. Fast crates (everything except meshql-mongo/-mysql/-postgres) run
+#      normally with cargo's default parallelism.
+#   2. Each testcontainer-backed crate is then run explicitly, and within
+#      each crate the libtest binaries (`repo_cert`, `searcher_cert`) get
+#      `--test-threads=1` so they don't try to start 9 database containers
+#      in parallel (Docker on some hosts hits
+#      `WaitContainer(StartupTimeout)`). The cucumber binary (`farm_cert`)
+#      runs without that flag — cucumber-rs's harness doesn't accept it,
+#      and it only starts one container per scenario group anyway.
 set -e
 
 echo "==> Checking formatting..."
@@ -10,7 +22,21 @@ cargo clippy --workspace -- -D warnings
 echo "==> Building..."
 cargo build --workspace
 
-echo "==> Running tests..."
-cargo test --workspace
+echo "==> Running tests (fast crates)..."
+cargo test --workspace --no-fail-fast \
+  --exclude meshql-mongo \
+  --exclude meshql-mysql \
+  --exclude meshql-postgres
+
+echo "==> Running tests (testcontainer-backed crates, serialized)..."
+for crate in meshql-mongo meshql-mysql meshql-postgres; do
+  echo "  - $crate (lib + libtest cert binaries, --test-threads=1)"
+  cargo test -p "$crate" --lib -- --test-threads=1
+  for t in repo_cert searcher_cert; do
+    cargo test -p "$crate" --test "$t" -- --test-threads=1
+  done
+  echo "  - $crate (farm_cert cucumber)"
+  cargo test -p "$crate" --test farm_cert
+done
 
 echo "==> All checks passed."
