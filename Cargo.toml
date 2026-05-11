@@ -4,6 +4,7 @@ members = [
     "meshql-mongo",
     "meshql-graphlette",
     "meshql-restlette",
+    "meshql-mcp",
     "meshql-server",
     "meshql-cert",
     "meshql-merkql",
