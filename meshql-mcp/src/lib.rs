@@ -19,3 +19,4 @@ pub mod tool;
 pub mod transport;
 
 pub use client::MeshqlClient;
+pub use tool::{wrap_text_result, Tool, ToolFuture, ToolHandler};
