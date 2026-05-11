@@ -1,9 +1,25 @@
-//! Thin HTTP client wrapping a meshql REST deployment.
+//! HTTP client for a meshql-rs deployment.
 //!
-//! Used by the catalog tools and by custom tools that need to hit
-//! arbitrary deployment-specific endpoints. Construct with [`MeshqlClient::new`]
-//! when the base URL is known, or [`MeshqlClient::from_env`] to read it from
-//! an environment variable (with a fallback default).
+//! Three methods cover the typical capability needs:
+//!
+//! - [`gql`](MeshqlClient::gql) — POST a GraphQL query to a graphlette endpoint.
+//!   Use this for reads (per the project CQRS rule: reads via `/graph`, writes
+//!   via `/api`). The `CapabilityHandler::GraphQuery` variant dispatches here.
+//! - [`get_path`](MeshqlClient::get_path) — GET an arbitrary REST path. Use
+//!   this for computed/aggregated endpoints not yet in the graph schema
+//!   (e.g. `/test_environment/:id/history`). The `CapabilityHandler::RestGet`
+//!   variant dispatches here.
+//! - [`post_path`](MeshqlClient::post_path) — POST an arbitrary REST path.
+//!   Use this for writes and commands (e.g. `/change_request/:id/plan`). The
+//!   `CapabilityHandler::RestPost` variant dispatches here.
+//!
+//! The legacy [`list`](MeshqlClient::list) and [`get`](MeshqlClient::get)
+//! REST entity-fetch methods are retained for callers (like groundwork's
+//! in-memory dependency-graph snapshot loader) that haven't migrated to
+//! GraphQL yet. New code should prefer `gql` for reads.
+//!
+//! Construct with [`MeshqlClient::new`] when the base URL is known, or
+//! [`MeshqlClient::from_env`] to read it from an environment variable.
 
 use anyhow::Context;
 use serde_json::Value;
