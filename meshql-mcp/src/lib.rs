@@ -10,7 +10,6 @@
 //! - [`tool`] — `Tool`, `ToolHandler`, `ToolFuture`, and `wrap_text_result`.
 //! - [`capability`] — high-level `Capability` + `CapabilityHandler` for
 //!   declaring named, templated MCP operations.
-//! - [`catalog`] — legacy generic `catalog.list / catalog.get / catalog.search`
 //!   tools. Slated for removal once all apps migrate to capabilities.
 //! - [`schema`] — hand-rolled parser for the meshql GraphQL subset, used
 //!   by the capability builder to auto-derive baseline tools.
@@ -18,7 +17,6 @@
 //!   JSON-RPC transport.
 
 pub mod capability;
-pub mod catalog;
 pub mod client;
 pub mod schema;
 pub mod tool;
