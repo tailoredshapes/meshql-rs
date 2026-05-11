@@ -17,3 +17,5 @@ pub mod catalog;
 pub mod client;
 pub mod tool;
 pub mod transport;
+
+pub use client::MeshqlClient;
