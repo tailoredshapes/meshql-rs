@@ -14,7 +14,7 @@
 //!
 //! Use stderr for logs; stdout is reserved for JSON-RPC frames.
 
-use crate::catalog;
+use crate::capability::Capability;
 use crate::client::MeshqlClient;
 use crate::tool::{wrap_text_result, Tool};
 use serde_json::{json, Value};
@@ -23,31 +23,16 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
-/// One configured entity for the catalog tools. Each meshql-rs app's MCP
-/// server passes a vec of these when constructing the server.
-///
-/// `fields` is the GraphQL field-selection string. The catalog tools wrap
-/// it in `{ getAll { <fields> } }` or `{ getById(id: "...") { <fields> } }`
-/// — so include any federated foreign-key fields (e.g. `team { id name }`)
-/// here for rich LLM responses. That federation is the whole reason the
-/// reads live on `/graph` rather than REST.
-#[derive(Clone)]
-pub struct EntityConfig {
-    /// Tool-argument value (e.g. `"deployable"`). Used as the `entity` enum
-    /// in the catalog tools' input schemas and to validate inbound calls.
-    pub name: &'static str,
-    /// The graph endpoint to POST queries to (e.g. `"/deployable/graph"`).
-    pub graph_path: String,
-    /// Field-selection string for catalog tools — see the type-level doc.
-    pub fields: &'static str,
-}
-
+/// Configuration for [`MeshqlMcpServer`]. Each app's `<app>-mcp` bin builds
+/// a `capabilities` vec (usually via `CapabilitiesBuilder`) and passes it
+/// here along with the HTTP client and server identity.
 pub struct McpServerConfig {
     pub server_name: String,
     pub server_version: String,
     pub client: Arc<MeshqlClient>,
-    pub entities: Vec<EntityConfig>,
-    pub custom_tools: Vec<Tool>,
+    /// All operations the server exposes through `tools/list`. Each capability
+    /// is converted to a low-level [`Tool`] at server-construction time.
+    pub capabilities: Vec<Capability>,
 }
 
 pub struct MeshqlMcpServer {
@@ -56,11 +41,15 @@ pub struct MeshqlMcpServer {
 }
 
 impl MeshqlMcpServer {
-    /// Build a server, eagerly assembling the tool list (catalog tools first,
-    /// then any custom tools).
-    pub fn new(config: McpServerConfig) -> Self {
-        let mut tools = catalog::tools(&config.entities);
-        tools.extend(config.custom_tools.iter().cloned());
+    /// Build a server, eagerly converting each [`Capability`] into a
+    /// dispatch-ready [`Tool`].
+    pub fn new(mut config: McpServerConfig) -> Self {
+        let capabilities = std::mem::take(&mut config.capabilities);
+        let client = config.client.clone();
+        let tools = capabilities
+            .into_iter()
+            .map(|cap| cap.into_tool(client.clone()))
+            .collect();
         Self { config, tools }
     }
 
@@ -233,38 +222,48 @@ async fn write_line<W: AsyncWriteExt + Unpin>(out: &mut W, frame: &Value) -> any
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capability::{Capability, CapabilityHandler};
     use crate::tool::ToolFuture;
     use serde_json::json;
 
-    fn test_server(custom_tools: Vec<Tool>) -> MeshqlMcpServer {
+    fn test_server(extras: Vec<Capability>) -> MeshqlMcpServer {
+        let mut capabilities = vec![
+            Capability {
+                name: "list_deployables",
+                description: "List every deployable.",
+                input_schema: json!({ "type": "object" }),
+                handler: CapabilityHandler::GraphQuery {
+                    path: "/deployable/graph".into(),
+                    query_template: "{ getAll { id name } }".into(),
+                },
+            },
+            Capability {
+                name: "list_services",
+                description: "List every service.",
+                input_schema: json!({ "type": "object" }),
+                handler: CapabilityHandler::GraphQuery {
+                    path: "/service/graph".into(),
+                    query_template: "{ getAll { id name } }".into(),
+                },
+            },
+        ];
+        capabilities.extend(extras);
         MeshqlMcpServer::new(McpServerConfig {
             server_name: "test-mcp".to_string(),
             server_version: "9.9.9".to_string(),
             client: Arc::new(MeshqlClient::new("http://127.0.0.1:1")),
-            entities: vec![
-                EntityConfig {
-                    name: "deployable",
-                    graph_path: "/deployable/graph".to_string(),
-                    fields: "id name",
-                },
-                EntityConfig {
-                    name: "service",
-                    graph_path: "/service/graph".to_string(),
-                    fields: "id name",
-                },
-            ],
-            custom_tools,
+            capabilities,
         })
     }
 
-    fn dummy_tool(name: &'static str) -> Tool {
-        Tool {
+    fn dummy_capability(name: &'static str) -> Capability {
+        Capability {
             name,
             description: "dummy",
             input_schema: json!({ "type": "object" }),
-            handler: Arc::new(|_client, _args| -> ToolFuture {
+            handler: CapabilityHandler::Custom(Arc::new(|_client, _args| -> ToolFuture {
                 Box::pin(async move { Ok(json!({ "ok": true })) })
-            }),
+            })),
         }
     }
 
@@ -289,7 +288,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_list_returns_configured_tools() {
-        let server = test_server(vec![dummy_tool("custom.thing")]);
+        let server = test_server(vec![dummy_capability("custom.thing")]);
         let req = json!({
             "jsonrpc": "2.0",
             "id": 2,
@@ -305,9 +304,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "catalog.list".to_string(),
-                "catalog.get".to_string(),
-                "catalog.search".to_string(),
+                "list_deployables".to_string(),
+                "list_services".to_string(),
                 "custom.thing".to_string(),
             ]
         );
@@ -334,15 +332,15 @@ mod tests {
         // A handler that returns an error gets wrapped into an isError content
         // envelope (rather than a JSON-RPC error), so the LLM client can read
         // the message.
-        let mut custom = vec![Tool {
+        let mut custom = vec![Capability {
             name: "boom",
             description: "always errors",
             input_schema: json!({ "type": "object" }),
-            handler: Arc::new(|_client, _args| -> ToolFuture {
+            handler: CapabilityHandler::Custom(Arc::new(|_client, _args| -> ToolFuture {
                 Box::pin(async move { Err(anyhow::anyhow!("kaboom")) })
-            }),
+            })),
         }];
-        custom.push(dummy_tool("noop"));
+        custom.push(dummy_capability("noop"));
         let server = test_server(custom);
         let req = json!({
             "jsonrpc": "2.0",

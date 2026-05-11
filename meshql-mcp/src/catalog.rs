@@ -9,9 +9,17 @@
 
 use crate::client::MeshqlClient;
 use crate::tool::{Tool, ToolFuture};
-use crate::transport::EntityConfig;
 use serde_json::{json, Value};
 use std::sync::Arc;
+
+/// Legacy entity descriptor used by [`tools`]. Slated for removal alongside
+/// this module once all consumers migrate to `Capability`.
+#[derive(Clone)]
+pub struct EntityConfig {
+    pub name: &'static str,
+    pub graph_path: String,
+    pub fields: &'static str,
+}
 
 fn find_entity<'a>(entities: &'a [EntityConfig], name: &str) -> anyhow::Result<&'a EntityConfig> {
     entities.iter().find(|c| c.name == name).ok_or_else(|| {
