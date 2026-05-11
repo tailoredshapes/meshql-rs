@@ -23,11 +23,30 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
+/// One configured entity for the catalog tools. Each meshql-rs app's MCP
+/// server passes a vec of these when constructing the server.
+///
+/// `fields` is the GraphQL field-selection string. The catalog tools wrap
+/// it in `{ getAll { <fields> } }` or `{ getById(id: "...") { <fields> } }`
+/// — so include any federated foreign-key fields (e.g. `team { id name }`)
+/// here for rich LLM responses. That federation is the whole reason the
+/// reads live on `/graph` rather than REST.
+#[derive(Clone)]
+pub struct EntityConfig {
+    /// Tool-argument value (e.g. `"deployable"`). Used as the `entity` enum
+    /// in the catalog tools' input schemas and to validate inbound calls.
+    pub name: &'static str,
+    /// The graph endpoint to POST queries to (e.g. `"/deployable/graph"`).
+    pub graph_path: String,
+    /// Field-selection string for catalog tools — see the type-level doc.
+    pub fields: &'static str,
+}
+
 pub struct McpServerConfig {
     pub server_name: String,
     pub server_version: String,
     pub client: Arc<MeshqlClient>,
-    pub entities: Vec<&'static str>,
+    pub entities: Vec<EntityConfig>,
     pub custom_tools: Vec<Tool>,
 }
 
@@ -222,7 +241,18 @@ mod tests {
             server_name: "test-mcp".to_string(),
             server_version: "9.9.9".to_string(),
             client: Arc::new(MeshqlClient::new("http://127.0.0.1:1")),
-            entities: vec!["deployable", "service"],
+            entities: vec![
+                EntityConfig {
+                    name: "deployable",
+                    graph_path: "/deployable/graph".to_string(),
+                    fields: "id name",
+                },
+                EntityConfig {
+                    name: "service",
+                    graph_path: "/service/graph".to_string(),
+                    fields: "id name",
+                },
+            ],
             custom_tools,
         })
     }
