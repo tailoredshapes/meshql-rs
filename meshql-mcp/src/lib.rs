@@ -10,14 +10,20 @@
 //! - [`tool`] — `Tool`, `ToolHandler`, `ToolFuture`, and `wrap_text_result`.
 //! - [`catalog`] — generic `catalog.list / catalog.get / catalog.search` tools
 //!   parameterized over an entity-name list.
+//! - [`schema`] — hand-rolled parser for the meshql GraphQL subset, used
+//!   by the capability builder to auto-derive baseline tools.
 //! - [`transport`] — `MeshqlMcpServer` + `McpServerConfig`, the stdio
 //!   JSON-RPC transport.
 
 pub mod catalog;
 pub mod client;
+pub mod schema;
 pub mod tool;
 pub mod transport;
 
 pub use client::MeshqlClient;
+pub use schema::{
+    parse_meshql_schema, render_entity_field_selection, EntityField, ParsedSchema, QueryOp,
+};
 pub use tool::{wrap_text_result, Tool, ToolFuture, ToolHandler};
 pub use transport::{EntityConfig, McpServerConfig, MeshqlMcpServer};
