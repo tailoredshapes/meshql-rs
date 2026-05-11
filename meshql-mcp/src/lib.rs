@@ -24,7 +24,7 @@ pub mod schema;
 pub mod tool;
 pub mod transport;
 
-pub use capability::{Capability, CapabilityHandler};
+pub use capability::{CapabilitiesBuilder, Capability, CapabilityHandler};
 pub use client::MeshqlClient;
 pub use schema::{
     parse_meshql_schema, render_entity_field_selection, EntityField, ParsedSchema, QueryOp,

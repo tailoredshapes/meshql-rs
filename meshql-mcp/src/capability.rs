@@ -20,8 +20,9 @@
 //! placeholder returns an error to the caller.
 
 use crate::client::MeshqlClient;
+use crate::schema::{parse_meshql_schema, render_entity_field_selection, ParsedSchema, QueryOp};
 use crate::tool::{Tool, ToolFuture, ToolHandler};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::sync::Arc;
 
 /// A single MCP operation: a named/described/schema-typed wrapper around a
@@ -250,6 +251,264 @@ fn render_substituted_value(value: &Value) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CapabilitiesBuilder
+// ---------------------------------------------------------------------------
+
+/// Schema-driven builder for the capability list passed to
+/// [`McpServerConfig`](crate::transport::McpServerConfig).
+///
+/// Each app's `<app>-mcp` bin calls [`Self::auto_from_schemas`] with its
+/// `include_str!`'d GraphQL schema files to seed baseline list/get/find/
+/// by-FK capabilities, then layers `.describe` overrides for tools that
+/// earn richer wording and `.add` for custom (graph-traversal,
+/// computed-REST) capabilities.
+#[derive(Default)]
+pub struct CapabilitiesBuilder {
+    capabilities: Vec<Capability>,
+}
+
+impl CapabilitiesBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Auto-generate baseline capabilities from a slice of
+    /// `(entity_singular, graph_path, schema_text)` triples. For each schema,
+    /// every `Query` operation becomes one capability following the naming
+    /// convention table in the crate-level docs. Schemas that fail to parse
+    /// log a warning to stderr and are skipped.
+    pub fn auto_from_schemas(
+        mut self,
+        schemas: &[(&'static str, &'static str, &'static str)],
+    ) -> Self {
+        for (entity, graph_path, schema_text) in schemas {
+            let parsed = match parse_meshql_schema(schema_text) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!(
+                        "[meshql-mcp] auto_from_schemas: failed to parse schema for {entity}: {e}"
+                    );
+                    continue;
+                }
+            };
+            if parsed.query_ops.is_empty() {
+                eprintln!(
+                    "[meshql-mcp] auto_from_schemas: schema for {entity} has no Query operations; skipping"
+                );
+                continue;
+            }
+            let body = render_entity_field_selection(&parsed);
+            for op in &parsed.query_ops {
+                if let Some(cap) = derive_capability(entity, graph_path, &parsed, op, &body) {
+                    self = self.add(cap);
+                }
+            }
+        }
+        self
+    }
+
+    /// Replace the description on the capability named `capability_name`. If
+    /// no capability matches, logs to stderr (so typos surface) and returns
+    /// the builder unchanged.
+    pub fn describe(mut self, capability_name: &'static str, description: &'static str) -> Self {
+        let found = self
+            .capabilities
+            .iter_mut()
+            .find(|c| c.name == capability_name);
+        match found {
+            Some(cap) => cap.description = description,
+            None => eprintln!(
+                "[meshql-mcp] describe: no capability named {capability_name}; ignoring override"
+            ),
+        }
+        self
+    }
+
+    /// Append a [`Capability`]. If another capability with the same name
+    /// already exists, the previous one is replaced and a warning is logged.
+    #[allow(clippy::should_implement_trait)]
+    pub fn add(mut self, capability: Capability) -> Self {
+        if let Some(existing) = self
+            .capabilities
+            .iter_mut()
+            .find(|c| c.name == capability.name)
+        {
+            eprintln!(
+                "[meshql-mcp] add: replacing existing capability {}",
+                capability.name
+            );
+            *existing = capability;
+        } else {
+            self.capabilities.push(capability);
+        }
+        self
+    }
+
+    /// Finalize and return the capability list.
+    pub fn build(self) -> Vec<Capability> {
+        self.capabilities
+    }
+}
+
+/// Build one capability for a `Query` operation, using the naming-convention
+/// table in the crate-level docs. Returns `None` for operations we don't
+/// recognize (apps add custom capabilities for those).
+fn derive_capability(
+    entity: &'static str,
+    graph_path: &'static str,
+    parsed: &ParsedSchema,
+    op: &QueryOp,
+    body: &str,
+) -> Option<Capability> {
+    let plural = pluralize(entity);
+    // Surface arguments come from the op's args, minus the federation-time
+    // cursor `at: Float` which apps don't expose to LLMs.
+    let surface_args: Vec<&(String, String)> =
+        op.args.iter().filter(|(name, _)| name != "at").collect();
+
+    match op.name.as_str() {
+        "getAll" => Some(make_capability(
+            leak_string(format!("list_{plural}")),
+            leak_string(default_description_list(entity, &parsed.entity_name)),
+            json!({ "type": "object", "properties": {} }),
+            CapabilityHandler::GraphQuery {
+                path: graph_path.to_string(),
+                query_template: format!("{{ getAll {{ {body} }} }}"),
+            },
+        )),
+        "getById" => Some(make_capability(
+            leak_string(format!("get_{entity}_by_id")),
+            leak_string(default_description_get_by_id(entity, &parsed.entity_name)),
+            schema_for_single_required(&surface_args),
+            CapabilityHandler::GraphQuery {
+                path: graph_path.to_string(),
+                query_template: format!("{{ getById(id: \"{{id}}\") {{ {body} }} }}"),
+            },
+        )),
+        "getByName" => Some(make_capability(
+            leak_string(format!("find_{plural}_by_name")),
+            leak_string(default_description_find_by_name(
+                entity,
+                &parsed.entity_name,
+            )),
+            schema_for_single_required(&surface_args),
+            CapabilityHandler::GraphQuery {
+                path: graph_path.to_string(),
+                query_template: format!("{{ getByName(name: \"{{name}}\") {{ {body} }} }}"),
+            },
+        )),
+        other if other.starts_with("getBy") && other.ends_with("Id") => {
+            // getByDeployableId(deployable_id: ...) → "deployables_for_deployable"
+            // We use the first surface arg's name as the FK; strip the `_id`
+            // suffix to get the related entity's bare name.
+            let (arg_name, _) = surface_args.first()?;
+            let related = arg_name.strip_suffix("_id").unwrap_or(arg_name);
+            let cap_name = leak_string(format!("{plural}_for_{related}"));
+            let desc = leak_string(default_description_by_fk(
+                entity,
+                &parsed.entity_name,
+                related,
+            ));
+            // Build the inline query for the operation by name.
+            let op_name = op.name.clone();
+            let arg_lit = arg_name.clone();
+            let query_template = format!(
+                "{{ {op_name}({arg_lit}: \"{{{arg_lit}}}\") {{ {body} }} }}",
+                op_name = op_name,
+                arg_lit = arg_lit,
+                body = body,
+            );
+            Some(make_capability(
+                cap_name,
+                desc,
+                schema_for_single_required(&surface_args),
+                CapabilityHandler::GraphQuery {
+                    path: graph_path.to_string(),
+                    query_template,
+                },
+            ))
+        }
+        // Operations we don't auto-derive (e.g. `count`, `getByMultiple`).
+        _ => None,
+    }
+}
+
+fn make_capability(
+    name: &'static str,
+    description: &'static str,
+    input_schema: Value,
+    handler: CapabilityHandler,
+) -> Capability {
+    Capability {
+        name,
+        description,
+        input_schema,
+        handler,
+    }
+}
+
+/// `Box::leak` the String into a `&'static str` so it can live in the
+/// `Capability`'s static-str fields. Capabilities live for the duration of
+/// the process, so the leak is bounded.
+fn leak_string(s: String) -> &'static str {
+    Box::leak(s.into_boxed_str())
+}
+
+/// Naive pluralization: append `s`. Apps override via `.describe()` when the
+/// default reads wrong.
+fn pluralize(singular: &str) -> String {
+    format!("{singular}s")
+}
+
+fn default_description_list(entity: &str, type_name: &str) -> String {
+    format!(
+        "List every {entity} in the catalogue (returns flat GraphQL {type_name} records, federated fields included)."
+    )
+}
+
+fn default_description_get_by_id(entity: &str, type_name: &str) -> String {
+    format!("Fetch one {entity} ({type_name}) by its UUID. Returns null if not found.")
+}
+
+fn default_description_find_by_name(entity: &str, type_name: &str) -> String {
+    format!("Find {entity} ({type_name}) records whose name matches the supplied value.")
+}
+
+fn default_description_by_fk(entity: &str, type_name: &str, related: &str) -> String {
+    format!("List {entity} ({type_name}) records related to the given {related}.")
+}
+
+/// Build an input schema with one required string property whose name comes
+/// from `args[0]`. Used by `getById`, `getByName`, and `getByXId` derivations.
+fn schema_for_single_required(args: &[&(String, String)]) -> Value {
+    if let Some((name, ty)) = args.first() {
+        let json_ty = graphql_to_json_type(ty);
+        json!({
+            "type": "object",
+            "required": [name],
+            "properties": {
+                name: { "type": json_ty }
+            }
+        })
+    } else {
+        json!({ "type": "object", "properties": {} })
+    }
+}
+
+/// Map a GraphQL scalar type (`ID`, `String`, `Int`, `Float`, `Boolean`) to
+/// the JSON Schema type used in the tool's `inputSchema`. Unknown types map
+/// to `"string"` (the safe default — LLMs treat ids as strings).
+fn graphql_to_json_type(ty: &str) -> &'static str {
+    let base = ty.trim().trim_end_matches('!');
+    match base {
+        "Int" => "integer",
+        "Float" => "number",
+        "Boolean" => "boolean",
+        _ => "string",
+    }
+}
+
 /// Escape `s` for safe insertion inside a GraphQL string literal.
 /// Caller is responsible for providing the surrounding quotes.
 fn escape_for_graphql(s: &str) -> String {
@@ -270,7 +529,6 @@ fn escape_for_graphql(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn substitutes_named_placeholders_in_template() {
@@ -359,5 +617,183 @@ mod tests {
         };
         let cap = cap.with_description("new");
         assert_eq!(cap.description, "new");
+    }
+
+    // ----- builder tests -----
+
+    const DEPLOYABLE_SCHEMA: &str = r#"
+type Deployable {
+    id: ID
+    name: String!
+    description: String
+    repo_url: String
+    team_id: String
+    team: Team
+    deployment_status: String
+}
+type Team {
+    id: ID
+    name: String
+    kind: String
+    description: String
+}
+type Query {
+    getById(id: ID, at: Float): Deployable
+    getAll(at: Float): [Deployable]
+    getByName(name: String, at: Float): [Deployable]
+}
+"#;
+
+    const DEPENDENCY_SCHEMA: &str = r#"
+type Dependency {
+    id: ID
+    deployable_id: String!
+    service_id: String!
+    protocol: String
+    auth_method: String
+    criticality: String
+}
+type Query {
+    getById(id: ID, at: Float): Dependency
+    getAll(at: Float): [Dependency]
+    getByDeployableId(deployable_id: String, at: Float): [Dependency]
+    getByServiceId(service_id: String, at: Float): [Dependency]
+}
+"#;
+
+    fn find_by_name<'a>(caps: &'a [Capability], name: &str) -> Option<&'a Capability> {
+        caps.iter().find(|c| c.name == name)
+    }
+
+    #[test]
+    fn auto_derives_list_get_search_from_deployable_schema() {
+        let caps = CapabilitiesBuilder::new()
+            .auto_from_schemas(&[("deployable", "/deployable/graph", DEPLOYABLE_SCHEMA)])
+            .build();
+        let names: Vec<&str> = caps.iter().map(|c| c.name).collect();
+        assert!(names.contains(&"list_deployables"), "names = {names:?}");
+        assert!(names.contains(&"get_deployable_by_id"), "names = {names:?}");
+        assert!(
+            names.contains(&"find_deployables_by_name"),
+            "names = {names:?}"
+        );
+
+        let list = find_by_name(&caps, "list_deployables").unwrap();
+        assert!(list.description.contains("deployable"));
+        if let CapabilityHandler::GraphQuery {
+            path,
+            query_template,
+        } = &list.handler
+        {
+            assert_eq!(path, "/deployable/graph");
+            // Federated team subselection appears in the field body.
+            assert!(
+                query_template.contains("team { id name kind description }"),
+                "query_template = {query_template:?}"
+            );
+            assert!(query_template.starts_with("{ getAll {"));
+        } else {
+            panic!("expected GraphQuery handler");
+        }
+
+        let get = find_by_name(&caps, "get_deployable_by_id").unwrap();
+        // input_schema requires "id".
+        assert_eq!(get.input_schema["required"][0], "id");
+        assert_eq!(get.input_schema["properties"]["id"]["type"], "string");
+
+        let find = find_by_name(&caps, "find_deployables_by_name").unwrap();
+        assert_eq!(find.input_schema["required"][0], "name");
+    }
+
+    #[test]
+    fn auto_derives_for_by_fk_from_dependency_schema() {
+        let caps = CapabilitiesBuilder::new()
+            .auto_from_schemas(&[("dependency", "/dependency/graph", DEPENDENCY_SCHEMA)])
+            .build();
+        let names: Vec<&str> = caps.iter().map(|c| c.name).collect();
+        assert!(
+            names.contains(&"dependencys_for_deployable"),
+            "names = {names:?}"
+        );
+        assert!(
+            names.contains(&"dependencys_for_service"),
+            "names = {names:?}"
+        );
+
+        // Argument names mirror the GraphQL arg names.
+        let by_dep = find_by_name(&caps, "dependencys_for_deployable").unwrap();
+        assert_eq!(by_dep.input_schema["required"][0], "deployable_id");
+        if let CapabilityHandler::GraphQuery { query_template, .. } = &by_dep.handler {
+            assert!(query_template.contains("getByDeployableId(deployable_id:"));
+        } else {
+            panic!("expected GraphQuery handler");
+        }
+    }
+
+    #[test]
+    fn describe_overrides_default() {
+        let caps = CapabilitiesBuilder::new()
+            .auto_from_schemas(&[("deployable", "/deployable/graph", DEPLOYABLE_SCHEMA)])
+            .describe("list_deployables", "OVERRIDDEN")
+            .build();
+        let list = find_by_name(&caps, "list_deployables").unwrap();
+        assert_eq!(list.description, "OVERRIDDEN");
+    }
+
+    #[test]
+    fn describe_on_typo_warns() {
+        // Capture stderr is hard to do cleanly here; just confirm no
+        // capability got rewritten and the chain still finishes.
+        let caps = CapabilitiesBuilder::new()
+            .auto_from_schemas(&[("deployable", "/deployable/graph", DEPLOYABLE_SCHEMA)])
+            .describe("list_deployabls", "WRONG NAME")
+            .build();
+        // Original description still in place.
+        let list = find_by_name(&caps, "list_deployables").unwrap();
+        assert_ne!(list.description, "WRONG NAME");
+        assert!(list.description.contains("deployable"));
+    }
+
+    #[test]
+    fn add_custom_appears_in_build() {
+        let custom = Capability {
+            name: "blast_radius_for_service",
+            description: "Find every deployable that depends on a service.",
+            input_schema: json!({
+                "type": "object",
+                "required": ["service_id"],
+                "properties": { "service_id": { "type": "string" } }
+            }),
+            handler: CapabilityHandler::Custom(Arc::new(|_client, _args| -> ToolFuture {
+                Box::pin(async move { Ok(json!({ "ok": true })) })
+            })),
+        };
+        let caps = CapabilitiesBuilder::new()
+            .auto_from_schemas(&[("deployable", "/deployable/graph", DEPLOYABLE_SCHEMA)])
+            .add(custom)
+            .build();
+        let cap = find_by_name(&caps, "blast_radius_for_service");
+        assert!(cap.is_some(), "custom capability should be present");
+    }
+
+    #[test]
+    fn add_replaces_existing_capability_with_same_name() {
+        let replacement = Capability {
+            name: "list_deployables",
+            description: "BESPOKE",
+            input_schema: json!({ "type": "object" }),
+            handler: CapabilityHandler::Custom(Arc::new(|_client, _args| -> ToolFuture {
+                Box::pin(async move { Ok(json!({ "ok": true })) })
+            })),
+        };
+        let caps = CapabilitiesBuilder::new()
+            .auto_from_schemas(&[("deployable", "/deployable/graph", DEPLOYABLE_SCHEMA)])
+            .add(replacement)
+            .build();
+        let list = find_by_name(&caps, "list_deployables").unwrap();
+        assert_eq!(list.description, "BESPOKE");
+        // And only one capability has that name.
+        let count = caps.iter().filter(|c| c.name == "list_deployables").count();
+        assert_eq!(count, 1);
     }
 }
