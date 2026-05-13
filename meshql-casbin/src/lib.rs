@@ -25,7 +25,7 @@
 //! # }
 //! ```
 
-use casbin::{CoreApi, DefaultModel, Enforcer, FileAdapter, RbacApi};
+use casbin::{CoreApi, DefaultModel, Enforcer, FileAdapter, MgmtApi, RbacApi};
 use meshql_core::{Auth, Envelope, Stash};
 use std::path::Path;
 use thiserror::Error;
@@ -58,6 +58,36 @@ impl<A: Auth> CasbinAuth<A> {
         let model = DefaultModel::from_file(model_path).await?;
         let adapter = FileAdapter::new(policy_path);
         let enforcer = Enforcer::new(model, adapter).await?;
+        Ok(Self { enforcer, inner })
+    }
+
+    /// Construct from in-memory strings — useful when the model and policy
+    /// are embedded in the binary via `include_str!`. Empty rows and rows
+    /// starting with `#` are ignored.
+    pub async fn from_strings(
+        model_str: &str,
+        policy_str: &str,
+        inner: A,
+    ) -> Result<Self, CasbinAuthError> {
+        let model = DefaultModel::from_str(model_str).await?;
+        let mut enforcer = Enforcer::new(model, ()).await?;
+        for line in policy_str.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut parts = line.splitn(2, ',');
+            let Some(ptype) = parts.next().map(str::trim) else {
+                continue;
+            };
+            let Some(rest) = parts.next() else { continue };
+            let rule: Vec<String> = rest.split(',').map(|s| s.trim().to_string()).collect();
+            if ptype == "g" {
+                enforcer.add_grouping_policy(rule).await?;
+            } else if ptype == "p" {
+                enforcer.add_policy(rule).await?;
+            }
+        }
         Ok(Self { enforcer, inner })
     }
 

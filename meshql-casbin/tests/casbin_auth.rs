@@ -112,3 +112,42 @@ async fn end_to_end_bob_editor_cannot_access_admin_only_record() {
     let env = envelope_with_tokens(vec!["admin".into()]);
     assert!(!auth.is_authorized(&roles, &env));
 }
+
+// Equivalent suite using in-memory model/policy strings.
+const MODEL_STR: &str = r#"[request_definition]
+r = sub, obj, act
+
+[policy_definition]
+p = sub, obj, act
+
+[role_definition]
+g = _, _
+
+[policy_effect]
+e = some(where (p.eft == allow))
+
+[matchers]
+m = g(r.sub, p.sub) && keyMatch(r.obj, p.obj) && (r.act == p.act || p.act == "*")
+"#;
+
+const POLICY_STR: &str = r#"
+# this is a comment, should be ignored
+p, admin, /*, *
+p, editor, /*, read
+
+g, alice, admin
+g, bob, editor
+"#;
+
+#[tokio::test]
+async fn from_strings_supports_embedded_policy() {
+    let auth = CasbinAuth::from_strings(MODEL_STR, POLICY_STR, StashKeyAuth::new("user_id"))
+        .await
+        .expect("should load embedded model/policy");
+    assert_eq!(
+        auth.get_auth_token(&stash_with_user("alice")),
+        vec!["admin"]
+    );
+    assert_eq!(auth.get_auth_token(&stash_with_user("bob")), vec!["editor"]);
+    assert!(auth.get_auth_token(&stash_with_user("nobody")).is_empty());
+}
