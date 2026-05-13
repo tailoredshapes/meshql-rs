@@ -1,0 +1,17 @@
+[package]
+name = "meshql-casbin"
+version = "0.1.0"
+edition = "2021"
+description = "Casbin authorizer for meshql — wraps any Auth implementation and resolves roles via a Casbin policy"
+license = "MIT"
+repository = "https://github.com/tailoredshapes/meshql-rs"
+
+[dependencies]
+meshql-core = { path = "../meshql-core" }
+casbin = "2.20"
+tokio = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

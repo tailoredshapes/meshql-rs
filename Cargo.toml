@@ -5,6 +5,7 @@ members = [
     "meshql-graphlette",
     "meshql-restlette",
     "meshql-mcp",
+    "meshql-casbin",
     "meshql-server",
     "meshql-cert",
     "meshql-merkql",

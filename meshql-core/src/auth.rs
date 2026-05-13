@@ -92,11 +92,7 @@ mod tests {
     #[test]
     fn stash_key_auth_always_authorizes() {
         let auth = StashKeyAuth::new("user_id");
-        let envelope = Envelope::new(
-            "x".to_string(),
-            Stash::new(),
-            vec!["admin".to_string()],
-        );
+        let envelope = Envelope::new("x".to_string(), Stash::new(), vec!["admin".to_string()]);
         assert!(auth.is_authorized(&[], &envelope));
         assert!(auth.is_authorized(&["random".to_string()], &envelope));
     }

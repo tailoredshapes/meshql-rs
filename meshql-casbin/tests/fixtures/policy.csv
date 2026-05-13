@@ -1,0 +1,8 @@
+p, admin, /*, *
+p, editor, /*, read
+p, editor, /*, write
+p, viewer, /*, read
+
+g, alice, admin
+g, bob, editor
+g, carol, viewer
