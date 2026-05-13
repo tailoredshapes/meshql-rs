@@ -6,19 +6,38 @@ use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
 pub use meshql_restlette::{
-    build_restlette_router_ext, PostCreateFn, SideEffectContext, ValidatorContext, ValidatorFn,
+    build_restlette_router_ext, AuthContext, PostCreateFn, SideEffectContext, ValidatorContext,
+    ValidatorFn,
 };
 
 /// Build the full Axum application from a ServerConfig.
 ///
 /// For each graphlette, it also registers the searcher in the ResolverRegistry under the
 /// graphlette path so that inter-graphlette resolution works without HTTP.
+///
+/// Uses `NoAuth` — see `build_app_with_auth` to provide a custom authorizer.
 pub async fn build_app(config: ServerConfig) -> anyhow::Result<Router> {
-    build_app_ext(config, Router::new()).await
+    build_app_with_auth(config, Arc::new(NoAuth), Router::new()).await
 }
 
 /// Build the full Axum application, merging in extra custom routes.
+///
+/// Uses `NoAuth` — see `build_app_with_auth` to provide a custom authorizer.
 pub async fn build_app_ext(config: ServerConfig, extra: Router) -> anyhow::Result<Router> {
+    build_app_with_auth(config, Arc::new(NoAuth), extra).await
+}
+
+/// Build the full Axum application with a caller-supplied `Auth` and extra routes.
+///
+/// The `Auth` is used by every restlette route to filter records by
+/// `authorized_tokens`. Wrap your identity-extraction `Auth` (e.g.
+/// `StashKeyAuth`) with `CasbinAuth` from `meshql-casbin` to plug in
+/// role-based access control.
+pub async fn build_app_with_auth(
+    config: ServerConfig,
+    auth: Arc<dyn Auth>,
+    extra: Router,
+) -> anyhow::Result<Router> {
     let mut registry = ResolverRegistry::new();
 
     // First pass: register all graphlette searchers in the registry
@@ -37,7 +56,6 @@ pub async fn build_app_ext(config: ServerConfig, extra: Router) -> anyhow::Resul
     }
 
     // Add restlette routes
-    let auth: Arc<dyn Auth> = Arc::new(NoAuth);
     for r in config.restlettes {
         let router = build_restlette_router(&r.path, r.repository, Arc::clone(&auth));
         app = app.merge(router);
@@ -68,6 +86,20 @@ pub async fn run(config: ServerConfig) -> anyhow::Result<()> {
 pub async fn run_ext(config: ServerConfig, extra: Router) -> anyhow::Result<()> {
     let port = config.port;
     let app = build_app_ext(config, extra).await?;
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    println!("meshql-rs listening on port {port}");
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
+/// Start the server with a caller-supplied `Auth` and extra custom routes.
+pub async fn run_with_auth(
+    config: ServerConfig,
+    auth: Arc<dyn Auth>,
+    extra: Router,
+) -> anyhow::Result<()> {
+    let port = config.port;
+    let app = build_app_with_auth(config, auth, extra).await?;
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     println!("meshql-rs listening on port {port}");
     axum::serve(listener, app).await?;
