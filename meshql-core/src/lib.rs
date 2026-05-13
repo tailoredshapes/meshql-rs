@@ -3,7 +3,7 @@ pub mod config;
 pub mod error;
 pub mod testing;
 
-pub use auth::{Auth, NoAuth};
+pub use auth::{Auth, NoAuth, StashKeyAuth};
 pub use config::{
     GraphletteConfig, InternalSingletonResolverConfig, InternalVectorResolverConfig, QueryConfig,
     RestletteConfig, RootConfig, RootConfigBuilder, ServerConfig, SingletonResolverConfig,
