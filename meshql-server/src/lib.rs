@@ -51,7 +51,7 @@ pub async fn build_app_with_auth(
     for g in config.graphlettes {
         let schema = build_schema(&g.schema_text, &g.root_config, g.searcher, &registry)
             .map_err(|e| anyhow::anyhow!("Schema build error for {}: {:?}", g.path, e))?;
-        let router = GraphletteRouter::build(&g.path, schema);
+        let router = GraphletteRouter::build_with_auth(&g.path, schema, Arc::clone(&auth));
         app = app.merge(router);
     }
 

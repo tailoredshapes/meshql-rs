@@ -92,7 +92,7 @@ impl SqliteSearcher {
         &self,
         template: &str,
         args: &Stash,
-        _creds: &[String],
+        creds: &[String],
         at: i64,
         limit: Option<i64>,
     ) -> Result<Vec<Stash>> {
@@ -147,6 +147,9 @@ FROM latest WHERE rn = 1 AND deleted = 0"
         let mut results = Vec::new();
         for row in rows {
             let env = Self::row_to_envelope(&row)?;
+            if !meshql_core::envelope_visible_to(&env, creds) {
+                continue;
+            }
             let mut stash = env.payload.clone();
             stash.insert("id".to_string(), json!(env.id));
             results.push(stash);

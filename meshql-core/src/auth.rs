@@ -5,6 +5,53 @@ pub trait Auth: Send + Sync {
     fn is_authorized(&self, credentials: &[String], envelope: &Envelope) -> bool;
 }
 
+/// Request-scoped auth context: a Stash populated by edge middleware from
+/// trusted identity headers. Both `meshql-restlette` and `meshql-graphlette`
+/// read this from axum request extensions and feed it to the configured
+/// `Auth::get_auth_token`.
+#[derive(Clone, Debug, Default)]
+pub struct AuthContext(pub Stash);
+
+impl AuthContext {
+    pub fn new(stash: Stash) -> Self {
+        Self(stash)
+    }
+
+    pub fn into_stash(self) -> Stash {
+        self.0
+    }
+}
+
+/// Default visibility predicate used by Repository implementations.
+///
+/// An envelope is visible to a caller iff any of:
+///   - the envelope has no `authorized_tokens` (treated as public),
+///   - the caller holds the wildcard token `"*"` (system / NoAuth caller),
+///   - the envelope is tagged with `"*"` (everyone with any credential),
+///   - any of the caller's tokens appears in the envelope's
+///     `authorized_tokens`.
+///
+/// The token-overlap rule mirrors the canonical Java implementations
+/// (`RDBMSSearcher`, `MongoSearcher`, `InMemorySearcher`) which apply the
+/// same overlap via `Authorizer::isAuthorized`. The `"*"` wildcard is a
+/// meshql-rs convention preserved from `NoAuth`, used for internal /
+/// system reads where no caller identity is available.
+pub fn envelope_visible_to(envelope: &Envelope, tokens: &[String]) -> bool {
+    if envelope.authorized_tokens.is_empty() {
+        return true;
+    }
+    if tokens.iter().any(|t| t == "*") {
+        return true;
+    }
+    if envelope.authorized_tokens.iter().any(|t| t == "*") {
+        return true;
+    }
+    envelope
+        .authorized_tokens
+        .iter()
+        .any(|t| tokens.iter().any(|c| c == t))
+}
+
 pub struct NoAuth;
 
 impl Auth for NoAuth {

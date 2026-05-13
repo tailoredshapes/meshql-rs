@@ -366,7 +366,8 @@ fn singleton_resolver_field(
                     serde_json::Value::String(id_val.to_string()),
                 );
                 let at = Utc::now().timestamp_millis();
-                match s.find(&tmpl, &args, &["*".to_string()], at).await {
+                let creds: Vec<String> = ctx.data_opt::<Vec<String>>().cloned().unwrap_or_default();
+                match s.find(&tmpl, &args, &creds, at).await {
                     Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stash))),
                     Ok(None) => Ok(FieldValue::NONE),
                     Err(e) => Err(async_graphql::Error::new(e.to_string())),
@@ -438,7 +439,8 @@ fn vector_resolver_field(
                     serde_json::Value::String(id_val.to_string()),
                 );
                 let at = Utc::now().timestamp_millis();
-                match s.find_all(&tmpl, &args, &["*".to_string()], at).await {
+                let creds: Vec<String> = ctx.data_opt::<Vec<String>>().cloned().unwrap_or_default();
+                match s.find_all(&tmpl, &args, &creds, at).await {
                     Ok(stashes) => {
                         let items: Vec<FieldValue> =
                             stashes.into_iter().map(FieldValue::owned_any).collect();
@@ -485,7 +487,8 @@ fn internal_singleton_resolver_field(
                 serde_json::Value::String(id_val.to_string()),
             );
             let at = Utc::now().timestamp_millis();
-            match s.find(&tmpl, &args, &["*".to_string()], at).await {
+            let creds: Vec<String> = ctx.data_opt::<Vec<String>>().cloned().unwrap_or_default();
+            match s.find(&tmpl, &args, &creds, at).await {
                 Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stash))),
                 Ok(None) => Ok(FieldValue::NONE),
                 Err(e) => Err(async_graphql::Error::new(e.to_string())),
@@ -525,7 +528,8 @@ fn internal_vector_resolver_field(
                 serde_json::Value::String(id_val.to_string()),
             );
             let at = Utc::now().timestamp_millis();
-            match s.find_all(&tmpl, &args, &["*".to_string()], at).await {
+            let creds: Vec<String> = ctx.data_opt::<Vec<String>>().cloned().unwrap_or_default();
+            match s.find_all(&tmpl, &args, &creds, at).await {
                 Ok(stashes) => {
                     let items: Vec<FieldValue> =
                         stashes.into_iter().map(FieldValue::owned_any).collect();
@@ -686,15 +690,16 @@ pub fn build_schema(
                             }
                         }
 
-                        let creds = &["*".to_string()];
+                        let creds: Vec<String> =
+                            ctx.data_opt::<Vec<String>>().cloned().unwrap_or_default();
                         if is_singleton {
-                            match s.find(&tmpl, &args, creds, at).await {
+                            match s.find(&tmpl, &args, &creds, at).await {
                                 Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stash))),
                                 Ok(None) => Ok(FieldValue::NONE),
                                 Err(e) => Err(async_graphql::Error::new(e.to_string())),
                             }
                         } else {
-                            match s.find_all(&tmpl, &args, creds, at).await {
+                            match s.find_all(&tmpl, &args, &creds, at).await {
                                 Ok(stashes) => {
                                     let items: Vec<FieldValue> =
                                         stashes.into_iter().map(FieldValue::owned_any).collect();
@@ -811,37 +816,56 @@ pub fn build_schema(
 pub struct GraphletteRouter;
 
 impl GraphletteRouter {
+    /// Build a graphlette route, no auth (all reads see `["*"]` credentials).
     pub fn build(path: &str, schema: Schema) -> Router {
+        Self::build_with_auth(path, schema, Arc::new(meshql_core::NoAuth))
+    }
+
+    /// Build a graphlette route that resolves the caller's tokens via the
+    /// provided `Auth`. The route reads the request-scoped `AuthContext`
+    /// extension (populated by edge middleware), calls
+    /// `auth.get_auth_token(&stash)`, and threads the resulting tokens
+    /// into the async-graphql execution context. Resolvers then filter
+    /// rows via `meshql_core::envelope_visible_to`.
+    pub fn build_with_auth(path: &str, schema: Schema, auth: Arc<dyn meshql_core::Auth>) -> Router {
         let schema = Arc::new(schema);
         Router::new().route(
             path,
-            post(move |body: axum::body::Bytes| {
-                let schema = Arc::clone(&schema);
-                async move {
-                    let request: async_graphql::Request = match serde_json::from_slice(&body) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            return (
-                                StatusCode::BAD_REQUEST,
-                                axum::Json(serde_json::json!({
-                                    "errors": [{"message": e.to_string()}]
-                                })),
-                            )
-                                .into_response();
-                        }
-                    };
-                    let response = schema.execute(request).await;
-                    let body = serde_json::json!({
-                        "data": response.data,
-                        "errors": if response.errors.is_empty() {
-                            serde_json::Value::Null
-                        } else {
-                            serde_json::to_value(&response.errors).unwrap_or(serde_json::Value::Null)
-                        },
-                    });
-                    axum::Json(body).into_response()
-                }
-            }),
+            post(
+                move |auth_ctx: Option<axum::Extension<meshql_core::AuthContext>>,
+                      body: axum::body::Bytes| {
+                    let schema = Arc::clone(&schema);
+                    let auth = Arc::clone(&auth);
+                    async move {
+                        let stash = auth_ctx.map(|e| e.0 .0).unwrap_or_default();
+                        let tokens: Vec<String> = auth.get_auth_token(&stash);
+                        let mut request: async_graphql::Request =
+                            match serde_json::from_slice(&body) {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    return (
+                                        StatusCode::BAD_REQUEST,
+                                        axum::Json(serde_json::json!({
+                                            "errors": [{"message": e.to_string()}]
+                                        })),
+                                    )
+                                        .into_response();
+                                }
+                            };
+                        request = request.data(tokens);
+                        let response = schema.execute(request).await;
+                        let body = serde_json::json!({
+                            "data": response.data,
+                            "errors": if response.errors.is_empty() {
+                                serde_json::Value::Null
+                            } else {
+                                serde_json::to_value(&response.errors).unwrap_or(serde_json::Value::Null)
+                            },
+                        });
+                        axum::Json(body).into_response()
+                    }
+                },
+            ),
         )
     }
 }

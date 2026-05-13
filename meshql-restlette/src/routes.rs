@@ -5,21 +5,12 @@ use axum::{
     routing::{get, post},
     Extension, Json, Router,
 };
-use meshql_core::{Auth, Envelope, Repository, Stash};
+use meshql_core::{Auth, AuthContext, Envelope, Repository, Stash};
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// Request-scoped auth context, typically populated by an edge middleware
-/// from trusted headers. Handlers fall back to an empty Stash when absent
-/// so unwired deployments continue to work (Auth impls like NoAuth ignore
-/// the Stash anyway).
-#[derive(Clone, Default)]
-pub struct AuthContext(pub Stash);
-
-impl AuthContext {
-    fn extract(ext: Option<Extension<AuthContext>>) -> Stash {
-        ext.map(|e| e.0 .0).unwrap_or_default()
-    }
+fn extract_stash(ext: Option<Extension<AuthContext>>) -> Stash {
+    ext.map(|e| e.0 .0).unwrap_or_default()
 }
 
 /// Validation result: Ok(()) to proceed, Err(message) to reject with 400.
@@ -125,7 +116,7 @@ async fn create_handler(
     }
 
     let id = Uuid::new_v4().to_string();
-    let stash = AuthContext::extract(auth_ctx);
+    let stash = extract_stash(auth_ctx);
     let tokens = state.auth.get_auth_token(&stash);
     let envelope = Envelope::new(id, payload, tokens.clone());
     match state.repo.create(envelope, &tokens).await {
@@ -154,7 +145,7 @@ async fn list_handler(
     State(state): State<RestletteState>,
     auth_ctx: Option<Extension<AuthContext>>,
 ) -> impl IntoResponse {
-    let stash = AuthContext::extract(auth_ctx);
+    let stash = extract_stash(auth_ctx);
     let tokens = state.auth.get_auth_token(&stash);
     match state.repo.list(&tokens).await {
         Ok(envelopes) => {
@@ -177,7 +168,7 @@ async fn read_handler(
     auth_ctx: Option<Extension<AuthContext>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let stash = AuthContext::extract(auth_ctx);
+    let stash = extract_stash(auth_ctx);
     let tokens = state.auth.get_auth_token(&stash);
     match state.repo.read(&id, &tokens, None).await {
         Ok(Some(env)) => {
@@ -196,7 +187,7 @@ async fn update_handler(
     Path(id): Path<String>,
     Json(payload): Json<Stash>,
 ) -> impl IntoResponse {
-    let stash = AuthContext::extract(auth_ctx);
+    let stash = extract_stash(auth_ctx);
     let tokens = state.auth.get_auth_token(&stash);
 
     // Merge: read existing, overlay new fields
@@ -227,7 +218,7 @@ async fn delete_handler(
     auth_ctx: Option<Extension<AuthContext>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let stash = AuthContext::extract(auth_ctx);
+    let stash = extract_stash(auth_ctx);
     let tokens = state.auth.get_auth_token(&stash);
     match state.repo.remove(&id, &tokens).await {
         Ok(true) => {
