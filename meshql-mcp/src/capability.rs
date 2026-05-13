@@ -22,8 +22,24 @@
 use crate::client::MeshqlClient;
 use crate::schema::{parse_meshql_schema, render_entity_field_selection, ParsedSchema, QueryOp};
 use crate::tool::{Tool, ToolFuture, ToolHandler};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::sync::Arc;
+
+/// Strip out tool-meta fields that the LLM might pass alongside the payload
+/// (e.g. `id` on creates, future `_meta` markers). Returns a fresh JSON
+/// object suitable for use as the REST body.
+fn strip_meta(args: &Value) -> Value {
+    let mut out = Map::new();
+    if let Some(obj) = args.as_object() {
+        for (k, v) in obj {
+            if k == "id" {
+                continue;
+            }
+            out.insert(k.clone(), v.clone());
+        }
+    }
+    Value::Object(out)
+}
 
 /// A single MCP operation: a named/described/schema-typed wrapper around a
 /// [`CapabilityHandler`] that knows how to dispatch itself.
@@ -36,8 +52,10 @@ pub struct Capability {
 }
 
 /// What kind of work a [`Capability`] does when invoked. The first three
-/// variants are templated dispatchers; `Custom` is an escape hatch for
-/// handlers that don't fit a template.
+/// variants are read/RPC dispatchers (no identity required); the `Entity*`
+/// variants are mutating writes that **require** the MCP server's client to
+/// have been built with an identity (see [`crate::client::MeshqlClient::with_identity_from_env`]).
+/// `Custom` is an escape hatch.
 #[derive(Clone)]
 pub enum CapabilityHandler {
     /// POST a templated GraphQL query to a graphlette endpoint and return the
@@ -56,13 +74,25 @@ pub enum CapabilityHandler {
         /// `"/test_environment/{id}/history"`.
         path_template: String,
     },
-    /// POST a templated REST path with an optional body. Both path
-    /// placeholders and body string-leaf placeholders resolve from the tool's
-    /// input JSON.
+    /// POST a templated REST path with an optional body — used for RPC-shaped
+    /// reads that don't fit GraphQL (e.g. `compute_plan_for_change_request`).
+    /// No identity is required; this is for computed/aggregated endpoints,
+    /// not domain writes. Use the `EntityCreate`/`EntityUpdate`/`EntityDelete`
+    /// variants for writes that mutate envelopes.
     RestPost {
         path_template: String,
         body_template: Option<Value>,
     },
+    /// `POST /<entity>/api` — create a new envelope. The whole input JSON
+    /// (minus any fields named in `meta_keys`) becomes the payload. Requires
+    /// identity (returns a clear error to the caller otherwise).
+    EntityCreate { api_path: String },
+    /// `PUT /<entity>/api/{id}` — update an existing envelope. Reads the `id`
+    /// field out of the input, sends the rest as the payload. Requires identity.
+    EntityUpdate { api_path: String },
+    /// `DELETE /<entity>/api/{id}` — soft-delete an envelope. Reads the `id`
+    /// field out of the input. Requires identity.
+    EntityDelete { api_path: String },
     /// Run a [`ToolHandler`] directly. Used for domain logic that doesn't fit
     /// a template (snapshot-based traversals etc.).
     Custom(ToolHandler),
@@ -132,6 +162,54 @@ impl Capability {
                             None => Value::Object(serde_json::Map::new()),
                         };
                         client.post_path(&path, &body).await
+                    })
+                })
+            }
+            CapabilityHandler::EntityCreate { api_path } => {
+                let api_path = Arc::new(api_path);
+                Arc::new(move |client, args| -> ToolFuture {
+                    let api_path = api_path.clone();
+                    Box::pin(async move {
+                        client.require_identity()?;
+                        let payload = strip_meta(&args);
+                        client.post_path(&api_path, &payload).await
+                    })
+                })
+            }
+            CapabilityHandler::EntityUpdate { api_path } => {
+                let api_path = Arc::new(api_path);
+                Arc::new(move |client, args| -> ToolFuture {
+                    let api_path = api_path.clone();
+                    Box::pin(async move {
+                        client.require_identity()?;
+                        let id = args
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("update requires a string `id` argument")
+                            })?
+                            .to_string();
+                        let payload = strip_meta(&args);
+                        let url = format!("{}/{}", api_path, id);
+                        client.put_path(&url, &payload).await
+                    })
+                })
+            }
+            CapabilityHandler::EntityDelete { api_path } => {
+                let api_path = Arc::new(api_path);
+                Arc::new(move |client, args| -> ToolFuture {
+                    let api_path = api_path.clone();
+                    Box::pin(async move {
+                        client.require_identity()?;
+                        let id = args
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("delete requires a string `id` argument")
+                            })?
+                            .to_string();
+                        let url = format!("{}/{}", api_path, id);
+                        client.delete_path(&url).await
                     })
                 })
             }
@@ -304,6 +382,12 @@ impl CapabilitiesBuilder {
                     self = self.add(cap);
                 }
             }
+            // Write capabilities — auto-derived from the graph path:
+            //   /<entity>/graph  →  /<entity>/api  for create / update / delete
+            let api_path = graph_path.trim_end_matches("/graph").to_string() + "/api";
+            for cap in derive_write_capabilities(entity, api_path, &parsed) {
+                self = self.add(cap);
+            }
         }
         self
     }
@@ -349,6 +433,118 @@ impl CapabilitiesBuilder {
     pub fn build(self) -> Vec<Capability> {
         self.capabilities
     }
+}
+
+/// Build the three baseline write capabilities for an entity:
+/// `create_X`, `update_X`, `delete_X`. They all dispatch to
+/// `/<entity>/api` and require a configured identity at call time.
+fn derive_write_capabilities(
+    entity: &'static str,
+    api_path: String,
+    parsed: &ParsedSchema,
+) -> Vec<Capability> {
+    let create_schema = build_payload_schema(parsed);
+    let update_schema = build_update_schema(parsed);
+    vec![
+        make_capability(
+            leak_string(format!("create_{entity}")),
+            leak_string(default_description_create(entity, &parsed.entity_name)),
+            create_schema,
+            CapabilityHandler::EntityCreate {
+                api_path: api_path.clone(),
+            },
+        ),
+        make_capability(
+            leak_string(format!("update_{entity}")),
+            leak_string(default_description_update(entity, &parsed.entity_name)),
+            update_schema,
+            CapabilityHandler::EntityUpdate {
+                api_path: api_path.clone(),
+            },
+        ),
+        make_capability(
+            leak_string(format!("delete_{entity}")),
+            leak_string(default_description_delete(entity, &parsed.entity_name)),
+            json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }),
+            CapabilityHandler::EntityDelete { api_path },
+        ),
+    ]
+}
+
+/// JSON schema for the create input — every payload field on the entity,
+/// minus federated projections (which are resolved at read time) and `id`
+/// (the server generates it). Required fields are those whose `type_text`
+/// has a trailing `!`.
+fn build_payload_schema(parsed: &ParsedSchema) -> Value {
+    let mut props = Map::new();
+    let mut required: Vec<Value> = Vec::new();
+    for f in &parsed.entity_fields {
+        if f.is_federated || f.name == "id" {
+            continue;
+        }
+        let json_type = graphql_type_to_json_type(&f.type_text);
+        props.insert(f.name.clone(), json!({ "type": json_type }));
+        if f.type_text.trim_end().ends_with('!') {
+            required.push(Value::String(f.name.clone()));
+        }
+    }
+    json!({
+        "type": "object",
+        "properties": Value::Object(props),
+        "required": Value::Array(required)
+    })
+}
+
+/// JSON schema for `update_X`: same as the create payload but with `id` added
+/// as a required field, and no required payload fields (callers can update
+/// just the ones they care about).
+fn build_update_schema(parsed: &ParsedSchema) -> Value {
+    let mut props = Map::new();
+    props.insert("id".to_string(), json!({ "type": "string" }));
+    for f in &parsed.entity_fields {
+        if f.is_federated || f.name == "id" {
+            continue;
+        }
+        let json_type = graphql_type_to_json_type(&f.type_text);
+        props.insert(f.name.clone(), json!({ "type": json_type }));
+    }
+    json!({
+        "type": "object",
+        "properties": Value::Object(props),
+        "required": ["id"]
+    })
+}
+
+fn graphql_type_to_json_type(type_text: &str) -> &'static str {
+    let trimmed = type_text.trim_end_matches('!').trim();
+    match trimmed {
+        "Int" | "Float" => "number",
+        "Boolean" => "boolean",
+        _ if trimmed.starts_with('[') => "array",
+        _ => "string",
+    }
+}
+
+fn default_description_create(entity: &str, type_name: &str) -> String {
+    format!(
+        "Create a new {entity} ({type_name}). Requires MANIFOLD_USER_ID configured on this MCP server. The created envelope's `authorized_tokens` will be the caller's roles."
+    )
+}
+
+fn default_description_update(entity: &str, type_name: &str) -> String {
+    format!(
+        "Update an existing {entity} ({type_name}). Supply `id` plus any fields to change. Requires MANIFOLD_USER_ID configured on this MCP server."
+    )
+}
+
+fn default_description_delete(entity: &str, type_name: &str) -> String {
+    format!(
+        "Soft-delete a {entity} ({type_name}) by id. Requires MANIFOLD_USER_ID configured on this MCP server."
+    )
 }
 
 /// Build one capability for a `Query` operation, using the naming-convention
@@ -774,6 +970,67 @@ type Query {
             .build();
         let cap = find_by_name(&caps, "blast_radius_for_service");
         assert!(cap.is_some(), "custom capability should be present");
+    }
+
+    #[test]
+    fn auto_derives_create_update_delete_for_each_entity() {
+        let caps = CapabilitiesBuilder::new()
+            .auto_from_schemas(&[("deployable", "/deployable/graph", DEPLOYABLE_SCHEMA)])
+            .build();
+        let names: Vec<&str> = caps.iter().map(|c| c.name).collect();
+        assert!(names.contains(&"create_deployable"), "names = {names:?}");
+        assert!(names.contains(&"update_deployable"), "names = {names:?}");
+        assert!(names.contains(&"delete_deployable"), "names = {names:?}");
+
+        let create = find_by_name(&caps, "create_deployable").unwrap();
+        // Required fields are the schema's non-null fields, federated `team` is
+        // excluded, and `id` is excluded (server generates it).
+        assert_eq!(create.input_schema["required"][0], "name");
+        assert!(create.input_schema["properties"]["name"]["type"] == "string");
+        assert!(
+            create.input_schema["properties"].get("team").is_none(),
+            "federated `team` projection should not be in the create schema"
+        );
+        assert!(
+            create.input_schema["properties"].get("id").is_none(),
+            "`id` should not be in the create schema"
+        );
+        assert!(matches!(
+            &create.handler,
+            CapabilityHandler::EntityCreate { api_path } if api_path == "/deployable/api"
+        ));
+
+        let update = find_by_name(&caps, "update_deployable").unwrap();
+        assert_eq!(update.input_schema["required"][0], "id");
+        assert!(update.input_schema["properties"]["id"]["type"] == "string");
+        // Update should include all payload fields as optional
+        assert!(update.input_schema["properties"].get("name").is_some());
+
+        let delete = find_by_name(&caps, "delete_deployable").unwrap();
+        assert_eq!(delete.input_schema["required"][0], "id");
+        assert!(matches!(
+            &delete.handler,
+            CapabilityHandler::EntityDelete { api_path } if api_path == "/deployable/api"
+        ));
+    }
+
+    #[test]
+    fn write_capability_descriptions_mention_identity_requirement() {
+        let caps = CapabilitiesBuilder::new()
+            .auto_from_schemas(&[("deployable", "/deployable/graph", DEPLOYABLE_SCHEMA)])
+            .build();
+        for name in [
+            "create_deployable",
+            "update_deployable",
+            "delete_deployable",
+        ] {
+            let cap = find_by_name(&caps, name).unwrap();
+            assert!(
+                cap.description.contains("MANIFOLD_USER_ID"),
+                "{name} description should mention identity requirement, got: {}",
+                cap.description
+            );
+        }
     }
 
     #[test]

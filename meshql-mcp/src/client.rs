@@ -24,9 +24,31 @@
 use anyhow::Context;
 use serde_json::Value;
 
+/// Trusted-header identity attached to outbound requests. When `Some`, every
+/// HTTP call this client makes carries `X-Manifold-User-Id` (and optional
+/// `X-Manifold-User-Groups`) so the receiving meshql deployment can resolve
+/// roles via its configured `Auth`. The MCP server passes this through
+/// verbatim from its environment — it does not negotiate the identity with
+/// the MCP client.
+#[derive(Clone, Debug, Default)]
+pub struct Identity {
+    pub user_id: Option<String>,
+    pub groups: Option<String>,
+}
+
+impl Identity {
+    pub fn is_set(&self) -> bool {
+        self.user_id
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+    }
+}
+
 pub struct MeshqlClient {
     base_url: String,
     http: reqwest::Client,
+    identity: Identity,
 }
 
 impl MeshqlClient {
@@ -34,14 +56,57 @@ impl MeshqlClient {
         Self {
             base_url: base_url.into(),
             http: reqwest::Client::new(),
+            identity: Identity::default(),
         }
     }
 
     /// Build a client from `env_var`, falling back to `default_url` when the
-    /// variable is unset.
+    /// variable is unset. Also picks up `MANIFOLD_USER_ID` and
+    /// `MANIFOLD_USER_GROUPS` if set so write capabilities work out of the box.
     pub fn from_env(env_var: &str, default_url: &str) -> Self {
         let base_url = std::env::var(env_var).unwrap_or_else(|_| default_url.to_string());
-        Self::new(base_url)
+        Self::new(base_url).with_identity_from_env()
+    }
+
+    /// Read `MANIFOLD_USER_ID` and `MANIFOLD_USER_GROUPS` from the environment
+    /// and attach as the trusted identity carried on every outbound request.
+    /// Empty / unset env vars leave the identity empty, in which case writes
+    /// will fail with a clear error (see [`Self::require_identity`]).
+    pub fn with_identity_from_env(mut self) -> Self {
+        self.identity.user_id = std::env::var("MANIFOLD_USER_ID").ok();
+        self.identity.groups = std::env::var("MANIFOLD_USER_GROUPS").ok();
+        self
+    }
+
+    pub fn identity(&self) -> &Identity {
+        &self.identity
+    }
+
+    /// Used by write capabilities before issuing a request — returns a
+    /// human-readable error suitable for surfacing to the MCP client when
+    /// the configured identity is missing.
+    pub fn require_identity(&self) -> anyhow::Result<()> {
+        if self.identity.is_set() {
+            Ok(())
+        } else {
+            anyhow::bail!(
+                "this write requires an identity — set MANIFOLD_USER_ID in this MCP server's env (e.g. in your client's .mcp.json) to enable writes"
+            )
+        }
+    }
+
+    fn apply_identity(&self, mut req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        if let Some(id) = self.identity.user_id.as_deref() {
+            if !id.is_empty() {
+                req = req.header("X-Manifold-User-Id", id);
+            }
+        }
+        if let Some(groups) = self.identity.groups.as_deref() {
+            if !groups.is_empty() {
+                req = req.header("X-Manifold-User-Groups", groups);
+            }
+        }
+        req
     }
 
     pub fn base_url(&self) -> &str {
@@ -52,8 +117,7 @@ impl MeshqlClient {
     pub async fn list(&self, entity: &str) -> anyhow::Result<Value> {
         let url = format!("{}/{entity}/api", self.base_url);
         let resp = self
-            .http
-            .get(&url)
+            .apply_identity(self.http.get(&url))
             .send()
             .await
             .with_context(|| format!("GET {url}"))?;
@@ -69,8 +133,7 @@ impl MeshqlClient {
     pub async fn get(&self, entity: &str, id: &str) -> anyhow::Result<Option<Value>> {
         let url = format!("{}/{entity}/api/{id}", self.base_url);
         let resp = self
-            .http
-            .get(&url)
+            .apply_identity(self.http.get(&url))
             .send()
             .await
             .with_context(|| format!("GET {url}"))?;
@@ -92,8 +155,7 @@ impl MeshqlClient {
     pub async fn get_path(&self, path: &str) -> anyhow::Result<Value> {
         let url = format!("{}{path}", self.base_url);
         let resp = self
-            .http
-            .get(&url)
+            .apply_identity(self.http.get(&url))
             .send()
             .await
             .with_context(|| format!("GET {url}"))?;
@@ -109,9 +171,7 @@ impl MeshqlClient {
     pub async fn post_path(&self, path: &str, body: &Value) -> anyhow::Result<Value> {
         let url = format!("{}{path}", self.base_url);
         let resp = self
-            .http
-            .post(&url)
-            .json(body)
+            .apply_identity(self.http.post(&url).json(body))
             .send()
             .await
             .with_context(|| format!("POST {url}"))?;
@@ -121,6 +181,42 @@ impl MeshqlClient {
         resp.json::<Value>()
             .await
             .with_context(|| format!("decode {url}"))
+    }
+
+    /// `PUT <base_url><path>` with a JSON body.
+    pub async fn put_path(&self, path: &str, body: &Value) -> anyhow::Result<Value> {
+        let url = format!("{}{path}", self.base_url);
+        let resp = self
+            .apply_identity(self.http.put(&url).json(body))
+            .send()
+            .await
+            .with_context(|| format!("PUT {url}"))?;
+        if !resp.status().is_success() {
+            anyhow::bail!("PUT {url} -> {}", resp.status());
+        }
+        resp.json::<Value>()
+            .await
+            .with_context(|| format!("decode {url}"))
+    }
+
+    /// `DELETE <base_url><path>`. Returns the JSON envelope of the deletion
+    /// confirmation, or `null` for empty bodies.
+    pub async fn delete_path(&self, path: &str) -> anyhow::Result<Value> {
+        let url = format!("{}{path}", self.base_url);
+        let resp = self
+            .apply_identity(self.http.delete(&url))
+            .send()
+            .await
+            .with_context(|| format!("DELETE {url}"))?;
+        if !resp.status().is_success() {
+            anyhow::bail!("DELETE {url} -> {}", resp.status());
+        }
+        // Some servers return an empty body on DELETE; tolerate that.
+        let text = resp.text().await.with_context(|| format!("decode {url}"))?;
+        if text.is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text).with_context(|| format!("parse {url}"))
     }
 
     /// POST a GraphQL query to a meshql graphlette endpoint.
@@ -139,9 +235,7 @@ impl MeshqlClient {
         let url = format!("{}{path}", self.base_url);
         let body = serde_json::json!({ "query": query });
         let resp = self
-            .http
-            .post(&url)
-            .json(&body)
+            .apply_identity(self.http.post(&url).json(&body))
             .send()
             .await
             .with_context(|| format!("POST {url}"))?;
