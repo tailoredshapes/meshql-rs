@@ -118,6 +118,13 @@ async fn create_handler(
     let id = Uuid::new_v4().to_string();
     let stash = extract_stash(auth_ctx);
     let tokens = state.auth.get_auth_token(&stash);
+    if !state.auth.authorize_action(&tokens, "write") {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "write not permitted for your role"})),
+        )
+            .into_response();
+    }
     let envelope = Envelope::new(id, payload, tokens.clone());
     match state.repo.create(envelope, &tokens).await {
         Ok(env) => {
@@ -189,6 +196,13 @@ async fn update_handler(
 ) -> impl IntoResponse {
     let stash = extract_stash(auth_ctx);
     let tokens = state.auth.get_auth_token(&stash);
+    if !state.auth.authorize_action(&tokens, "write") {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "write not permitted for your role"})),
+        )
+            .into_response();
+    }
 
     // Merge: read existing, overlay new fields
     let merged = match state.repo.read(&id, &tokens, None).await {
@@ -220,6 +234,13 @@ async fn delete_handler(
 ) -> impl IntoResponse {
     let stash = extract_stash(auth_ctx);
     let tokens = state.auth.get_auth_token(&stash);
+    if !state.auth.authorize_action(&tokens, "write") {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "write not permitted for your role"})),
+        )
+            .into_response();
+    }
     match state.repo.remove(&id, &tokens).await {
         Ok(true) => {
             let body = serde_json::json!({"id": id, "status": "deleted"});

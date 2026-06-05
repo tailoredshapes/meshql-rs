@@ -107,11 +107,23 @@ impl<A: Auth> CasbinAuth<A> {
 
 impl<A: Auth> Auth for CasbinAuth<A> {
     fn get_auth_token(&self, context: &Stash) -> Vec<String> {
-        let user_ids = self.inner.get_auth_token(context);
-        let Some(user_id) = user_ids.first() else {
-            return Vec::new();
-        };
-        self.enforcer.get_roles_for_user(user_id, None)
+        let mut creds: Vec<String> = Vec::new();
+        // Roles bound to the user_id in the embedded g-policy (e.g. a known
+        // operator -> admin).
+        if let Some(user_id) = self.inner.get_auth_token(context).first() {
+            creds.extend(self.enforcer.get_roles_for_user(user_id, None));
+        }
+        // Roles the trusted edge injected directly as groups (the standard
+        // trusted-header model: the edge resolves identity -> role and stamps
+        // it, so callers we've never seen — SSO prospects — still get a role).
+        if let Some(groups) = context.get("groups").and_then(|v| v.as_array()) {
+            for role in groups.iter().filter_map(|g| g.as_str()) {
+                if !creds.iter().any(|c| c == role) {
+                    creds.push(role.to_string());
+                }
+            }
+        }
+        creds
     }
 
     fn is_authorized(&self, credentials: &[String], envelope: &Envelope) -> bool {
@@ -122,5 +134,56 @@ impl<A: Auth> Auth for CasbinAuth<A> {
             .authorized_tokens
             .iter()
             .any(|t| credentials.iter().any(|c| c == t))
+    }
+
+    fn authorize_action(&self, credentials: &[String], action: &str) -> bool {
+        // Allowed iff any of the caller's roles permits `action` on the API
+        // surface per the embedded policy (admin: `*`, editor: write, viewer:
+        // read). `/api` matches the policy's `/*` object glob.
+        credentials.iter().any(|role| {
+            self.enforcer
+                .enforce((role.as_str(), "/api", action))
+                .unwrap_or(false)
+        })
+    }
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::*;
+    use meshql_core::{Auth, Stash, StashKeyAuth};
+    use serde_json::json;
+
+    const MODEL: &str = "[request_definition]\nr = sub, obj, act\n[policy_definition]\np = sub, obj, act\n[role_definition]\ng = _, _\n[policy_effect]\ne = some(where (p.eft == allow))\n[matchers]\nm = g(r.sub, p.sub) && keyMatch(r.obj, p.obj) && (r.act == p.act || p.act == \"*\")\n";
+    const POLICY: &str = "p, admin, /*, *\np, editor, /*, read\np, editor, /*, write\np, viewer, /*, read\ng, alice@example.dev, admin\n";
+
+    async fn auth() -> CasbinAuth<StashKeyAuth> {
+        CasbinAuth::from_strings(MODEL, POLICY, StashKeyAuth::new("user_id"))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn write_action_enforced_by_role() {
+        let a = auth().await;
+        assert!(a.authorize_action(&["admin".into()], "write"));
+        assert!(a.authorize_action(&["editor".into()], "write"));
+        assert!(!a.authorize_action(&["viewer".into()], "write"));
+        assert!(!a.authorize_action(&[], "write"));
+        assert!(a.authorize_action(&["viewer".into()], "read"));
+    }
+
+    #[tokio::test]
+    async fn edge_injected_groups_become_roles() {
+        let a = auth().await;
+        let mut stash = Stash::new();
+        // A user we've never seen (an SSO prospect) — no g-binding — but the
+        // edge stamped a role via groups.
+        stash.insert("user_id".into(), json!("prospect@example.com"));
+        stash.insert("groups".into(), json!(["viewer"]));
+        let creds = a.get_auth_token(&stash);
+        assert!(creds.contains(&"viewer".to_string()));
+        assert!(!a.authorize_action(&creds, "write"));
+        assert!(a.authorize_action(&creds, "read"));
     }
 }
