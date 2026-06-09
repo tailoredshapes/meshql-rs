@@ -20,14 +20,14 @@ type Parent {
 }
 
 type Query {
-    getWidget(id: ID, at: Int): Widget
-    getWidgets(name: String, at: Int): [Widget]
-    getWidgetsByParent(id: ID, at: Int): [Widget]
+    getWidget(id: ID, at: Float): Widget
+    getWidgets(name: String, at: Float): [Widget]
+    getWidgetsByParent(id: ID, at: Float): [Widget]
 }
 ```
 
 Rules:
-- **Every** query takes `at: Int` (epoch millis, point-in-time read).
+- **Every** query takes `at: Float` (epoch millis, point-in-time read — not `Int`, which is 32-bit in GraphQL and overflows on millis).
 - Query naming: this example uses the entity-named dialect (`getWidget`/`getWidgets`/`getWidgetsBy<Parent>`) matching the repo's examples. If the service will be exposed to LLM agents via `meshql-mcp` auto-derivation, use the generic dialect instead (`getById`/`getAll`/`getByName`/`getBy<X>Id`) — the MCP parser matches those names exactly. See SKILL.md "Query naming".
 - Federated fields (`parent: Parent`) get a local type definition with just the fields you want reachable from this entity. One level of nesting is the norm.
 

@@ -154,3 +154,25 @@ Feature: Egg Economy E2E Certification
     When I query the "farm" graph with at=first_stamp: { getById(id: "<ids.farm.Green Acres>", at: first_stamp) { name farm_type } }
     Then there should be no GraphQL errors
     And the response at "data.getById.farm_type" should be "free_range"
+
+  Scenario: Temporal query propagates to federated coops
+    Given I capture the current timestamp as "before_update"
+    And I update "coop" "Sunrise" with data {"name": "Sunset", "farm_id": "<ids.farm.Green Acres>", "capacity": 20, "coop_type": "layer"}
+    When I query the "farm" graph with: { getById(id: "<ids.farm.Green Acres>") { coops { name } } }
+    Then there should be no GraphQL errors
+    And the response at "data.getById.coops" should contain an item where "name" is "Sunset"
+    When I query the "farm" graph with at=first_stamp: { getById(id: "<ids.farm.Green Acres>", at: first_stamp) { coops { name } } }
+    Then there should be no GraphQL errors
+    And the response at "data.getById.coops" should contain an item where "name" is "Sunrise"
+    And the response at "data.getById.coops" should not contain an item where "name" is "Sunset"
+
+  Scenario: Temporal query propagates through deep federation
+    Given I capture the current timestamp as "before_update"
+    And I update "hen" "Henrietta" with data {"name": "Henrietta II", "coop_id": "<ids.coop.Sunrise>", "breed": "Leghorn", "status": "retired"}
+    When I query the "farm" graph with: { getById(id: "<ids.farm.Green Acres>") { coops { name hens { name } } } }
+    Then there should be no GraphQL errors
+    And the response at "data.getById.coops.hens" should contain an item where "name" is "Henrietta II"
+    When I query the "farm" graph with at=first_stamp: { getById(id: "<ids.farm.Green Acres>", at: first_stamp) { coops { name hens { name } } } }
+    Then there should be no GraphQL errors
+    And the response at "data.getById.coops.hens" should contain an item where "name" is "Henrietta"
+    And the response at "data.getById.coops.hens" should not contain an item where "name" is "Henrietta II"

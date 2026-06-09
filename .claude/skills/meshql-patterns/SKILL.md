@@ -18,7 +18,7 @@ Follow these in every change; they are what the architecture excels at:
 
 1. **CQRS by convention.** Writes go through REST (`POST/PUT/DELETE /<entity>/api`). Reads — especially anything relational or historical — go through GraphQL (`/<entity>/graph`). Don't add write mutations to graphlettes; don't build join logic into restlettes.
 2. **Envelopes are immutable versions.** A PUT creates a new Envelope version. A DELETE writes a tombstone. Reads return the latest non-deleted version at-or-before the requested time. Never write code that updates a row/document in place or filters without excluding `deleted`.
-3. **Temporal everywhere.** Every GraphQL `Query` field takes `at: Int` (epoch millis) and every `Repository.read` / `Searcher.find` honors it. When adding a query, include `at` in the schema and let the adapter's version-windowing handle it.
+3. **Temporal everywhere.** Every GraphQL `Query` field takes `at: Float` (epoch millis — `Float`, not `Int`: GraphQL `Int` is 32-bit and overflows on millisecond timestamps) and every `Repository.read` / `Searcher.find` honors it. The root query's `at` propagates through federated resolver hops, so point-in-time reads are consistent across the whole graph. When adding a query, include `at` in the schema and let the adapter's version-windowing handle it.
 4. **Authorization rides the Envelope.** `authorized_tokens` on each Envelope is matched against caller credentials extracted by the `Auth` trait. Visibility: empty tokens = public, `"*"` = everyone, otherwise intersection. Repositories and Searchers must filter by tokens on *every* read path — adding a query that skips token filtering is a security bug.
 5. **Storage is pluggable, behavior is certified.** Datastores only implement `Repository` + `Searcher` (`meshql-core/src/lib.rs`). All business behavior lives above the traits. A new adapter must pass the shared certification tests (`meshql-core/src/testing.rs`, `meshql-cert`).
 
@@ -72,7 +72,7 @@ Query templates are **Handlebars producing a JSON query**: `{"farmId": "{{id}}"}
 
 ## Anti-patterns to flag
 
-- A GraphQL query without `at: Int` — breaks temporal uniformity.
+- A GraphQL query without `at: Float` — breaks temporal uniformity. (`at: Int` is also wrong: millisecond timestamps overflow GraphQL's 32-bit `Int`.)
 - Hard deletes, in-place updates, or reads that don't filter `deleted`.
 - A Searcher query path that skips `authorized_tokens` filtering.
 - Business/aggregation logic inside an adapter crate (`meshql-mongo`, `meshql-postgres`, …) — it belongs in restlette validators/side-effects, extra routes, or projection entities.

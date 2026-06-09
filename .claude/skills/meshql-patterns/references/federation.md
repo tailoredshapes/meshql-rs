@@ -43,7 +43,7 @@ Reads `farmId` from the parent Coop object, then invokes `getFarm` on `/farm/gra
 - `internal_singleton_resolver` / `internal_vector_resolver` force registry resolution explicitly.
 - Use full URLs only when federating across separately deployed services (see `examples/egg-economy-sap` / `-salesforce` for anti-corruption-layer federation to external systems).
 
-**Temporal caveat:** resolver hops currently evaluate at `Utc::now()` (`meshql-graphlette/src/schema_builder.rs`) — the root query's `at` does **not** propagate into federated fields. A point-in-time read applies to the root entity only; related entities resolve as of now. Don't promise (or test for) historical consistency across a resolver hop.
+**Temporal propagation:** the root query's effective `at` propagates through every resolver hop (the schema builder stamps it on each resolved parent via an internal `__at` key and re-stamps results, so deep chains stay consistent). A point-in-time read of a farm returns its coops — and their hens — *as they were at that time*. This is certified behavior: see "Temporal federated query" in `meshql-cert/tests/features/farm.feature` and the propagation scenarios in `egg_economy.feature`; don't break it when touching `schema_builder.rs`.
 
 ## Schema side
 
@@ -70,4 +70,4 @@ Keep these views one level deep. If a consumer needs farm → coop → hen in on
 2. Child RootConfig: `vector` query `get<Child>sBy<Parent>` with template `{"<parent>Id": "{{id}}"}`.
 3. Child schema: `parent` field + local parent type; child RootConfig: `singleton_resolver` with `Some("<parent>Id")`.
 4. Parent schema: `children: [Child]` field + local child type; parent RootConfig: `vector_resolver` with `None`.
-5. Both queries take `at: Int` in the schema.
+5. Both queries take `at: Float` in the schema.
