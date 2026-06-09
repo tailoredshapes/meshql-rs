@@ -8,7 +8,7 @@ repository = "https://github.com/tailoredshapes/meshql-rs"
 
 [dependencies]
 meshql-core = { version = "0.1.0", path = "../meshql-core" }
-merkql = { version = "0.2", path = "../../merkql" }
+merkql = "0.2"
 serde_json = { workspace = true }
 chrono = { workspace = true }
 async-trait = { workspace = true }

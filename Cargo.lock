@@ -1165,7 +1165,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "lambda_http",
- "merkql",
+ "merkql 0.2.0",
  "meshql-core",
  "meshql-graphlette",
  "meshql-lambda",
@@ -1297,7 +1297,7 @@ name = "farm-azure"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "merkql",
+ "merkql 0.2.0",
  "meshql-core",
  "meshql-graphlette",
  "meshql-merkql",
@@ -2437,7 +2437,25 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
 name = "merkql"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce59aa6182362001e4c2a538842ce9f445e421e5ca5e06625759f8a5140b873a"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "chrono",
+ "crc32fast",
+ "fs2",
+ "lz4_flex",
+ "serde",
+ "sha2",
+]
+
+[[package]]
+name = "merkql"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4055c2e603e0d0d80d50c90bcd139886622222adb7801519c34bf7f94b102664"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2452,10 +2470,12 @@ dependencies = [
 [[package]]
 name = "merksql"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "489f07ef3fbff4847ef7cd3dd18a7f31cfbbfe0fdf02079fd78ecf671d5fe1b9"
 dependencies = [
  "anyhow",
  "chrono",
- "merkql",
+ "merkql 0.1.1",
  "serde",
  "serde_json",
  "sqlparser",
@@ -2575,7 +2595,7 @@ dependencies = [
  "chrono",
  "cucumber",
  "handlebars",
- "merkql",
+ "merkql 0.2.0",
  "meshql-cert",
  "meshql-core",
  "meshql-graphlette",
@@ -2598,7 +2618,7 @@ dependencies = [
  "chrono",
  "cucumber",
  "handlebars",
- "merkql",
+ "merkql 0.1.1",
  "merksql",
  "meshql-cert",
  "meshql-core",
