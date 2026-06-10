@@ -2438,6 +2438,7 @@ checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 [[package]]
 name = "merkql"
 version = "0.2.0"
+source = "git+https://github.com/tailoredshapes/merkql?tag=v0.2.0#4925f5a014028afeb7a29ba53c8ddd9c13b32c54"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2452,6 +2453,7 @@ dependencies = [
 [[package]]
 name = "merksql"
 version = "0.1.0"
+source = "git+https://github.com/tailoredshapes/merksql?tag=v0.1.0#0984890853742b65b66a7566c4de629cd304220b"
 dependencies = [
  "anyhow",
  "chrono",
