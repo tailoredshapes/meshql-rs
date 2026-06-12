@@ -19,6 +19,24 @@ fn is_http_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
+/// Internal key carrying the effective `at` timestamp on resolved parent
+/// objects so relation resolvers read data as of the root query's instant.
+/// The `__` prefix is reserved by GraphQL, so it can never collide with a
+/// selectable schema field.
+const AT_FIELD: &str = "__at";
+
+fn stamp_at(mut stash: Stash, at: i64) -> Stash {
+    stash.insert(AT_FIELD.to_string(), serde_json::Value::from(at));
+    stash
+}
+
+fn effective_at(parent: &Stash) -> i64 {
+    parent
+        .get(AT_FIELD)
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| Utc::now().timestamp_millis())
+}
+
 /// Collect the names of the selected subfields from the GraphQL execution context.
 fn collect_selected_fields(ctx: &async_graphql::dynamic::ResolverContext) -> Vec<String> {
     ctx.ctx
@@ -329,10 +347,10 @@ fn singleton_resolver_field(
                 if id_val.is_empty() {
                     return Ok(FieldValue::NONE);
                 }
-                let at = Utc::now().timestamp_millis();
+                let at = effective_at(parent);
                 let client = reqwest::Client::new();
                 match http_graphql_find(&client, &url, &query_name, id_val, at, &fields).await {
-                    Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stash))),
+                    Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stamp_at(stash, at)))),
                     Ok(None) => Ok(FieldValue::NONE),
                     Err(e) => Err(e),
                 }
@@ -365,10 +383,10 @@ fn singleton_resolver_field(
                     "id".to_string(),
                     serde_json::Value::String(id_val.to_string()),
                 );
-                let at = Utc::now().timestamp_millis();
+                let at = effective_at(parent);
                 let creds: Vec<String> = ctx.data_opt::<Vec<String>>().cloned().unwrap_or_default();
                 match s.find(&tmpl, &args, &creds, at).await {
-                    Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stash))),
+                    Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stamp_at(stash, at)))),
                     Ok(None) => Ok(FieldValue::NONE),
                     Err(e) => Err(async_graphql::Error::new(e.to_string())),
                 }
@@ -402,12 +420,14 @@ fn vector_resolver_field(
                     Some(key) => parent.get(key).and_then(|v| v.as_str()).unwrap_or(""),
                     None => parent.get("id").and_then(|v| v.as_str()).unwrap_or(""),
                 };
-                let at = Utc::now().timestamp_millis();
+                let at = effective_at(parent);
                 let client = reqwest::Client::new();
                 match http_graphql_find_all(&client, &url, &query_name, id_val, at, &fields).await {
                     Ok(stashes) => {
-                        let items: Vec<FieldValue> =
-                            stashes.into_iter().map(FieldValue::owned_any).collect();
+                        let items: Vec<FieldValue> = stashes
+                            .into_iter()
+                            .map(|st| FieldValue::owned_any(stamp_at(st, at)))
+                            .collect();
                         Ok(Some(FieldValue::list(items)))
                     }
                     Err(e) => Err(e),
@@ -438,12 +458,14 @@ fn vector_resolver_field(
                     "id".to_string(),
                     serde_json::Value::String(id_val.to_string()),
                 );
-                let at = Utc::now().timestamp_millis();
+                let at = effective_at(parent);
                 let creds: Vec<String> = ctx.data_opt::<Vec<String>>().cloned().unwrap_or_default();
                 match s.find_all(&tmpl, &args, &creds, at).await {
                     Ok(stashes) => {
-                        let items: Vec<FieldValue> =
-                            stashes.into_iter().map(FieldValue::owned_any).collect();
+                        let items: Vec<FieldValue> = stashes
+                            .into_iter()
+                            .map(|st| FieldValue::owned_any(stamp_at(st, at)))
+                            .collect();
                         Ok(Some(FieldValue::list(items)))
                     }
                     Err(e) => Err(async_graphql::Error::new(e.to_string())),
@@ -486,10 +508,10 @@ fn internal_singleton_resolver_field(
                 "id".to_string(),
                 serde_json::Value::String(id_val.to_string()),
             );
-            let at = Utc::now().timestamp_millis();
+            let at = effective_at(parent);
             let creds: Vec<String> = ctx.data_opt::<Vec<String>>().cloned().unwrap_or_default();
             match s.find(&tmpl, &args, &creds, at).await {
-                Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stash))),
+                Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stamp_at(stash, at)))),
                 Ok(None) => Ok(FieldValue::NONE),
                 Err(e) => Err(async_graphql::Error::new(e.to_string())),
             }
@@ -527,12 +549,14 @@ fn internal_vector_resolver_field(
                 "id".to_string(),
                 serde_json::Value::String(id_val.to_string()),
             );
-            let at = Utc::now().timestamp_millis();
+            let at = effective_at(parent);
             let creds: Vec<String> = ctx.data_opt::<Vec<String>>().cloned().unwrap_or_default();
             match s.find_all(&tmpl, &args, &creds, at).await {
                 Ok(stashes) => {
-                    let items: Vec<FieldValue> =
-                        stashes.into_iter().map(FieldValue::owned_any).collect();
+                    let items: Vec<FieldValue> = stashes
+                        .into_iter()
+                        .map(|st| FieldValue::owned_any(stamp_at(st, at)))
+                        .collect();
                     Ok(Some(FieldValue::list(items)))
                 }
                 Err(e) => Err(async_graphql::Error::new(e.to_string())),
@@ -694,15 +718,19 @@ pub fn build_schema(
                             ctx.data_opt::<Vec<String>>().cloned().unwrap_or_default();
                         if is_singleton {
                             match s.find(&tmpl, &args, &creds, at).await {
-                                Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stash))),
+                                Ok(Some(stash)) => {
+                                    Ok(Some(FieldValue::owned_any(stamp_at(stash, at))))
+                                }
                                 Ok(None) => Ok(FieldValue::NONE),
                                 Err(e) => Err(async_graphql::Error::new(e.to_string())),
                             }
                         } else {
                             match s.find_all(&tmpl, &args, &creds, at).await {
                                 Ok(stashes) => {
-                                    let items: Vec<FieldValue> =
-                                        stashes.into_iter().map(FieldValue::owned_any).collect();
+                                    let items: Vec<FieldValue> = stashes
+                                        .into_iter()
+                                        .map(|st| FieldValue::owned_any(stamp_at(st, at)))
+                                        .collect();
                                     Ok(Some(FieldValue::list(items)))
                                 }
                                 Err(e) => Err(async_graphql::Error::new(e.to_string())),

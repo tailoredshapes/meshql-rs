@@ -12,7 +12,7 @@ type Hen {
 }
 
 type Query {
-    getLayReport(id: ID, at: Int): LayReport
-    getLayReports(date: String, at: Int): [LayReport]
-    getLayReportsByHen(id: ID, at: Int): [LayReport]
+    getLayReport(id: ID, at: Float): LayReport
+    getLayReports(date: String, at: Float): [LayReport]
+    getLayReportsByHen(id: ID, at: Float): [LayReport]
 }

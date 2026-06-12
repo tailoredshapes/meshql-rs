@@ -11,6 +11,6 @@ type Coop {
 }
 
 type Query {
-    getFarm(id: ID, at: Int): Farm
-    getFarms(name: String, at: Int): [Farm]
+    getFarm(id: ID, at: Float): Farm
+    getFarms(name: String, at: Float): [Farm]
 }

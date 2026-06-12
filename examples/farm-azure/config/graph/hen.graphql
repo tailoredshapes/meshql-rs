@@ -19,7 +19,7 @@ type LayReport {
 }
 
 type Query {
-    getHen(id: ID, at: Int): Hen
-    getHens(name: String, at: Int): [Hen]
-    getHensByCoop(id: ID, at: Int): [Hen]
+    getHen(id: ID, at: Float): Hen
+    getHens(name: String, at: Float): [Hen]
+    getHensByCoop(id: ID, at: Float): [Hen]
 }

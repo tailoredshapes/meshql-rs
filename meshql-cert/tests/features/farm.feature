@@ -27,3 +27,16 @@ Feature: Farm E2E Certification
     Then there should be no GraphQL errors
     And the response data.getFarm.name should be "Emerdale"
     And the response data.getFarm.coops should have 2 items
+
+  Scenario: Federated query reflects the latest coop update
+    When I query the "farm" graph with: { getFarm(id: "<ids.farm.Emerdale>") { name coops { name } } }
+    Then there should be no GraphQL errors
+    And the response at "data.getFarm.coops" should contain an item where "name" is "purple"
+    And the response at "data.getFarm.coops" should not contain an item where "name" is "red"
+
+  Scenario: Temporal federated query returns coops as they were at the timestamp
+    When I query the "farm" graph with at=first_stamp: { getFarm(id: "<ids.farm.Emerdale>", at: first_stamp) { name coops { name } } }
+    Then there should be no GraphQL errors
+    And the response data.getFarm.coops should have 2 items
+    And the response at "data.getFarm.coops" should contain an item where "name" is "red"
+    And the response at "data.getFarm.coops" should not contain an item where "name" is "purple"

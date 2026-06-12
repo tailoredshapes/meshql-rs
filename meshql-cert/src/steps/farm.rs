@@ -258,6 +258,71 @@ async fn assert_path_array_count(world: &mut CertWorld, path: String, count: usi
     assert_eq!(arr.len(), count, "array count mismatch at path '{path}'");
 }
 
+/// Navigate a dot-separated path, fanning out across arrays: when the current
+/// value is an array, the key is looked up on each element and list results
+/// are flattened. "data.getById.coops.hens" yields every hen of every coop.
+fn collect_at_path(value: &Value, path: &str) -> Vec<Value> {
+    let mut current = vec![value.clone()];
+    for key in path.split('.') {
+        let mut next = Vec::new();
+        for v in &current {
+            match v {
+                Value::Array(items) => {
+                    for item in items {
+                        if let Some(x) = item.get(key) {
+                            next.push(x.clone());
+                        }
+                    }
+                }
+                other => {
+                    if let Some(x) = other.get(key) {
+                        next.push(x.clone());
+                    }
+                }
+            }
+        }
+        current = next;
+    }
+    current
+        .into_iter()
+        .flat_map(|v| match v {
+            Value::Array(items) => items,
+            other => vec![other],
+        })
+        .collect()
+}
+
+#[then(regex = r#"^the response at "([^"]+)" should contain an item where "([^"]+)" is "([^"]+)"$"#)]
+async fn assert_contains_item(world: &mut CertWorld, path: String, field: String, expected: String) {
+    let resp = world.farm_response.as_ref().expect("no response");
+    let items = collect_at_path(resp, &path);
+    let found = items
+        .iter()
+        .any(|item| item.get(&field).and_then(|v| v.as_str()) == Some(expected.as_str()));
+    assert!(
+        found,
+        "no item at '{path}' has {field} = \"{expected}\"; response: {resp}"
+    );
+}
+
+#[then(regex = r#"^the response at "([^"]+)" should not contain an item where "([^"]+)" is "([^"]+)"$"#)]
+async fn assert_not_contains_item(
+    world: &mut CertWorld,
+    path: String,
+    field: String,
+    expected: String,
+) {
+    let resp = world.farm_response.as_ref().expect("no response");
+    let items = collect_at_path(resp, &path);
+    let found = items
+        .iter()
+        .any(|item| item.get(&field).and_then(|v| v.as_str()) == Some(expected.as_str()));
+    assert!(
+        !found,
+        "found an item at '{path}' with {field} = \"{expected}\" but expected none; response: {resp}"
+    );
+}
+
 #[then("there should be no GraphQL errors")]
 async fn assert_no_errors(world: &mut CertWorld) {
     let resp = world.farm_response.as_ref().expect("no response");

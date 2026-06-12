@@ -21,8 +21,8 @@ type Coop {
     name: String
 }
 type Query {
-    getFarm(id: ID, at: Int): Farm
-    getFarms(name: String, at: Int): [Farm]
+    getFarm(id: ID, at: Float): Farm
+    getFarms(name: String, at: Float): [Farm]
 }
 "#;
 
@@ -36,9 +36,9 @@ type Coop {
 }
 type Farm { id: ID name: String }
 type Query {
-    getCoop(id: ID, at: Int): Coop
-    getCoops(name: String, at: Int): [Coop]
-    getCoopsByFarm(id: ID, at: Int): [Coop]
+    getCoop(id: ID, at: Float): Coop
+    getCoops(name: String, at: Float): [Coop]
+    getCoopsByFarm(id: ID, at: Float): [Coop]
 }
 "#;
 
