@@ -60,6 +60,15 @@ let farm_config = RootConfig::builder()
 
 Query templates are **Handlebars producing a JSON query**: `{"farmId": "{{id}}"}`. Top-level keys address payload fields (adapters map them to JSONB/doc paths); `id` addresses the Envelope id.
 
+## Deployment model: compose your own binary
+
+A meshql system is a small Rust binary owned by the service developer — there is no prebuilt meshql server configured at runtime. This is a deliberate design decision:
+
+- **Cargo is the composition mechanism.** Depend on `meshql-core`, `meshql-server`, and *only* the adapter crates the service uses (`meshql-postgres`, `meshql-mongo`, …). Unused backends are never imported, so they cost nothing — the crate split plays the role a classpath/plugin directory plays elsewhere.
+- **`main.rs` is the configuration.** The ~130-line wiring file (see `examples/farm/src/main.rs`) is code-as-config on purpose: entity wiring, resolver names, and query templates are type-checked at compile time instead of failing at runtime.
+- **Adapters are interchangeable at the source level.** The certification suite guarantees behavior parity, so swapping Postgres for Mongo is a two-constructor-line change, not a framework migration.
+- **Do not propose runtime plugin loading** (dylibs/`dlopen`, runtime driver registries). Rust's unstable ABI plus async trait objects make shared-library plugins a hazard, and the idea was considered and rejected. If a prebuilt-binary distribution need ever arises, the agreed direction is out-of-process adapter sidecars over JSON-RPC (the `Repository`/`Searcher` surfaces are already wire-shaped) — never shared libraries.
+
 ## Decision guide
 
 - **Adding/changing an entity or query** → read `references/adding-an-entity.md`
@@ -78,3 +87,4 @@ Query templates are **Handlebars producing a JSON query**: `{"farmId": "{{id}}"}
 - Business/aggregation logic inside an adapter crate (`meshql-mongo`, `meshql-postgres`, …) — it belongs in restlette validators/side-effects, extra routes, or projection entities.
 - Cross-entity joins implemented in a restlette — that's what graphlette resolvers are for.
 - A new adapter merged without passing the certification suite.
+- Runtime plugin/driver-loading schemes for adapters — composition happens in `Cargo.toml` (see "Deployment model").
