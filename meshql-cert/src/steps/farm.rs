@@ -292,8 +292,15 @@ fn collect_at_path(value: &Value, path: &str) -> Vec<Value> {
         .collect()
 }
 
-#[then(regex = r#"^the response at "([^"]+)" should contain an item where "([^"]+)" is "([^"]+)"$"#)]
-async fn assert_contains_item(world: &mut CertWorld, path: String, field: String, expected: String) {
+#[then(
+    regex = r#"^the response at "([^"]+)" should contain an item where "([^"]+)" is "([^"]+)"$"#
+)]
+async fn assert_contains_item(
+    world: &mut CertWorld,
+    path: String,
+    field: String,
+    expected: String,
+) {
     let resp = world.farm_response.as_ref().expect("no response");
     let items = collect_at_path(resp, &path);
     let found = items
@@ -305,7 +312,9 @@ async fn assert_contains_item(world: &mut CertWorld, path: String, field: String
     );
 }
 
-#[then(regex = r#"^the response at "([^"]+)" should not contain an item where "([^"]+)" is "([^"]+)"$"#)]
+#[then(
+    regex = r#"^the response at "([^"]+)" should not contain an item where "([^"]+)" is "([^"]+)"$"#
+)]
 async fn assert_not_contains_item(
     world: &mut CertWorld,
     path: String,
