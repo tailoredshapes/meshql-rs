@@ -1134,13 +1134,21 @@ name = "egg-economy"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "chrono",
+ "merkql 0.2.0",
  "meshql-core",
  "meshql-graphlette",
  "meshql-mongo",
  "meshql-restlette",
  "meshql-server",
+ "meshql-sqlite",
+ "serde",
  "serde_json",
+ "sqlx",
+ "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

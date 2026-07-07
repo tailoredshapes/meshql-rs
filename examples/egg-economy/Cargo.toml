@@ -9,6 +9,16 @@ meshql-mongo = { path = "../../meshql-mongo" }
 meshql-graphlette = { path = "../../meshql-graphlette" }
 meshql-restlette = { path = "../../meshql-restlette" }
 meshql-server = { path = "../../meshql-server" }
+merkql = "0.2"
 tokio = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
 anyhow = "1"
+
+[dev-dependencies]
+meshql-sqlite = { path = "../../meshql-sqlite" }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+tempfile = "3"
