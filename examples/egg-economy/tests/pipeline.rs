@@ -41,24 +41,94 @@ fn ev(verb: &str, id: &str, ms: i64, payload: serde_json::Value) -> EventRecord 
 fn scripted_events() -> Vec<EventRecord> {
     let t0 = 1_700_000_000_000; // fixed base so windowed aggregates are deterministic
     vec![
-        ev(verb::BUILD_FARM, "farm-1", t0, json!({"name":"Green Acres","farm_type":"local_farm","zone":"north","owner":"Mac"})),
-        ev(verb::BUILD_COOP, "coop-1", t0 + 100, json!({"farm_id":"farm-1","name":"Sunrise","capacity":20,"coop_type":"layer"})),
-        ev(verb::BUILD_CONTAINER, "cont-1", t0 + 200, json!({"name":"Cold Store","container_type":"refrigerator","capacity":500,"zone":"north"})),
-        ev(verb::BUILD_CONTAINER, "cont-2", t0 + 300, json!({"name":"Barn Box","container_type":"crate","capacity":100,"zone":"north"})),
-        ev(verb::REGISTER_CONSUMER, "cons-1", t0 + 400, json!({"name":"Local Diner","consumer_type":"restaurant","zone":"north","weekly_demand":100})),
+        ev(
+            verb::BUILD_FARM,
+            "farm-1",
+            t0,
+            json!({"name":"Green Acres","farm_type":"local_farm","zone":"north","owner":"Mac"}),
+        ),
+        ev(
+            verb::BUILD_COOP,
+            "coop-1",
+            t0 + 100,
+            json!({"farm_id":"farm-1","name":"Sunrise","capacity":20,"coop_type":"layer"}),
+        ),
+        ev(
+            verb::BUILD_CONTAINER,
+            "cont-1",
+            t0 + 200,
+            json!({"name":"Cold Store","container_type":"refrigerator","capacity":500,"zone":"north"}),
+        ),
+        ev(
+            verb::BUILD_CONTAINER,
+            "cont-2",
+            t0 + 300,
+            json!({"name":"Barn Box","container_type":"crate","capacity":100,"zone":"north"}),
+        ),
+        ev(
+            verb::REGISTER_CONSUMER,
+            "cons-1",
+            t0 + 400,
+            json!({"name":"Local Diner","consumer_type":"restaurant","zone":"north","weekly_demand":100}),
+        ),
         // Buy 3 hens in one event → hens buy-1-0, buy-1-1, buy-1-2
-        ev(verb::BUY_HENS, "buy-1", t0 + 500, json!({"coop_id":"coop-1","farm_id":"farm-1","breed":"Leghorn","count":3})),
+        ev(
+            verb::BUY_HENS,
+            "buy-1",
+            t0 + 500,
+            json!({"coop_id":"coop-1","farm_id":"farm-1","breed":"Leghorn","count":3}),
+        ),
         // Eggs laid over three days
-        ev(verb::EGGS_LAID, "lay-1", t0 + DAY, json!({"hen_id":"buy-1-0","coop_id":"coop-1","farm_id":"farm-1","eggs":3,"quality":"grade_a"})),
-        ev(verb::EGGS_LAID, "lay-2", t0 + 2*DAY, json!({"hen_id":"buy-1-0","coop_id":"coop-1","farm_id":"farm-1","eggs":2,"quality":"grade_b"})),
-        ev(verb::EGGS_LAID, "lay-3", t0 + 2*DAY, json!({"hen_id":"buy-1-1","coop_id":"coop-1","farm_id":"farm-1","eggs":4,"quality":"grade_a"})),
+        ev(
+            verb::EGGS_LAID,
+            "lay-1",
+            t0 + DAY,
+            json!({"hen_id":"buy-1-0","coop_id":"coop-1","farm_id":"farm-1","eggs":3,"quality":"grade_a"}),
+        ),
+        ev(
+            verb::EGGS_LAID,
+            "lay-2",
+            t0 + 2 * DAY,
+            json!({"hen_id":"buy-1-0","coop_id":"coop-1","farm_id":"farm-1","eggs":2,"quality":"grade_b"}),
+        ),
+        ev(
+            verb::EGGS_LAID,
+            "lay-3",
+            t0 + 2 * DAY,
+            json!({"hen_id":"buy-1-1","coop_id":"coop-1","farm_id":"farm-1","eggs":4,"quality":"grade_a"}),
+        ),
         // Store, transfer, consume
-        ev(verb::EGGS_STORED, "dep-1", t0 + 3*DAY, json!({"container_id":"cont-1","source_type":"farm","source_id":"farm-1","eggs":9})),
-        ev(verb::EGGS_TRANSFERRED, "xfer-1", t0 + 3*DAY + 10, json!({"source_container_id":"cont-1","dest_container_id":"cont-2","eggs":4})),
-        ev(verb::EGGS_CONSUMED, "eat-1", t0 + 3*DAY + 20, json!({"consumer_id":"cons-1","container_id":"cont-2","eggs":1})),
+        ev(
+            verb::EGGS_STORED,
+            "dep-1",
+            t0 + 3 * DAY,
+            json!({"container_id":"cont-1","source_type":"farm","source_id":"farm-1","eggs":9}),
+        ),
+        ev(
+            verb::EGGS_TRANSFERRED,
+            "xfer-1",
+            t0 + 3 * DAY + 10,
+            json!({"source_container_id":"cont-1","dest_container_id":"cont-2","eggs":4}),
+        ),
+        ev(
+            verb::EGGS_CONSUMED,
+            "eat-1",
+            t0 + 3 * DAY + 20,
+            json!({"consumer_id":"cons-1","container_id":"cont-2","eggs":1}),
+        ),
         // Actor mutations
-        ev(verb::MOVE_HEN_TO_COOP, "mv-1", t0 + 4*DAY, json!({"hen_id":"buy-1-2","coop_id":"coop-1"})),
-        ev(verb::RETIRE_HEN, "ret-1", t0 + 5*DAY, json!({"hen_id":"buy-1-1","reason":"age"})),
+        ev(
+            verb::MOVE_HEN_TO_COOP,
+            "mv-1",
+            t0 + 4 * DAY,
+            json!({"hen_id":"buy-1-2","coop_id":"coop-1"}),
+        ),
+        ev(
+            verb::RETIRE_HEN,
+            "ret-1",
+            t0 + 5 * DAY,
+            json!({"hen_id":"buy-1-1","reason":"age"}),
+        ),
     ]
 }
 
@@ -99,7 +169,10 @@ fn workers(broker: &BrokerRef, repos: &[Arc<SqliteRepository>]) -> Vec<Worker> {
         .collect()
 }
 
-async fn read(repo: &Arc<SqliteRepository>, id: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+async fn read(
+    repo: &Arc<SqliteRepository>,
+    id: &str,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
     repo.read(id, &["*".to_string()], None)
         .await
         .unwrap()
@@ -132,18 +205,33 @@ async fn events_fold_into_nouns_and_replay_rebuilds_them() {
     }
 
     // --- Actor nouns were built purely from events ---
-    assert_eq!(read(farm, "farm-1").await.unwrap()["name"], json!("Green Acres"));
+    assert_eq!(
+        read(farm, "farm-1").await.unwrap()["name"],
+        json!("Green Acres")
+    );
     assert_eq!(read(coop, "coop-1").await.unwrap()["capacity"], json!(20));
-    assert_eq!(read(consumer, "cons-1").await.unwrap()["name"], json!("Local Diner"));
-    assert_eq!(read(container, "cont-1").await.unwrap()["container_type"], json!("refrigerator"));
+    assert_eq!(
+        read(consumer, "cons-1").await.unwrap()["name"],
+        json!("Local Diner")
+    );
+    assert_eq!(
+        read(container, "cont-1").await.unwrap()["container_type"],
+        json!("refrigerator")
+    );
 
     // buy_hens(count=3) fanned out to three hens
     let h0 = read(hen, "buy-1-0").await.unwrap();
     assert_eq!(h0["breed"], json!("Leghorn"));
     assert_eq!(h0["status"], json!("active"));
     // retire_hen and move_hen_to_coop mutated the right hens
-    assert_eq!(read(hen, "buy-1-1").await.unwrap()["status"], json!("retired"));
-    assert_eq!(read(hen, "buy-1-2").await.unwrap()["coop_id"], json!("coop-1"));
+    assert_eq!(
+        read(hen, "buy-1-1").await.unwrap()["status"],
+        json!("retired")
+    );
+    assert_eq!(
+        read(hen, "buy-1-2").await.unwrap()["coop_id"],
+        json!("coop-1")
+    );
 
     // --- Analytic nouns folded from egg-flow events ---
     // hen buy-1-0: 3 + 2 = 5 eggs, one grade_a of 3 → quality_rate 0.6
@@ -178,8 +266,14 @@ async fn events_fold_into_nouns_and_replay_rebuilds_them() {
     // Same events → same nouns, field for field.
     assert_eq!(read(&fresh[0], "farm-1").await, read(farm, "farm-1").await);
     assert_eq!(read(&fresh[2], "buy-1-1").await, read(hen, "buy-1-1").await);
-    assert_eq!(read(&fresh[5], "buy-1-0").await, read(productivity, "buy-1-0").await);
-    assert_eq!(read(&fresh[6], "cont-1").await, read(inventory, "cont-1").await);
+    assert_eq!(
+        read(&fresh[5], "buy-1-0").await,
+        read(productivity, "buy-1-0").await
+    );
+    assert_eq!(
+        read(&fresh[6], "cont-1").await,
+        read(inventory, "cont-1").await
+    );
 
     // --- A brand-new noun materializes from history that predates it ---
     // Realize later we want a "coop_output" style projection — here, farm_output
@@ -191,9 +285,16 @@ async fn events_fold_into_nouns_and_replay_rebuilds_them() {
         latecomer.clone() as Arc<dyn Repository>,
     );
     w.run_once().await.unwrap();
-    assert_eq!(read(&latecomer, "farm-1").await.unwrap()["eggs_month"], json!(9));
+    assert_eq!(
+        read(&latecomer, "farm-1").await.unwrap()["eggs_month"],
+        json!(9)
+    );
 
     // --- Idempotence: re-running a worker over the same log writes nothing new ---
     let mut w2 = workers(&broker, &repos).into_iter().nth(5).unwrap();
-    assert_eq!(w2.run_once().await.unwrap(), 0, "second run must be a no-op");
+    assert_eq!(
+        w2.run_once().await.unwrap(),
+        0,
+        "second run must be a no-op"
+    );
 }

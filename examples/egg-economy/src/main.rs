@@ -14,12 +14,12 @@ use egg_economy::projectors::{
     HenProjector, Projector,
 };
 use egg_economy::{run_connector, EventSource, RepositoryTail, Worker};
+use merkql::broker::{Broker, BrokerConfig};
 use meshql_core::{
     Auth, GraphletteConfig, NoAuth, Repository, RestletteConfig, RootConfig, Searcher, ServerConfig,
 };
 use meshql_mongo::{MongoRepository, MongoSearcher};
 use meshql_server::run;
-use merkql::broker::{Broker, BrokerConfig};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -101,14 +101,34 @@ async fn main() -> anyhow::Result<()> {
         ("build_farm", BUILD_FARM_GRAPHQL, BUILD_FARM_JSON),
         ("build_coop", BUILD_COOP_GRAPHQL, BUILD_COOP_JSON),
         ("buy_hens", BUY_HENS_GRAPHQL, BUY_HENS_JSON),
-        ("move_hen_to_coop", MOVE_HEN_TO_COOP_GRAPHQL, MOVE_HEN_TO_COOP_JSON),
+        (
+            "move_hen_to_coop",
+            MOVE_HEN_TO_COOP_GRAPHQL,
+            MOVE_HEN_TO_COOP_JSON,
+        ),
         ("retire_hen", RETIRE_HEN_GRAPHQL, RETIRE_HEN_JSON),
-        ("build_container", BUILD_CONTAINER_GRAPHQL, BUILD_CONTAINER_JSON),
-        ("register_consumer", REGISTER_CONSUMER_GRAPHQL, REGISTER_CONSUMER_JSON),
+        (
+            "build_container",
+            BUILD_CONTAINER_GRAPHQL,
+            BUILD_CONTAINER_JSON,
+        ),
+        (
+            "register_consumer",
+            REGISTER_CONSUMER_GRAPHQL,
+            REGISTER_CONSUMER_JSON,
+        ),
         ("eggs_laid", EGGS_LAID_GRAPHQL, EGGS_LAID_JSON),
         ("eggs_stored", EGGS_STORED_GRAPHQL, EGGS_STORED_JSON),
-        ("eggs_withdrawn", EGGS_WITHDRAWN_GRAPHQL, EGGS_WITHDRAWN_JSON),
-        ("eggs_transferred", EGGS_TRANSFERRED_GRAPHQL, EGGS_TRANSFERRED_JSON),
+        (
+            "eggs_withdrawn",
+            EGGS_WITHDRAWN_GRAPHQL,
+            EGGS_WITHDRAWN_JSON,
+        ),
+        (
+            "eggs_transferred",
+            EGGS_TRANSFERRED_GRAPHQL,
+            EGGS_TRANSFERRED_JSON,
+        ),
         ("eggs_consumed", EGGS_CONSUMED_GRAPHQL, EGGS_CONSUMED_JSON),
     ];
     for (verb, gql, json) in event_defs {
@@ -189,7 +209,12 @@ async fn main() -> anyhow::Result<()> {
             .singleton("getById", r#"{"id": "{{id}}"}"#)
             .vector("getAll", "{}")
             .vector("getByZone", r#"{"payload.zone": "{{zone}}"}"#)
-            .internal_vector_resolver("inventory", None, "getByContainer", "/container_inventory/graph")
+            .internal_vector_resolver(
+                "inventory",
+                None,
+                "getByContainer",
+                "/container_inventory/graph",
+            )
             .build(),
         searcher: container_searcher,
     });
@@ -221,7 +246,12 @@ async fn main() -> anyhow::Result<()> {
             .singleton("getById", r#"{"id": "{{id}}"}"#)
             .vector("getAll", "{}")
             .vector("getByContainer", r#"{"payload.container_id": "{{id}}"}"#)
-            .internal_singleton_resolver("container", Some("container_id"), "getById", "/container/graph")
+            .internal_singleton_resolver(
+                "container",
+                Some("container_id"),
+                "getById",
+                "/container/graph",
+            )
             .build(),
         searcher: ci_searcher,
     });
@@ -262,6 +292,10 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(w.run_forever(Duration::from_millis(500)));
     }
 
-    let config = ServerConfig { port, graphlettes, restlettes };
+    let config = ServerConfig {
+        port,
+        graphlettes,
+        restlettes,
+    };
     run(config).await
 }
