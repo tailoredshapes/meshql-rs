@@ -3,7 +3,7 @@ pub mod config;
 pub mod error;
 pub mod testing;
 
-pub use auth::{envelope_visible_to, Auth, AuthContext, NoAuth, StashKeyAuth};
+pub use auth::{envelope_visible_to, tokens_visible_to, Auth, AuthContext, NoAuth, StashKeyAuth};
 pub use config::{
     GraphletteConfig, InternalSingletonResolverConfig, InternalVectorResolverConfig, QueryConfig,
     RestletteConfig, RootConfig, RootConfigBuilder, ServerConfig, SingletonResolverConfig,
