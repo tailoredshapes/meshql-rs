@@ -4,10 +4,10 @@
     "required": ["container_id", "source_type", "source_id", "eggs", "timestamp"],
     "properties": {
         "id": {"type": "string", "format": "uuid"},
-        "container_id": {"type": "string", "format": "uuid"},
-        "source_type": {"type": "string", "enum": ["farm", "transfer"]},
-        "source_id": {"type": "string", "format": "uuid"},
-        "eggs": {"type": "integer", "minimum": 1},
+        "container_id": {"type": "string"},
+        "source_type": {"type": "string"},
+        "source_id": {"type": "string"},
+        "eggs": {"type": "integer"},
         "timestamp": {"type": "string"}
     }
 }

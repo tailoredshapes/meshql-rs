@@ -1,0 +1,12 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["farm_id", "name"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "farm_id": {"type": "string"},
+        "name": {"type": "string"},
+        "capacity": {"type": "integer"},
+        "coop_type": {"type": "string"}
+    }
+}

@@ -1,0 +1,12 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["coop_id", "farm_id", "breed", "count"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "coop_id": {"type": "string"},
+        "farm_id": {"type": "string"},
+        "breed": {"type": "string"},
+        "count": {"type": "integer"}
+    }
+}

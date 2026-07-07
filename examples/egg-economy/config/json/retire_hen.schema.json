@@ -1,0 +1,10 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["hen_id"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "hen_id": {"type": "string"},
+        "reason": {"type": "string"}
+    }
+}

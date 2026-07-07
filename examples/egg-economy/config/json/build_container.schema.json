@@ -1,0 +1,12 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["name", "container_type"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "name": {"type": "string"},
+        "container_type": {"type": "string"},
+        "capacity": {"type": "integer"},
+        "zone": {"type": "string"}
+    }
+}

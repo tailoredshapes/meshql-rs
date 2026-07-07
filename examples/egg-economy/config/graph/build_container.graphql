@@ -1,0 +1,15 @@
+scalar Date
+
+# Business event (verb). Immutable; front ends POST these. Queryable for audit.
+type Query {
+  getById(id: ID, at: Float): BuildContainer
+  getAll(at: Float): [BuildContainer]
+}
+
+type BuildContainer {
+  id: ID
+  name: String!
+  container_type: String!
+  capacity: Int
+  zone: String
+}

@@ -12,12 +12,4 @@ type Consumer {
   consumer_type: String!
   zone: String!
   weekly_demand: Int
-  consumptionReports: [ConsumptionReport]
-}
-
-type ConsumptionReport {
-  id: ID
-  eggs: Int!
-  timestamp: String!
-  purpose: String
 }

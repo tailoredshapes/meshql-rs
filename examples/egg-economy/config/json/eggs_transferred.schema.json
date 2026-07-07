@@ -1,0 +1,12 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["source_container_id", "dest_container_id", "eggs", "timestamp"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "source_container_id": {"type": "string"},
+        "dest_container_id": {"type": "string"},
+        "eggs": {"type": "integer"},
+        "timestamp": {"type": "string"}
+    }
+}

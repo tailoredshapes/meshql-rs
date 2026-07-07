@@ -1,0 +1,15 @@
+scalar Date
+
+# Business event (verb). Immutable; front ends POST these. Queryable for audit.
+type Query {
+  getById(id: ID, at: Float): RegisterConsumer
+  getAll(at: Float): [RegisterConsumer]
+}
+
+type RegisterConsumer {
+  id: ID
+  name: String!
+  consumer_type: String!
+  zone: String
+  weekly_demand: Int
+}

@@ -1,0 +1,14 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["hen_id", "coop_id", "farm_id", "eggs", "timestamp"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "hen_id": {"type": "string"},
+        "coop_id": {"type": "string"},
+        "farm_id": {"type": "string"},
+        "eggs": {"type": "integer"},
+        "quality": {"type": "string"},
+        "timestamp": {"type": "string"}
+    }
+}
