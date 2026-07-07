@@ -33,7 +33,7 @@ This project delivers both:
 | Thin notifications (`entity, id, created_at, deleted`) | Full GraphQL subscriptions; envelope streams | Reads stay on the graphlette (CQRS, temporal, auth invariants untouched). Envelope streams would re-implement token filtering at the socket — the exact bug invariant 4 warns about. |
 | SSE transport | WebSocket | Notifications are strictly one-way. SSE is plain HTTP: proxy-friendly, auto-reconnect and `Last-Event-ID` built into `EventSource`, trivial in axum. |
 | Storage-tailing `ChangeSource` | Restlette `post_create` hook | The CDC argument, verbatim from `examples/egg-economy/src/source.rs`: a post-write hook is a dual write (crash between commit and publish loses the event). Deriving from the committed store guarantees at-least-once after commit, with the store's order and time. |
-| Poll-based `SearcherTail` in v1 | Native change streams per backend | One portable impl works on every certified backend today. The trait is the seam; native impls (merkql tail, Mongo change streams, Postgres LISTEN/NOTIFY) slot in later — invariant 6, two scales of one seam. Polling is acknowledged as a first pass. |
+| Poll-based `SearcherTail` in v1 | Native change streams per backend | One portable impl works against the certified `Searcher` surface (see the Mongo wildcard caveat below). The trait is the seam; native impls (merkql tail, Mongo change streams, Postgres LISTEN/NOTIFY) slot in later — invariant 6, two scales of one seam. Polling is acknowledged as a first pass. |
 | Per-subscriber token filtering from day one | Public-only v1 | An SSE stream is a read path; invariant 4 applies. Retrofitting filtering would change stream semantics under existing consumers. |
 | No server-side replay on reconnect | Replay from storage via `Last-Event-ID` | Replay cannot reconstruct deletes (tombstones are invisible to a Searcher), so a replaying client could resurrect ghosts. Contract instead: on (re)connect, all cached state is stale. `Last-Event-ID` stays in the protocol for a future log-backed source to honor. |
 | Manifest is a published schema + static document | Manifest endpoint auto-derived from `ServerConfig`; a `Manifest` builder API | `build_app` sees a slice of the deployment, not the deployment (MCP, search indexes, and sidecars never pass through `ServerConfig`). And the manifest is configuration-time data — static. The author declares it; anything can serve it. |
@@ -86,28 +86,46 @@ pub trait ChangeSource: Send + Sync {
 ### `SearcherTail` — the portable v1 impl
 
 One `find_all("{}")` per poll with `["*"]` credentials, diffed against kept
-state. The subtlety: `Searcher.find_all` returns the latest **non-deleted**
-version per id, so:
+state. Two facts about the search surface drive the design: `find_all`
+returns the latest **non-deleted** version per id, and each row is
+**payload + `id` only** — no Envelope metadata (`created_at` and
+`authorized_tokens` are not in the row; verified across all five backends).
+So:
 
 | Change | Manifestation | Detection |
 |---|---|---|
 | Create | New `id` appears | `id` not in state map |
-| Update | Same `id`, newer `created_at` (PUT appends a version) | `created_at` > last seen for that `id` |
+| Update | Same `id`, different payload (PUT appends a version) | Payload hash ≠ hash in state map |
 | Delete | `id` disappears (tombstone is filtered out) | Presence diff against state map |
 
-State per entity: `id → (last_created_at, last_known_tokens)`. A
-timestamp-only watermark is insufficient — equal-millisecond writes and
-disappearance-based deletes both need the map. Memory cost is one entry per
-live envelope: acceptable at the in-process scale, absent entirely in a
-native change-stream impl.
+State per entity: `id → (payload_hash, last_known_tokens)`. The hash is over
+a deterministic serialization of the payload row. Memory cost is one entry
+per live envelope: acceptable at the in-process scale, absent entirely in a
+native change-stream impl. Known blind spot: a PUT with a byte-identical
+payload produces no observable change and is not notified — acceptable,
+since no refetch would show anything new.
 
-**Tokens:** `Searcher.find_all` returns payload rows, not Envelopes, so the
-tail cannot see `authorized_tokens` from the search surface. `SearcherTail`
-therefore takes both a `Searcher` (listing/diffing) and a `Repository`
-(point `read` per *changed* envelope to fetch tokens — a handful of reads per
-poll, not N+1 over the table). For deletes there is no envelope to read; the
-tail uses the last known tokens from the state map: the people who could see
-the envelope are the ones who should learn it is gone.
+**Envelope metadata recovery:** because the row carries neither `created_at`
+nor `authorized_tokens`, `SearcherTail` takes both a `Searcher`
+(listing/diffing) and a `Repository`: for each envelope the diff marks as
+created or updated, one point `read` fetches the full Envelope for its
+commit `created_at` and tokens — a handful of reads per poll, not N+1 over
+the table. For deletes there is no envelope to read; the tail uses the last
+known tokens from the state map (the people who could see the envelope are
+the ones who should learn it is gone) and the poll's wall-clock as
+`created_at`. Race edge: an envelope updated then deleted between polls
+diffs as changed but its point `read` returns nothing — emit the delete
+notification in that case (cert suite covers it).
+
+**Backend caveat:** the `["*"]`-credential poll relies on searchers honoring
+the `meshql-core::auth` convention that a caller holding `"*"` sees
+everything. The SQL, merkql, and sqlite searchers post-filter via
+`envelope_visible_to`, which implements this; the Mongo searcher instead
+filters `authorizedTokens $in [creds]` in the query with no wildcard
+special-case, so under real auth a `["*"]` poll would silently miss
+envelopes. That is a pre-existing Mongo adapter inconsistency with the core
+convention, tracked as a separate fix; until it lands, `SearcherTail` on
+Mongo is correct only for `NoAuth` deployments.
 
 **Delivery contract:** at-least-once, per-entity ordered by `created_at`.
 Duplicates are harmless by design.
@@ -144,9 +162,13 @@ data: {"entity":"hen","id":"abc-123","created_at":1751892345123,"deleted":false}
 
 **Auth:** the handler uses the identical mechanism as the lettes — the
 request-scoped `AuthContext` extension populated by edge middleware, passed to
-`Auth::get_auth_token`. Tokens are captured once at connect time; every
-notification on the stream is checked with `envelope_visible_to`. Revocation
-takes effect on next reconnect — the same freshness model as a long-lived JWT.
+`Auth::get_auth_token` (the route is therefore constructed with the same
+`Arc<dyn Auth>` the author passes to `build_app_with_auth`). Tokens are
+captured once at connect time; every notification is checked with the same
+token-overlap rule as `envelope_visible_to` — extracted into a shared helper
+in `meshql-core` that both call, so the visibility logic is written once.
+Revocation takes effect on next reconnect — the same freshness model as a
+long-lived JWT.
 
 **Reconnect contract:** the hub is in-memory; events during a disconnect are
 gone. On (re)connect the client must treat all cached state as stale and
@@ -161,8 +183,10 @@ forcing the reconnect-refetch path. Slow clients get correctness, not gaps.
 
 ## The deployment manifest
 
-**Deliverable: `manifest.schema.json`** — a versioned JSON Schema published in
-this repo. Not an endpoint, not a builder API. Deployments serve a conforming
+**Deliverable: `schemas/manifest.schema.json`** — a JSON Schema at the repo
+root, versioned via its `$id` (`…/manifest-v1.schema.json`); breaking changes
+ship as a new `-v2` file, and manifest documents declare which they conform
+to via the `meshql` field. Not an endpoint, not a builder API. Deployments serve a conforming
 document however they like: hand-written and committed next to
 `config/graph/` and `config/json/` (it is config; it lives with config),
 served by a one-line `run_ext` static route, nginx, S3, or the sidecar.
@@ -213,9 +237,10 @@ Three layers, matching how the workspace already tests:
 1. **`ChangeSource` certification** (invariant 5): a reusable suite in
    `meshql-cert` style. Drive a repository through creates, updates, and
    deletes; assert the source emits the right `ChangeEvent`s (create, update
-   via newer `created_at`, delete via disappearance, tokens carried,
-   duplicates tolerated). `SearcherTail` passes it against in-memory SQLite
-   in v1; any future native impl must pass the same suite before merging.
+   via changed payload, delete via disappearance, tokens carried, duplicates
+   tolerated, update-then-delete between polls yields a delete). `SearcherTail`
+   passes it against in-memory SQLite in v1; any future native impl must pass
+   the same suite before merging.
 2. **SSE integration tests** in `meshql-changes`: real axum app, tail + hub +
    route over a real repository, consumed by a test client. Cases:
    notification after write; `deleted: true` after DELETE; per-subscriber
