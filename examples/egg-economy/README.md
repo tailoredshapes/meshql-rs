@@ -57,10 +57,13 @@ will" — and at-least-once delivery after commit is the datastore's job. Since 
 folds are deterministic and idempotent, at-least-once + idempotent = exactly-once
 *effect*.
 
-- `src/source.rs` — the connector. Ships a portable `RepositoryTail` (observes the
-  committed event collections) so the example runs anywhere; a production
-  deployment configures a native Mongo change-stream connector instead. Either
-  way, no restlette is touched.
+- `src/source.rs` — the connector, behind an `EventSource` trait so you **pick
+  your scale**. The example ships a portable `RepositoryTail` (the in-process
+  scale: observes the committed event collections, no external infra); a
+  production deployment configures a native Mongo change-stream connector (the
+  distributed scale) against the same trait. Different connector in-process than
+  in prod is intended — one size does not fit all. Either way, no restlette is
+  touched.
 
 ## Workers: fold verbs into nouns
 

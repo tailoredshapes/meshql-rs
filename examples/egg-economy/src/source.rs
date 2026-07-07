@@ -19,10 +19,14 @@
 //!   timestamp, not the application's wall-clock, so replay and temporal reads
 //!   agree with what actually happened.
 //!
-//! The trait below abstracts "observe committed event writes." The example ships
-//! a portable poll-based tail so the pipeline runs on any backend (and in tests
-//! with no Mongo); a production deployment configures a native change-stream
-//! connector instead. Either way, no restlette is touched.
+//! The trait below abstracts "observe committed event writes" so you can **pick
+//! your scale** — one size does not fit all, and having a different connector
+//! in-process than in production is idiomatic meshql, not a compromise. The
+//! example ships a portable poll-based tail that runs on any backend (and in
+//! tests with no Mongo); a production deployment configures a native
+//! change-stream connector against the same trait. The delivery contract is
+//! identical; only the deployment weight changes. Either way, no restlette is
+//! touched.
 
 use crate::events::{EventRecord, TOPIC};
 use async_trait::async_trait;
@@ -44,9 +48,11 @@ pub trait EventSource: Send + Sync {
 }
 
 /// Portable CDC tail over a `Searcher`: lists the event mesh and emits any
-/// envelope id not seen before. Stands in for a native change-stream connector
-/// on backends without one, and lets the whole pipeline run in-process for
-/// tests. It observes the committed store, never the request path.
+/// envelope id not seen before. This is the *in-process scale* of the connector
+/// — it runs the whole pipeline with no external infra (tests, single-node
+/// deployments). Swap in a native change-stream connector for the distributed
+/// scale; both implement `EventSource` and both observe the committed store,
+/// never the request path.
 pub struct RepositoryTail {
     verb: String,
     searcher: Arc<dyn Searcher>,

@@ -43,7 +43,7 @@ Why this and not an application-level publish after the write:
 - **No dual write.** A "write the DB, then publish the event" hook is two writes with no shared transaction. Crash in between and the row exists but the event never fired — the log is now a lie, and every projection built from it is silently wrong. CDC derives the event *from the committed write*, so the event cannot be lost relative to the data: "if the event doesn't fire post-write, it will." At-least-once delivery after commit is the datastore/CDC layer's responsibility, not the mesh's.
 - **Correct order and time.** Events carry the store's commit order and timestamp, so replay and temporal reads reflect what actually happened, not application wall-clock during a request.
 
-Because folds are deterministic and idempotent, at-least-once delivery is enough: replaying a duplicate event recomputes the same noun. At-least-once + idempotent fold = exactly-once *effect*. See `examples/egg-economy/src/source.rs` for the connector abstraction (a portable poll-based tail, with a native change-stream connector as the production form) and `worker.rs` for the fold side.
+Because folds are deterministic and idempotent, at-least-once delivery is enough: replaying a duplicate event recomputes the same noun. At-least-once + idempotent fold = exactly-once *effect*. The connector sits behind an `EventSource` trait so you **pick your scale** (invariant 6): `examples/egg-economy/src/source.rs` ships a portable poll-based tail (in-process, no infra) and a native change-stream connector is the distributed form — same trait, same delivery contract, different deployment weight. See `worker.rs` for the fold side.
 
 ## The worker
 

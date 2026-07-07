@@ -14,7 +14,7 @@ Everything is stored as an **Envelope**: `{id, payload, created_at, deleted, aut
 
 **The pattern meshql is built for** (start here for any non-trivial system): model the domain as **events** (immutable facts) and **projections** (domain models derived from events by **workers**). Front ends write events, never domain models; new domain models can be materialized by replaying history. The invariants below exist to make this sound. See `references/domain-design.md`.
 
-## The five invariants
+## The six invariants
 
 Follow these in every change; they are what the architecture excels at:
 
@@ -23,6 +23,7 @@ Follow these in every change; they are what the architecture excels at:
 3. **Temporal everywhere.** Every GraphQL `Query` field takes `at: Float` (epoch millis — `Float`, not `Int`: GraphQL `Int` is 32-bit and overflows on millisecond timestamps) and every `Repository.read` / `Searcher.find` honors it. The root query's `at` propagates through federated resolver hops, so point-in-time reads are consistent across the whole graph. When adding a query, include `at` in the schema and let the adapter's version-windowing handle it.
 4. **Authorization rides the Envelope.** `authorized_tokens` on each Envelope is matched against caller credentials extracted by the `Auth` trait. Visibility: empty tokens = public, `"*"` = everyone, otherwise intersection. Repositories and Searchers must filter by tokens on *every* read path — adding a query that skips token filtering is a security bug.
 5. **Storage is pluggable, behavior is certified.** Datastores only implement `Repository` + `Searcher` (`meshql-core/src/lib.rs`). All business behavior lives above the traits. A new adapter must pass the shared certification tests (`meshql-core/src/testing.rs`, `meshql-cert`).
+6. **Pick your scale — one size does not fit all.** The same abstraction deliberately has an in-process form and a distributed form, and choosing a different implementation for dev/test than for production is *idiomatic*, not a compromise. In-memory SQLite or merkql for a test; Postgres, Mongo, or Kafka for prod. A poll-based CDC tail in-process; a native change-stream connector in prod. The behavior contract (certification, the trait, the fold) is identical; only the deployment weight changes. When you see two implementations of one seam, that is the design working — do not collapse them.
 
 ## Naming and layout conventions
 
