@@ -6,7 +6,7 @@
 
 **Architecture:** A `ChangeSource` trait (promotion of egg-economy's `EventSource`) with a portable poll-based `SearcherTail` impl that diffs `find_all` output by payload hash and recovers Envelope metadata via point `Repository::read`s. A `ChangeHub` (tokio broadcast) fans events to an axum SSE route that filters per-subscriber by auth tokens. The manifest is a published JSON Schema; deployments serve a conforming static document. No changes to any storage adapter or lette; one small additive helper in `meshql-core`.
 
-**Tech Stack:** Rust 2021, axum 0.7 (`axum::response::sse`), tokio broadcast + tokio-stream, serde_json (default BTreeMap maps → deterministic serialization), jsonschema (dev-only, conformance tests), meshql-sqlite in-memory for certification tests.
+**Tech Stack:** Rust 2021, axum 0.7 (`axum::response::sse`), tokio broadcast + tokio-stream, serde_json (NB: preserve_order is enabled transitively — sort explicitly where determinism matters), jsonschema (dev-only, conformance tests), meshql-sqlite in-memory for certification tests.
 
 **Read the spec first:** `docs/superpowers/specs/2026-07-07-meshql-changes-design.md`. It records the reasoning; this plan records the steps. Where they disagree, stop and flag it.
 
@@ -54,7 +54,7 @@ let pool = SqlitePoolOptions::new().max_connections(1).connect_with(opts).await.
 **Facts to respect:**
 - `find_all` rows are **payload + inserted `"id"` only** — no `created_at`, no tokens. Latest non-deleted version per id. Tombstones invisible.
 - An "update" through the restlette is `repo.create(Envelope::new(same_id, merged_payload, tokens))` — a new version.
-- serde_json without `preserve_order` (this workspace) uses BTreeMap: `serde_json::to_string` of a Stash is deterministic. Safe to hash.
+- **CORRECTION (found during Task 2 review):** serde_json resolves WITH `preserve_order` in this workspace (transitive feature unification) — maps keep insertion order, serialization is NOT sorted. Anything needing cross-run/cross-filesystem determinism must sort explicitly. Hashing a row that round-trips from stored JSON text is still stable per stored version (safe for SearcherTail diffing).
 - `run(config)` / `run_ext(config, extra_router)` in meshql-server; extra routes merge with priority.
 
 ---
@@ -967,8 +967,14 @@ impl SearcherTail {
         }
     }
 
-    /// Deterministic: serde_json Stash is a BTreeMap in this workspace, so
-    /// serialization order is sorted. In-process hash only — never persisted.
+    /// NB: serde_json resolves with `preserve_order` in this workspace
+    /// (transitive feature unification), so serialization follows key
+    /// insertion order, NOT sorted order. Still sound here: rows
+    /// deserialize from stored JSON text, so the same stored version
+    /// always serializes identically (no false negatives). A key-order-only
+    /// difference between versions hashes as a change — a harmless extra
+    /// notification (client refetch is idempotent). In-process hash only —
+    /// never persisted.
     fn hash_row(row: &Stash) -> u64 {
         let mut h = DefaultHasher::new();
         serde_json::to_string(row)
