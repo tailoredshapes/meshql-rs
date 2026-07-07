@@ -113,19 +113,22 @@ commit `created_at` and tokens — a handful of reads per poll, not N+1 over
 the table. For deletes there is no envelope to read; the tail uses the last
 known tokens from the state map (the people who could see the envelope are
 the ones who should learn it is gone) and the poll's wall-clock as
-`created_at`. Race edge: an envelope updated then deleted between polls
-diffs as changed but its point `read` returns nothing — emit the delete
-notification in that case (cert suite covers it).
+`created_at`. Race edge: if a delete lands between the `find_all` and the
+recovery `read`, the envelope diffs as changed but the point `read` returns
+nothing — emit the delete notification in that case (cert suite covers it).
 
 **Backend caveat:** the `["*"]`-credential poll relies on searchers honoring
 the `meshql-core::auth` convention that a caller holding `"*"` sees
-everything. The SQL, merkql, and sqlite searchers post-filter via
-`envelope_visible_to`, which implements this; the Mongo searcher instead
-filters `authorizedTokens $in [creds]` in the query with no wildcard
-special-case, so under real auth a `["*"]` poll would silently miss
-envelopes. That is a pre-existing Mongo adapter inconsistency with the core
-convention, tracked as a separate fix; until it lands, `SearcherTail` on
-Mongo is correct only for `NoAuth` deployments.
+everything. Only the sqlite searcher actually implements it (post-filtering
+via `envelope_visible_to`); postgres, mysql, and merkql ignore caller creds
+entirely (too permissive — every caller sees everything), and Mongo filters
+`authorizedTokens $in [creds]` in the query with no wildcard special-case
+(too restrictive — a `["*"]` poll silently misses envelopes under real
+auth). Net effect for the tail: the `["*"]` poll sees everything on all
+backends except Mongo. The four-of-five deviation from the core convention
+is a pre-existing adapter inconsistency, tracked as a separate fix; until
+the Mongo side lands, `SearcherTail` on Mongo is correct only for `NoAuth`
+deployments.
 
 **Delivery contract:** at-least-once, per-entity ordered by `created_at`.
 Duplicates are harmless by design.
@@ -183,8 +186,8 @@ forcing the reconnect-refetch path. Slow clients get correctness, not gaps.
 
 ## The deployment manifest
 
-**Deliverable: `schemas/manifest.schema.json`** — a JSON Schema at the repo
-root, versioned via its `$id` (`…/manifest-v1.schema.json`); breaking changes
+**Deliverable: `schemas/manifest.schema.json`** — a JSON Schema in a
+top-level `schemas/` directory, versioned via its `$id` (`…/manifest-v1.schema.json`); breaking changes
 ship as a new `-v2` file, and manifest documents declare which they conform
 to via the `meshql` field. Not an endpoint, not a builder API. Deployments serve a conforming
 document however they like: hand-written and committed next to
