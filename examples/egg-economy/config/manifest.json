@@ -1,0 +1,560 @@
+{
+  "meshql": 1,
+  "entities": {
+    "retire_hen": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/retire_hen/graph",
+          "schema": "scalar Date\n\n# Business event (verb). Immutable; front ends POST these. Queryable for audit.\ntype Query {\n  getById(id: ID, at: Float): RetireHen\n  getAll(at: Float): [RetireHen]\n}\n\ntype RetireHen {\n  id: ID\n  hen_id: String!\n  reason: String\n}\n"
+        },
+        "api": {
+          "kind": "rest",
+          "path": "/retire_hen/api",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "hen_id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "hen_id": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "eggs_withdrawn": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/eggs_withdrawn/graph",
+          "schema": "scalar Date\n\n# Business event (verb). Immutable; front ends POST these. Queryable for audit.\ntype Query {\n  getById(id: ID, at: Float): EggsWithdrawn\n  getAll(at: Float): [EggsWithdrawn]\n}\n\ntype EggsWithdrawn {\n  id: ID\n  container_id: String!\n  reason: String!\n  eggs: Int!\n  timestamp: String!\n}\n"
+        },
+        "api": {
+          "kind": "rest",
+          "path": "/eggs_withdrawn/api",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "container_id",
+              "reason",
+              "eggs",
+              "timestamp"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "container_id": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "eggs": {
+                "type": "integer"
+              },
+              "timestamp": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "hen_productivity": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/hen_productivity/graph",
+          "schema": "scalar Date\n\ntype Query {\n  getById(id: ID, at: Float): HenProductivity\n  getByHen(id: ID, at: Float): [HenProductivity]\n  getAll(at: Float): [HenProductivity]\n}\n\ntype Hen {\n  id: ID\n  name: String!\n  breed: String\n  status: String\n}\n\ntype HenProductivity {\n  id: ID\n  hen_id: String!\n  farm_id: String!\n  eggs_today: Int!\n  eggs_week: Int!\n  eggs_month: Int!\n  avg_per_week: Float!\n  total_eggs: Int!\n  quality_rate: Float\n  hen: Hen\n}\n"
+        }
+      }
+    },
+    "eggs_laid": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/eggs_laid/graph",
+          "schema": "scalar Date\n\n# Business event (verb). Immutable; front ends POST these. Queryable for audit.\ntype Query {\n  getById(id: ID, at: Float): EggsLaid\n  getAll(at: Float): [EggsLaid]\n}\n\ntype EggsLaid {\n  id: ID\n  hen_id: String!\n  coop_id: String!\n  farm_id: String!\n  eggs: Int!\n  quality: String\n  timestamp: String!\n}\n"
+        },
+        "api": {
+          "kind": "rest",
+          "path": "/eggs_laid/api",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "hen_id",
+              "coop_id",
+              "farm_id",
+              "eggs",
+              "timestamp"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "hen_id": {
+                "type": "string"
+              },
+              "coop_id": {
+                "type": "string"
+              },
+              "farm_id": {
+                "type": "string"
+              },
+              "eggs": {
+                "type": "integer"
+              },
+              "quality": {
+                "type": "string"
+              },
+              "timestamp": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "farm_output": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/farm_output/graph",
+          "schema": "scalar Date\n\ntype Query {\n  getById(id: ID, at: Float): FarmOutput\n  getByFarm(id: ID, at: Float): [FarmOutput]\n  getAll(at: Float): [FarmOutput]\n}\n\ntype Farm {\n  id: ID\n  name: String!\n  farm_type: String!\n  zone: String!\n}\n\ntype FarmOutput {\n  id: ID\n  farm_id: String!\n  farm_type: String\n  eggs_today: Int!\n  eggs_week: Int!\n  eggs_month: Int!\n  active_hens: Int!\n  total_hens: Int!\n  avg_per_hen_per_week: Float\n  farm: Farm\n}\n"
+        }
+      }
+    },
+    "coop": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/coop/graph",
+          "schema": "scalar Date\n\ntype Query {\n  getById(id: ID, at: Float): Coop\n  getAll(at: Float): [Coop]\n  getByFarm(id: ID, at: Float): [Coop]\n}\n\ntype Farm {\n  id: ID\n  name: String!\n  farm_type: String!\n  zone: String!\n}\n\ntype Coop {\n  id: ID\n  name: String!\n  farm_id: String!\n  capacity: Int!\n  coop_type: String!\n  farm: Farm\n  hens: [Hen]\n}\n\ntype Hen {\n  id: ID\n  name: String!\n  breed: String\n  dob: Date\n  status: String\n}\n"
+        }
+      }
+    },
+    "register_consumer": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/register_consumer/graph",
+          "schema": "scalar Date\n\n# Business event (verb). Immutable; front ends POST these. Queryable for audit.\ntype Query {\n  getById(id: ID, at: Float): RegisterConsumer\n  getAll(at: Float): [RegisterConsumer]\n}\n\ntype RegisterConsumer {\n  id: ID\n  name: String!\n  consumer_type: String!\n  zone: String\n  weekly_demand: Int\n}\n"
+        },
+        "api": {
+          "kind": "rest",
+          "path": "/register_consumer/api",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "consumer_type"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "consumer_type": {
+                "type": "string"
+              },
+              "zone": {
+                "type": "string"
+              },
+              "weekly_demand": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      }
+    },
+    "build_coop": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/build_coop/graph",
+          "schema": "scalar Date\n\n# Business event (verb). Immutable; front ends POST these. Queryable for audit.\ntype Query {\n  getById(id: ID, at: Float): BuildCoop\n  getAll(at: Float): [BuildCoop]\n}\n\ntype BuildCoop {\n  id: ID\n  farm_id: String!\n  name: String!\n  capacity: Int\n  coop_type: String\n}\n"
+        },
+        "api": {
+          "kind": "rest",
+          "path": "/build_coop/api",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "farm_id",
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "farm_id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "capacity": {
+                "type": "integer"
+              },
+              "coop_type": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "consumer": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/consumer/graph",
+          "schema": "scalar Date\n\ntype Query {\n  getById(id: ID, at: Float): Consumer\n  getAll(at: Float): [Consumer]\n  getByZone(zone: String, at: Float): [Consumer]\n}\n\ntype Consumer {\n  id: ID\n  name: String!\n  consumer_type: String!\n  zone: String!\n  weekly_demand: Int\n}\n"
+        }
+      }
+    },
+    "eggs_transferred": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/eggs_transferred/graph",
+          "schema": "scalar Date\n\n# Business event (verb). Immutable; front ends POST these. Queryable for audit.\ntype Query {\n  getById(id: ID, at: Float): EggsTransferred\n  getAll(at: Float): [EggsTransferred]\n}\n\ntype EggsTransferred {\n  id: ID\n  source_container_id: String!\n  dest_container_id: String!\n  eggs: Int!\n  timestamp: String!\n}\n"
+        },
+        "api": {
+          "kind": "rest",
+          "path": "/eggs_transferred/api",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source_container_id",
+              "dest_container_id",
+              "eggs",
+              "timestamp"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "source_container_id": {
+                "type": "string"
+              },
+              "dest_container_id": {
+                "type": "string"
+              },
+              "eggs": {
+                "type": "integer"
+              },
+              "timestamp": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "build_container": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/build_container/graph",
+          "schema": "scalar Date\n\n# Business event (verb). Immutable; front ends POST these. Queryable for audit.\ntype Query {\n  getById(id: ID, at: Float): BuildContainer\n  getAll(at: Float): [BuildContainer]\n}\n\ntype BuildContainer {\n  id: ID\n  name: String!\n  container_type: String!\n  capacity: Int\n  zone: String\n}\n"
+        },
+        "api": {
+          "kind": "rest",
+          "path": "/build_container/api",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "container_type"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "container_type": {
+                "type": "string"
+              },
+              "capacity": {
+                "type": "integer"
+              },
+              "zone": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "container": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/container/graph",
+          "schema": "scalar Date\n\ntype Query {\n  getById(id: ID, at: Float): Container\n  getAll(at: Float): [Container]\n  getByZone(zone: String, at: Float): [Container]\n}\n\ntype Container {\n  id: ID\n  name: String!\n  container_type: String!\n  capacity: Int!\n  zone: String!\n  inventory: [ContainerInventory]\n}\n\ntype ContainerInventory {\n  id: ID\n  current_eggs: Int\n  total_deposits: Int\n  total_withdrawals: Int\n  total_transfers_in: Int\n  total_transfers_out: Int\n  total_consumed: Int\n  utilization_pct: Float\n}\n"
+        }
+      }
+    },
+    "hen": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/hen/graph",
+          "schema": "scalar Date\n\ntype Query {\n  getById(id: ID, at: Float): Hen\n  getByCoop(id: ID, at: Float): [Hen]\n  getAll(at: Float): [Hen]\n}\n\ntype Coop {\n  id: ID\n  name: String!\n  capacity: Int\n}\n\ntype Hen {\n  id: ID\n  name: String!\n  coop_id: String!\n  breed: String!\n  dob: Date\n  status: String\n  coop: Coop\n  productivity: [HenProductivity]\n}\n\ntype HenProductivity {\n  id: ID\n  eggs_today: Int\n  eggs_week: Int\n  eggs_month: Int\n  avg_per_week: Float\n  total_eggs: Int\n  quality_rate: Float\n}\n"
+        }
+      }
+    },
+    "eggs_consumed": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/eggs_consumed/graph",
+          "schema": "scalar Date\n\n# Business event (verb). Immutable; front ends POST these. Queryable for audit.\ntype Query {\n  getById(id: ID, at: Float): EggsConsumed\n  getAll(at: Float): [EggsConsumed]\n}\n\ntype EggsConsumed {\n  id: ID\n  consumer_id: String!\n  container_id: String!\n  eggs: Int!\n  timestamp: String!\n}\n"
+        },
+        "api": {
+          "kind": "rest",
+          "path": "/eggs_consumed/api",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "consumer_id",
+              "container_id",
+              "eggs",
+              "timestamp"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "consumer_id": {
+                "type": "string"
+              },
+              "container_id": {
+                "type": "string"
+              },
+              "eggs": {
+                "type": "integer"
+              },
+              "timestamp": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "farm": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/farm/graph",
+          "schema": "scalar Date\n\ntype Query {\n  getById(id: ID, at: Float): Farm\n  getAll(at: Float): [Farm]\n  getByZone(zone: String, at: Float): [Farm]\n}\n\ntype Farm {\n  id: ID\n  name: String!\n  farm_type: String!\n  zone: String!\n  owner: String\n  coops: [Coop]\n  farmOutput: [FarmOutput]\n}\n\ntype Coop {\n  id: ID\n  name: String!\n  capacity: Int\n  coop_type: String\n  hens: [Hen]\n}\n\ntype Hen {\n  id: ID\n  name: String!\n  breed: String\n  status: String\n}\n\ntype FarmOutput {\n  id: ID\n  farm_type: String\n  eggs_today: Int\n  eggs_week: Int\n  eggs_month: Int\n  active_hens: Int\n  total_hens: Int\n  avg_per_hen_per_week: Float\n}\n"
+        }
+      }
+    },
+    "buy_hens": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/buy_hens/graph",
+          "schema": "scalar Date\n\n# Business event (verb). Immutable; front ends POST these. Queryable for audit.\ntype Query {\n  getById(id: ID, at: Float): BuyHens\n  getAll(at: Float): [BuyHens]\n}\n\ntype BuyHens {\n  id: ID\n  coop_id: String!\n  farm_id: String!\n  breed: String!\n  count: Int!\n}\n"
+        },
+        "api": {
+          "kind": "rest",
+          "path": "/buy_hens/api",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "coop_id",
+              "farm_id",
+              "breed",
+              "count"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "coop_id": {
+                "type": "string"
+              },
+              "farm_id": {
+                "type": "string"
+              },
+              "breed": {
+                "type": "string"
+              },
+              "count": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      }
+    },
+    "move_hen_to_coop": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/move_hen_to_coop/graph",
+          "schema": "scalar Date\n\n# Business event (verb). Immutable; front ends POST these. Queryable for audit.\ntype Query {\n  getById(id: ID, at: Float): MoveHenToCoop\n  getAll(at: Float): [MoveHenToCoop]\n}\n\ntype MoveHenToCoop {\n  id: ID\n  hen_id: String!\n  coop_id: String!\n}\n"
+        },
+        "api": {
+          "kind": "rest",
+          "path": "/move_hen_to_coop/api",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "hen_id",
+              "coop_id"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "hen_id": {
+                "type": "string"
+              },
+              "coop_id": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "build_farm": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/build_farm/graph",
+          "schema": "scalar Date\n\n# Business event (verb). Immutable; front ends POST these. Queryable for audit.\ntype Query {\n  getById(id: ID, at: Float): BuildFarm\n  getAll(at: Float): [BuildFarm]\n}\n\ntype BuildFarm {\n  id: ID\n  name: String!\n  farm_type: String\n  zone: String\n  owner: String\n}\n"
+        },
+        "api": {
+          "kind": "rest",
+          "path": "/build_farm/api",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "name": {
+                "type": "string"
+              },
+              "farm_type": {
+                "type": "string"
+              },
+              "zone": {
+                "type": "string"
+              },
+              "owner": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "eggs_stored": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/eggs_stored/graph",
+          "schema": "scalar Date\n\n# Business event (verb). Immutable; front ends POST these. Queryable for audit.\ntype Query {\n  getById(id: ID, at: Float): EggsStored\n  getAll(at: Float): [EggsStored]\n}\n\ntype EggsStored {\n  id: ID\n  container_id: String!\n  source_type: String!\n  source_id: String!\n  eggs: Int!\n  timestamp: String!\n}\n"
+        },
+        "api": {
+          "kind": "rest",
+          "path": "/eggs_stored/api",
+          "schema": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "container_id",
+              "source_type",
+              "source_id",
+              "eggs",
+              "timestamp"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "container_id": {
+                "type": "string"
+              },
+              "source_type": {
+                "type": "string"
+              },
+              "source_id": {
+                "type": "string"
+              },
+              "eggs": {
+                "type": "integer"
+              },
+              "timestamp": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "container_inventory": {
+      "surfaces": {
+        "graph": {
+          "kind": "graphql",
+          "path": "/container_inventory/graph",
+          "schema": "scalar Date\n\ntype Query {\n  getById(id: ID, at: Float): ContainerInventory\n  getByContainer(id: ID, at: Float): [ContainerInventory]\n  getAll(at: Float): [ContainerInventory]\n}\n\ntype Container {\n  id: ID\n  name: String!\n  container_type: String\n  capacity: Int\n  zone: String\n}\n\ntype ContainerInventory {\n  id: ID\n  container_id: String!\n  current_eggs: Int!\n  total_deposits: Int!\n  total_withdrawals: Int!\n  total_transfers_in: Int!\n  total_transfers_out: Int!\n  total_consumed: Int!\n  utilization_pct: Float\n  container: Container\n}\n"
+        }
+      }
+    }
+  },
+  "surfaces": {
+    "changes": {
+      "kind": "sse",
+      "path": "/changes"
+    }
+  }
+}

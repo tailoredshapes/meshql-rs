@@ -16,6 +16,7 @@
 //! ```
 
 pub mod events;
+pub mod manifest;
 pub mod projectors;
 pub mod source;
 pub mod worker;
