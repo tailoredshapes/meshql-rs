@@ -1136,7 +1136,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "merkql 0.2.0",
+ "merkql",
  "meshql-core",
  "meshql-graphlette",
  "meshql-mongo",
