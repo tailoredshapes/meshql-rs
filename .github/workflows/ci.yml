@@ -38,8 +38,18 @@ jobs:
       - name: Build
         run: cargo build --workspace
 
-      - name: Run tests
+      # Linux runners have a Docker daemon, so the testcontainers-backed DB
+      # adapter certs (meshql-mongo / meshql-mysql / meshql-postgres) can run.
+      - name: Run tests (full suite)
+        if: runner.os == 'Linux'
         run: cargo test --workspace
+
+      # macOS and Windows runners have no Docker daemon, so the DB adapter certs
+      # can't start their containers. Run everything else (which still covers the
+      # sqlite / merkql / ksql adapters and all pure-logic crates cross-platform).
+      - name: Run tests (excluding Docker-backed DB adapter certs)
+        if: runner.os != 'Linux'
+        run: cargo test --workspace --exclude meshql-mongo --exclude meshql-mysql --exclude meshql-postgres
 
   clippy:
     name: Clippy
