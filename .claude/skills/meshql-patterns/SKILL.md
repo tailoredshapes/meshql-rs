@@ -12,6 +12,8 @@ meshql turns every entity into a pair of HTTP surfaces backed by the same store:
 
 Everything is stored as an **Envelope**: `{id, payload, created_at, deleted, authorized_tokens}`. Updates append new versions (same `id`, newer `created_at`); deletes set `deleted = true`. Nothing is mutated or hard-deleted. This is what makes temporal queries (`at:` parameter) and audit trails free — never break it.
 
+**The pattern meshql is built for** (start here for any non-trivial system): model the domain as **events** (immutable facts) and **projections** (domain models derived from events by **workers**). Front ends write events, never domain models; new domain models can be materialized by replaying history. The invariants below exist to make this sound. See `references/domain-design.md`.
+
 ## The five invariants
 
 Follow these in every change; they are what the architecture excels at:
@@ -74,7 +76,7 @@ A meshql system is a small Rust binary owned by the service developer — there 
 - **Adding/changing an entity or query** → read `references/adding-an-entity.md`
 - **Relating entities (1:1, 1:N), internal vs HTTP federation** → read `references/federation.md`
 - **New datastore adapter, or touching Repository/Searcher internals** → read `references/storage-adapters.md`
-- **Modeling a domain**: split into **actors** (long-lived things: farm, hen), **events** (immutable facts: lay_report, storage_deposit), and **projections** (computed read models: hen_productivity). Events are only ever created, never updated. See `examples/egg-economy/` (13 entities) for the full pattern; `examples/farm/` for the minimal one.
+- **Modeling a domain** (the pattern meshql is built for): identify **events** first (immutable facts), derive **projections** (domain models) from them, and write **one worker per projection** that folds events into it. Front ends write events, never domain models — enforced by infra + convention — and new domains can be built by replaying history. Full methodology in `references/domain-design.md`. Entity taxonomy split into **actors** (long-lived: farm, hen), **events** (lay_report, storage_deposit), and **projections** (hen_productivity) is shown across `examples/egg-economy/` (13 entities); `examples/farm/` is the minimal non-event-sourced case.
 - **Custom commands/side effects**: don't bolt logic into adapters. Use `build_restlette_router_ext` (validators, defaults, `post_create` side effects) or `run_ext` extra Axum routes for computed endpoints. See `meshql-restlette/src/routes.rs`.
 - **Auth beyond NoAuth**: `StashKeyAuth` extracts identity from a request stash key; wrap with `CasbinAuth` (`meshql-casbin`) for role-based action checks (`authorize_action(creds, "write")`). Pass via `run_with_auth`/`build_app_with_auth`.
 - **Exposing a deployment to LLM agents at runtime** → use the existing `meshql-mcp` crate (`meshql-mcp/README.md`), not this skill.
