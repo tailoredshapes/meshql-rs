@@ -46,17 +46,23 @@ impl AuthContext {
 /// meshql-rs convention preserved from `NoAuth`, used for internal /
 /// system reads where no caller identity is available.
 pub fn envelope_visible_to(envelope: &Envelope, tokens: &[String]) -> bool {
-    if envelope.authorized_tokens.is_empty() {
+    tokens_visible_to(&envelope.authorized_tokens, tokens)
+}
+
+/// Same visibility predicate as [`envelope_visible_to`], usable when only the
+/// raw `authorized_tokens` are at hand (e.g. adapters reading a tokens column
+/// without materializing a full `Envelope`).
+pub fn tokens_visible_to(authorized_tokens: &[String], tokens: &[String]) -> bool {
+    if authorized_tokens.is_empty() {
         return true;
     }
     if tokens.iter().any(|t| t == "*") {
         return true;
     }
-    if envelope.authorized_tokens.iter().any(|t| t == "*") {
+    if authorized_tokens.iter().any(|t| t == "*") {
         return true;
     }
-    envelope
-        .authorized_tokens
+    authorized_tokens
         .iter()
         .any(|t| tokens.iter().any(|c| c == t))
 }
@@ -143,6 +149,35 @@ mod tests {
         let auth = StashKeyAuth::new("user_id");
         let stash = stash_with("user_id", json!(""));
         assert_eq!(auth.get_auth_token(&stash), Vec::<String>::new());
+    }
+
+    fn toks(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn tokens_visible_to_empty_authorized_tokens_is_public() {
+        assert!(tokens_visible_to(&[], &toks(&["anyone"])));
+        assert!(tokens_visible_to(&[], &[]));
+    }
+
+    #[test]
+    fn tokens_visible_to_wildcard_caller_sees_everything() {
+        assert!(tokens_visible_to(&toks(&["alice"]), &toks(&["*"])));
+        assert!(tokens_visible_to(&toks(&["alice", "bob"]), &toks(&["x", "*"])));
+    }
+
+    #[test]
+    fn tokens_visible_to_wildcard_envelope_visible_to_all() {
+        assert!(tokens_visible_to(&toks(&["*"]), &toks(&["charlie"])));
+        assert!(tokens_visible_to(&toks(&["*"]), &[]));
+    }
+
+    #[test]
+    fn tokens_visible_to_requires_intersection_otherwise() {
+        assert!(tokens_visible_to(&toks(&["alice", "bob"]), &toks(&["bob"])));
+        assert!(!tokens_visible_to(&toks(&["alice"]), &toks(&["bob"])));
+        assert!(!tokens_visible_to(&toks(&["alice"]), &[]));
     }
 
     #[test]
