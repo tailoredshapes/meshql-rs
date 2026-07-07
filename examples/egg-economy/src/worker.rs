@@ -22,10 +22,19 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn new(broker: BrokerRef, projector: Box<dyn Projector>, repo: Arc<dyn Repository>) -> Self {
+    pub fn new(
+        broker: BrokerRef,
+        projector: Box<dyn Projector>,
+        repo: Arc<dyn Repository>,
+    ) -> Self {
         // Workers run as system principals; nouns they write inherit "*" (public
         // read) here for the example. A real deployment would scope tokens.
-        Self { broker, projector, repo, tokens: vec!["*".to_string()] }
+        Self {
+            broker,
+            projector,
+            repo,
+            tokens: vec!["*".to_string()],
+        }
     }
 
     pub fn noun(&self) -> &'static str {
@@ -62,7 +71,9 @@ impl Worker {
                     Ok(v) => v,
                     Err(_) => continue,
                 };
-                let Some(ev) = EventRecord::from_json(&v) else { continue };
+                let Some(ev) = EventRecord::from_json(&v) else {
+                    continue;
+                };
                 if self.projector.consumes(&ev.verb) {
                     self.projector.apply(&ev);
                 }

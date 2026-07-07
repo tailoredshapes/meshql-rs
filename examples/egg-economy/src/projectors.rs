@@ -53,10 +53,18 @@ pub struct BuildProjector {
 
 impl BuildProjector {
     pub fn farm() -> Self {
-        Self::new("farm", verb::BUILD_FARM, &["name", "farm_type", "zone", "owner"])
+        Self::new(
+            "farm",
+            verb::BUILD_FARM,
+            &["name", "farm_type", "zone", "owner"],
+        )
     }
     pub fn coop() -> Self {
-        Self::new("coop", verb::BUILD_COOP, &["farm_id", "name", "capacity", "coop_type"])
+        Self::new(
+            "coop",
+            verb::BUILD_COOP,
+            &["farm_id", "name", "capacity", "coop_type"],
+        )
     }
     pub fn container() -> Self {
         Self::new(
@@ -74,7 +82,12 @@ impl BuildProjector {
     }
 
     fn new(noun: &'static str, verb: &'static str, fields: &'static [&'static str]) -> Self {
-        Self { noun, verb, fields, state: HashMap::new() }
+        Self {
+            noun,
+            verb,
+            fields,
+            state: HashMap::new(),
+        }
     }
 }
 
@@ -100,7 +113,10 @@ impl Projector for BuildProjector {
     fn snapshot(&self) -> Vec<Upsert> {
         self.state
             .iter()
-            .map(|(id, payload)| Upsert { id: id.clone(), payload: payload.clone() })
+            .map(|(id, payload)| Upsert {
+                id: id.clone(),
+                payload: payload.clone(),
+            })
             .collect()
     }
 }
@@ -124,7 +140,10 @@ impl Projector for HenProjector {
         "hen"
     }
     fn consumes(&self, v: &str) -> bool {
-        matches!(v, verb::BUY_HENS | verb::MOVE_HEN_TO_COOP | verb::RETIRE_HEN)
+        matches!(
+            v,
+            verb::BUY_HENS | verb::MOVE_HEN_TO_COOP | verb::RETIRE_HEN
+        )
     }
     fn reset(&mut self) {
         self.state.clear();
@@ -174,7 +193,10 @@ impl Projector for HenProjector {
     fn snapshot(&self) -> Vec<Upsert> {
         self.state
             .iter()
-            .map(|(id, payload)| Upsert { id: id.clone(), payload: payload.clone() })
+            .map(|(id, payload)| Upsert {
+                id: id.clone(),
+                payload: payload.clone(),
+            })
             .collect()
     }
 }
