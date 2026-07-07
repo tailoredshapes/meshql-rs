@@ -1,0 +1,12 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["consumer_id", "container_id", "eggs", "timestamp"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "consumer_id": {"type": "string"},
+        "container_id": {"type": "string"},
+        "eggs": {"type": "integer"},
+        "timestamp": {"type": "string"}
+    }
+}

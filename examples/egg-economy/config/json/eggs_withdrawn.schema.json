@@ -4,9 +4,9 @@
     "required": ["container_id", "reason", "eggs", "timestamp"],
     "properties": {
         "id": {"type": "string", "format": "uuid"},
-        "container_id": {"type": "string", "format": "uuid"},
-        "reason": {"type": "string", "enum": ["spoilage", "breakage", "quality_check"]},
-        "eggs": {"type": "integer", "minimum": 1},
+        "container_id": {"type": "string"},
+        "reason": {"type": "string"},
+        "eggs": {"type": "integer"},
         "timestamp": {"type": "string"}
     }
 }

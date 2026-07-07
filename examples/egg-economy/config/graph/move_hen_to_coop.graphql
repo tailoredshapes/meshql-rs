@@ -1,0 +1,13 @@
+scalar Date
+
+# Business event (verb). Immutable; front ends POST these. Queryable for audit.
+type Query {
+  getById(id: ID, at: Float): MoveHenToCoop
+  getAll(at: Float): [MoveHenToCoop]
+}
+
+type MoveHenToCoop {
+  id: ID
+  hen_id: String!
+  coop_id: String!
+}

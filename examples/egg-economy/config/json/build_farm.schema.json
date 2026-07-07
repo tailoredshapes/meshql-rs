@@ -1,0 +1,12 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["name"],
+    "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "name": {"type": "string"},
+        "farm_type": {"type": "string"},
+        "zone": {"type": "string"},
+        "owner": {"type": "string"}
+    }
+}

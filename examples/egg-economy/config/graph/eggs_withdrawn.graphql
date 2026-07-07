@@ -1,0 +1,15 @@
+scalar Date
+
+# Business event (verb). Immutable; front ends POST these. Queryable for audit.
+type Query {
+  getById(id: ID, at: Float): EggsWithdrawn
+  getAll(at: Float): [EggsWithdrawn]
+}
+
+type EggsWithdrawn {
+  id: ID
+  container_id: String!
+  reason: String!
+  eggs: Int!
+  timestamp: String!
+}
