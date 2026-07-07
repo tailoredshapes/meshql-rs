@@ -187,8 +187,8 @@ The manifest is generated from the example's config files, so drift is impossibl
 
 use std::path::Path;
 
-fn repo_root() -> &'static Path {
-    // CARGO_MANIFEST_DIR = examples/egg-economy
+fn crate_dir() -> &'static Path {
+    // CARGO_MANIFEST_DIR = examples/egg-economy (the example crate, not the repo root)
     Path::new(env!("CARGO_MANIFEST_DIR"))
 }
 
@@ -213,7 +213,7 @@ fn manifest_validates_against_published_schema() {
 fn manifest_matches_regeneration() {
     let committed: serde_json::Value =
         serde_json::from_str(include_str!("../config/manifest.json")).expect("manifest parses");
-    let generated = egg_economy::manifest::generate(&repo_root().join("config"))
+    let generated = egg_economy::manifest::generate(&crate_dir().join("config"))
         .expect("generation succeeds");
     assert_eq!(
         committed, generated,
@@ -227,7 +227,7 @@ fn every_config_schema_appears_in_manifest() {
         serde_json::from_str(include_str!("../config/manifest.json")).expect("manifest parses");
     let entities = manifest["entities"].as_object().expect("entities object");
 
-    for dir_ent in std::fs::read_dir(repo_root().join("config/graph")).unwrap() {
+    for dir_ent in std::fs::read_dir(crate_dir().join("config/graph")).unwrap() {
         let path = dir_ent.unwrap().path();
         let entity = path.file_stem().unwrap().to_str().unwrap().to_string();
         let e = entities
@@ -503,7 +503,6 @@ anyhow = "1"
 [dev-dependencies]
 meshql-sqlite = { version = "0.1.0", path = "../meshql-sqlite" }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
-uuid = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 futures = "0.3"
 ```
@@ -1761,6 +1760,8 @@ run_ext(config, extra).await
 ```
 
 Check the actual imports in main.rs (`meshql_server::run` → also import `run_ext`). If repo/searcher variables were moved into config structs by value, restructure minimally: clone the `Arc`s into locals before building the configs (they are `Arc`s — cloning is cheap and idiomatic here).
+
+**Specifically:** the VERB repos/searchers are consumed inside the `event_defs` loop (moved into `RestletteConfig`/`RepositoryTail`) — clone the `Arc`s inside that loop to collect verb `SearcherTail`s too. Every entity gets a tail: 12 verbs + 8 nouns. The smoke test in Step 5 expects a `build_farm` (verb) event, so verb tails are not optional.
 
 - [ ] **Step 4: Verify it builds and existing example tests still pass**
 
