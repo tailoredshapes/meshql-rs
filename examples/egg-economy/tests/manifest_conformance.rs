@@ -39,13 +39,17 @@ fn manifest_matches_regeneration() {
 }
 
 #[test]
-fn every_config_schema_appears_in_manifest() {
+fn every_graph_entity_appears_in_manifest() {
     let manifest: serde_json::Value =
         serde_json::from_str(include_str!("../config/manifest.json")).expect("manifest parses");
     let entities = manifest["entities"].as_object().expect("entities object");
 
+    let mut seen = 0;
     for dir_ent in std::fs::read_dir(crate_dir().join("config/graph")).unwrap() {
         let path = dir_ent.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("graphql") {
+            continue;
+        }
         let entity = path.file_stem().unwrap().to_str().unwrap().to_string();
         let e = entities
             .get(&entity)
@@ -63,5 +67,9 @@ fn every_config_schema_appears_in_manifest() {
                 "{entity} is a noun and must not advertise a rest surface"
             );
         }
+        seen += 1;
     }
+    // Guard against a vacuous pass (empty config dir) and against manifest
+    // entities that have no corresponding config/graph file.
+    assert_eq!(seen, entities.len(), "manifest entity count != graph file count");
 }
