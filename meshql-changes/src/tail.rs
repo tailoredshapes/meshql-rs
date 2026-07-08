@@ -7,6 +7,16 @@
 //! `Repository::read` per *changed* envelope (a handful per poll, not
 //! N+1 over the table).
 //!
+//! Known blind spots (inherent to the row surface):
+//! - A byte-identical payload rewrite is not notified (hash unchanged) —
+//!   no refetch would show anything new.
+//! - A token-only ACL change with an identical payload is likewise
+//!   undetectable; stale tokens are kept until the next payload change or
+//!   delete.
+//! - Within one poll, events across *different* ids follow `find_all` row
+//!   order; per-id ordering by `created_at` holds, which is what the
+//!   idempotent-refetch contract needs.
+//!
 //! Backend caveat (see spec): the `["*"]` poll relies on searchers letting
 //! a wildcard caller see everything. All backends except Mongo currently
 //! do; on Mongo this tail is correct only under NoAuth until the adapter
@@ -61,56 +71,6 @@ impl SearcherTail {
             .hash(&mut h);
         h.finish()
     }
-
-    /// Point-read the envelope to recover commit time + tokens, and emit.
-    /// If the envelope vanished between find_all and this read (delete
-    /// race), emit a delete with last-known tokens instead.
-    async fn emit_changed(
-        &self,
-        id: &str,
-        last_known_tokens: Option<Vec<String>>,
-        now_ms: i64,
-        state: &mut HashMap<String, Known>,
-        row_hash: u64,
-        out: &mut Vec<ChangeEvent>,
-    ) -> anyhow::Result<()> {
-        let wildcard = ["*".to_string()];
-        match self
-            .repository
-            .read(id, &wildcard, None)
-            .await
-            .map_err(|e| anyhow::anyhow!(e.to_string()))?
-        {
-            Some(env) => {
-                state.insert(
-                    id.to_string(),
-                    Known {
-                        payload_hash: row_hash,
-                        tokens: env.authorized_tokens.clone(),
-                    },
-                );
-                out.push(ChangeEvent {
-                    entity: self.entity.clone(),
-                    id: id.to_string(),
-                    created_at: env.created_at.timestamp_millis(),
-                    deleted: false,
-                    authorized_tokens: env.authorized_tokens,
-                });
-            }
-            None => {
-                // Deleted between the list and the read.
-                state.remove(id);
-                out.push(ChangeEvent {
-                    entity: self.entity.clone(),
-                    id: id.to_string(),
-                    created_at: now_ms,
-                    deleted: true,
-                    authorized_tokens: last_known_tokens.unwrap_or_default(),
-                });
-            }
-        }
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -119,6 +79,12 @@ impl ChangeSource for SearcherTail {
         &self.entity
     }
 
+    /// At-least-once discipline: `state` is committed only after every
+    /// fallible operation in the poll has succeeded. A mid-poll error
+    /// (e.g. a transient point-read failure on a networked backend)
+    /// drops the buffered events AND the staged state, so the next poll
+    /// re-detects and re-emits everything — events are never lost to a
+    /// state map that advanced past them.
     async fn poll(&self) -> anyhow::Result<Vec<ChangeEvent>> {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let rows: Vec<Stash> = self
@@ -129,7 +95,10 @@ impl ChangeSource for SearcherTail {
 
         let mut state = self.state.lock().await;
         let mut out = Vec::new();
+        let mut staged_upserts: Vec<(String, Known)> = Vec::new();
+        let mut staged_removals: Vec<String> = Vec::new();
         let mut present: HashSet<String> = HashSet::new();
+        let wildcard = ["*".to_string()];
 
         for row in &rows {
             let Some(id) = row.get("id").and_then(|v| v.as_str()).map(String::from) else {
@@ -137,17 +106,47 @@ impl ChangeSource for SearcherTail {
             };
             present.insert(id.clone());
             let row_hash = Self::hash_row(row);
-            match state.get(&id) {
+            let last_known_tokens = match state.get(&id) {
+                None => None, // create
+                Some(known) if known.payload_hash != row_hash => Some(known.tokens.clone()),
+                Some(_) => continue, // unchanged
+            };
+
+            // Point-read to recover commit time + tokens. If the envelope
+            // vanished between find_all and this read (delete race), emit a
+            // delete with last-known tokens instead.
+            match self
+                .repository
+                .read(&id, &wildcard, None)
+                .await
+                .map_err(|e| anyhow::anyhow!(e.to_string()))?
+            {
+                Some(env) => {
+                    staged_upserts.push((
+                        id.clone(),
+                        Known {
+                            payload_hash: row_hash,
+                            tokens: env.authorized_tokens.clone(),
+                        },
+                    ));
+                    out.push(ChangeEvent {
+                        entity: self.entity.clone(),
+                        id,
+                        created_at: env.created_at.timestamp_millis(),
+                        deleted: false,
+                        authorized_tokens: env.authorized_tokens,
+                    });
+                }
                 None => {
-                    self.emit_changed(&id, None, now_ms, &mut state, row_hash, &mut out)
-                        .await?;
+                    staged_removals.push(id.clone());
+                    out.push(ChangeEvent {
+                        entity: self.entity.clone(),
+                        id,
+                        created_at: now_ms,
+                        deleted: true,
+                        authorized_tokens: last_known_tokens.unwrap_or_default(),
+                    });
                 }
-                Some(known) if known.payload_hash != row_hash => {
-                    let last = known.tokens.clone();
-                    self.emit_changed(&id, Some(last), now_ms, &mut state, row_hash, &mut out)
-                        .await?;
-                }
-                Some(_) => {} // unchanged
             }
         }
 
@@ -157,17 +156,129 @@ impl ChangeSource for SearcherTail {
             .filter(|id| !present.contains(*id))
             .cloned()
             .collect();
-        for id in gone {
-            let known = state.remove(&id).expect("key just listed");
+        for id in &gone {
+            let known = state.get(id).expect("key just listed");
             out.push(ChangeEvent {
                 entity: self.entity.clone(),
-                id,
+                id: id.clone(),
                 created_at: now_ms,
                 deleted: true,
-                authorized_tokens: known.tokens,
+                authorized_tokens: known.tokens.clone(),
             });
         }
 
+        // Everything fallible has succeeded — commit the new state.
+        for (id, known) in staged_upserts {
+            state.insert(id, known);
+        }
+        for id in staged_removals.into_iter().chain(gone) {
+            state.remove(&id);
+        }
+
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use meshql_core::{Envelope, MeshqlError, Result as CoreResult};
+    use serde_json::json;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Searcher yielding one fixed row; Repository whose `read` fails
+    /// exactly once. Pins the at-least-once contract: a mid-poll read
+    /// failure must not advance state past the event.
+    struct FixedSearcher;
+
+    #[async_trait]
+    impl Searcher for FixedSearcher {
+        async fn find(
+            &self,
+            _t: &str,
+            _a: &Stash,
+            _c: &[String],
+            _at: i64,
+        ) -> CoreResult<Option<Stash>> {
+            unimplemented!("not used by SearcherTail")
+        }
+        async fn find_all(
+            &self,
+            _t: &str,
+            _a: &Stash,
+            _c: &[String],
+            _at: i64,
+        ) -> CoreResult<Vec<Stash>> {
+            let mut row = Stash::new();
+            row.insert("id".to_string(), json!("only-row"));
+            row.insert("name".to_string(), json!("henrietta"));
+            Ok(vec![row])
+        }
+    }
+
+    struct FlakyReadRepo {
+        fail_next: AtomicBool,
+    }
+
+    #[async_trait]
+    impl Repository for FlakyReadRepo {
+        async fn create(&self, _e: Envelope, _t: &[String]) -> CoreResult<Envelope> {
+            unimplemented!()
+        }
+        async fn read(
+            &self,
+            id: &str,
+            _t: &[String],
+            _at: Option<chrono::DateTime<chrono::Utc>>,
+        ) -> CoreResult<Option<Envelope>> {
+            if self.fail_next.swap(false, Ordering::SeqCst) {
+                return Err(MeshqlError::Storage("transient read failure".into()));
+            }
+            let mut payload = Stash::new();
+            payload.insert("name".to_string(), json!("henrietta"));
+            Ok(Some(Envelope::new(id, payload, vec!["team".to_string()])))
+        }
+        async fn list(&self, _t: &[String]) -> CoreResult<Vec<Envelope>> {
+            unimplemented!()
+        }
+        async fn remove(&self, _id: &str, _t: &[String]) -> CoreResult<bool> {
+            unimplemented!()
+        }
+        async fn create_many(&self, _e: Vec<Envelope>, _t: &[String]) -> CoreResult<Vec<Envelope>> {
+            unimplemented!()
+        }
+        async fn read_many(&self, _ids: &[String], _t: &[String]) -> CoreResult<Vec<Envelope>> {
+            unimplemented!()
+        }
+        async fn remove_many(
+            &self,
+            _ids: &[String],
+            _t: &[String],
+        ) -> CoreResult<std::collections::HashMap<String, bool>> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn mid_poll_read_failure_does_not_lose_the_event() {
+        let tail = SearcherTail::new(
+            "hen",
+            Arc::new(FixedSearcher),
+            Arc::new(FlakyReadRepo {
+                fail_next: AtomicBool::new(true),
+            }),
+        );
+
+        // First poll: the point-read fails → poll errors, state must NOT
+        // have advanced past the event.
+        assert!(tail.poll().await.is_err());
+
+        // Second poll: read succeeds → the create is re-detected and
+        // emitted (at-least-once).
+        let events = tail.poll().await.expect("second poll succeeds");
+        assert_eq!(events.len(), 1, "event re-emitted after transient failure");
+        assert_eq!(events[0].id, "only-row");
+        assert!(!events[0].deleted);
+        assert_eq!(events[0].authorized_tokens, vec!["team".to_string()]);
     }
 }
