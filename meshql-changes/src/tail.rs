@@ -186,9 +186,14 @@ mod tests {
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Searcher yielding one fixed row; Repository whose `read` fails
-    /// exactly once. Pins the at-least-once contract: a mid-poll read
-    /// failure must not advance state past the event.
+    /// Searcher yielding two fixed rows (deterministic order); Repository
+    /// whose `read` fails exactly once, on `row-b`. Pins the at-least-once
+    /// contract for the MID-poll failure: `row-a`'s read succeeds (event
+    /// buffered, state staged), then `row-b`'s read fails — the buffered
+    /// row-a event is dropped with the Err, so its state must NOT have
+    /// been committed, or row-a's create is lost forever. The pre-fix
+    /// code committed state per-row and fails this test by emitting only
+    /// row-b on the second poll.
     struct FixedSearcher;
 
     #[async_trait]
@@ -209,10 +214,13 @@ mod tests {
             _c: &[String],
             _at: i64,
         ) -> CoreResult<Vec<Stash>> {
-            let mut row = Stash::new();
-            row.insert("id".to_string(), json!("only-row"));
-            row.insert("name".to_string(), json!("henrietta"));
-            Ok(vec![row])
+            let mut row_a = Stash::new();
+            row_a.insert("id".to_string(), json!("row-a"));
+            row_a.insert("name".to_string(), json!("henrietta"));
+            let mut row_b = Stash::new();
+            row_b.insert("id".to_string(), json!("row-b"));
+            row_b.insert("name".to_string(), json!("clucky"));
+            Ok(vec![row_a, row_b])
         }
     }
 
@@ -231,11 +239,13 @@ mod tests {
             _t: &[String],
             _at: Option<chrono::DateTime<chrono::Utc>>,
         ) -> CoreResult<Option<Envelope>> {
-            if self.fail_next.swap(false, Ordering::SeqCst) {
+            // Fail exactly once, and only on row-b — AFTER row-a's read
+            // has already succeeded within the same poll.
+            if id == "row-b" && self.fail_next.swap(false, Ordering::SeqCst) {
                 return Err(MeshqlError::Storage("transient read failure".into()));
             }
             let mut payload = Stash::new();
-            payload.insert("name".to_string(), json!("henrietta"));
+            payload.insert("name".to_string(), json!("recovered"));
             Ok(Some(Envelope::new(id, payload, vec!["team".to_string()])))
         }
         async fn list(&self, _t: &[String]) -> CoreResult<Vec<Envelope>> {
@@ -260,7 +270,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mid_poll_read_failure_does_not_lose_the_event() {
+    async fn mid_poll_read_failure_does_not_lose_earlier_events() {
         let tail = SearcherTail::new(
             "hen",
             Arc::new(FixedSearcher),
@@ -269,16 +279,25 @@ mod tests {
             }),
         );
 
-        // First poll: the point-read fails → poll errors, state must NOT
-        // have advanced past the event.
+        // First poll: row-a's read SUCCEEDS, then row-b's read fails →
+        // poll errors, and row-a's staged state must NOT be committed
+        // (its buffered event was dropped with the Err).
         assert!(tail.poll().await.is_err());
 
-        // Second poll: read succeeds → the create is re-detected and
-        // emitted (at-least-once).
+        // Second poll: both reads succeed → BOTH creates are emitted.
+        // Pre-fix code committed row-a's hash during the failed poll and
+        // emits only row-b here — losing row-a forever.
         let events = tail.poll().await.expect("second poll succeeds");
-        assert_eq!(events.len(), 1, "event re-emitted after transient failure");
-        assert_eq!(events[0].id, "only-row");
-        assert!(!events[0].deleted);
-        assert_eq!(events[0].authorized_tokens, vec!["team".to_string()]);
+        let mut ids: Vec<&str> = events.iter().map(|e| e.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(
+            ids,
+            vec!["row-a", "row-b"],
+            "both events re-emitted after transient failure"
+        );
+        assert!(events.iter().all(|e| !e.deleted));
+        assert!(events
+            .iter()
+            .all(|e| e.authorized_tokens == vec!["team".to_string()]));
     }
 }
