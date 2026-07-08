@@ -11,10 +11,12 @@
 //! Design: docs/superpowers/specs/2026-07-07-meshql-changes-design.md
 
 mod event;
+mod hub;
 mod source;
 mod tail;
 pub mod testing;
 
 pub use event::ChangeEvent;
+pub use hub::{run_tails, ChangeHub};
 pub use source::ChangeSource;
 pub use tail::SearcherTail;
