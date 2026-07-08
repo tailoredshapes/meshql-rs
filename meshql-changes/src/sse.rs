@@ -81,12 +81,18 @@ async fn changes_handler(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stash = auth_ctx.map(|e| e.0 .0).unwrap_or_default();
     let tokens = state.auth.get_auth_token(&stash);
-    let entities = params.entities.map(|s| {
-        s.split(',')
-            .map(|e| e.trim().to_string())
-            .filter(|e| !e.is_empty())
-            .collect::<HashSet<_>>()
-    });
+    let entities = params
+        .entities
+        .map(|s| {
+            s.split(',')
+                .map(|e| e.trim().to_string())
+                .filter(|e| !e.is_empty())
+                .collect::<HashSet<_>>()
+        })
+        // `?entities=` (empty after filtering) means "no filter", not
+        // "filter everything" — a typo shouldn't yield a silently dead
+        // stream that receives only heartbeats.
+        .filter(|set| !set.is_empty());
 
     Sse::new(change_stream(state.hub.subscribe(), tokens, entities)).keep_alive(
         KeepAlive::new()

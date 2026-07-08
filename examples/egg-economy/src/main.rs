@@ -18,8 +18,9 @@ use merkql::broker::{Broker, BrokerConfig};
 use meshql_core::{
     Auth, GraphletteConfig, NoAuth, Repository, RestletteConfig, RootConfig, Searcher, ServerConfig,
 };
+use meshql_changes::{changes_router, run_tails, ChangeHub, ChangeSource, SearcherTail};
 use meshql_mongo::{MongoRepository, MongoSearcher};
-use meshql_server::run;
+use meshql_server::run_ext;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -96,6 +97,14 @@ async fn main() -> anyhow::Result<()> {
     let mut restlettes: Vec<RestletteConfig> = Vec::new();
     let mut sources: Vec<Arc<dyn EventSource>> = Vec::new();
 
+    // SSE change-feed tails, one per entity (verbs AND nouns). NB: these
+    // poll Mongo with ["*"] creds; that works in this example only because
+    // every write carries the "*" token (NoAuth restlettes + workers
+    // hardcode vec!["*"]) — MongoSearcher has no wildcard-caller
+    // special-case. See the meshql-changes spec's backend caveat:
+    // SearcherTail on Mongo is NoAuth-only for now.
+    let mut change_sources: Vec<Arc<dyn ChangeSource>> = Vec::new();
+
     // ===== Business-event meshes (the only write surface) =====
     let event_defs: [(&str, &str, &str); 12] = [
         ("build_farm", BUILD_FARM_GRAPHQL, BUILD_FARM_JSON),
@@ -133,6 +142,11 @@ async fn main() -> anyhow::Result<()> {
     ];
     for (verb, gql, json) in event_defs {
         let (repo, searcher) = mesh(&mongo_uri, &db_name, verb, &auth).await?;
+        change_sources.push(Arc::new(SearcherTail::new(
+            verb,
+            Arc::clone(&searcher),
+            repo.clone() as Arc<dyn Repository>,
+        )));
         let cfg = RootConfig::builder()
             .singleton("getById", r#"{"id": "{{id}}"}"#)
             .vector("getAll", "{}")
@@ -165,6 +179,24 @@ async fn main() -> anyhow::Result<()> {
     let (hp_repo, hp_searcher) = mesh(&mongo_uri, &db_name, "hen_productivity", &auth).await?;
     let (ci_repo, ci_searcher) = mesh(&mongo_uri, &db_name, "container_inventory", &auth).await?;
     let (fo_repo, fo_searcher) = mesh(&mongo_uri, &db_name, "farm_output", &auth).await?;
+
+    // Noun tails, cloned before the searchers/repos move into configs/workers.
+    for (noun, searcher, repo) in [
+        ("farm", &farm_searcher, &farm_repo),
+        ("coop", &coop_searcher, &coop_repo),
+        ("hen", &hen_searcher, &hen_repo),
+        ("container", &container_searcher, &container_repo),
+        ("consumer", &consumer_searcher, &consumer_repo),
+        ("hen_productivity", &hp_searcher, &hp_repo),
+        ("container_inventory", &ci_searcher, &ci_repo),
+        ("farm_output", &fo_searcher, &fo_repo),
+    ] {
+        change_sources.push(Arc::new(SearcherTail::new(
+            noun,
+            Arc::clone(searcher),
+            repo.clone() as Arc<dyn Repository>,
+        )));
+    }
 
     graphlettes.push(GraphletteConfig {
         path: "/farm/graph".to_string(),
@@ -292,10 +324,28 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(w.run_forever(Duration::from_millis(500)));
     }
 
+    // SSE change feed + static manifest, merged as extra routes (run_ext).
+    let hub = ChangeHub::new(256);
+    tokio::spawn(run_tails(
+        hub.clone(),
+        change_sources,
+        Duration::from_millis(500),
+    ));
+    let manifest = include_str!("../config/manifest.json");
+    let extra = changes_router("/changes", hub, Arc::clone(&auth)).route(
+        "/manifest",
+        axum::routing::get(move || async move {
+            (
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                manifest,
+            )
+        }),
+    );
+
     let config = ServerConfig {
         port,
         graphlettes,
         restlettes,
     };
-    run(config).await
+    run_ext(config, extra).await
 }

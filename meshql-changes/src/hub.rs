@@ -1,8 +1,10 @@
 //! ChangeHub: fan change events out to SSE subscribers. A thin wrapper
 //! over tokio::sync::broadcast. `run_tails` is the pump: poll every
 //! source round-robin and publish — the shape of egg-economy's
-//! `run_connector`. Poll errors are logged and retried next interval,
-//! never fatal.
+//! `run_connector`. Poll *errors* are logged and retried next interval,
+//! never fatal. A *panicking* source, however, kills the whole pump task
+//! (open SSE connections would then receive only heartbeats) — keep
+//! `ChangeSource::poll` panic-free; return Err instead.
 
 use crate::{ChangeEvent, ChangeSource};
 use std::sync::Arc;
