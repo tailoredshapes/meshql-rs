@@ -12,6 +12,7 @@
 
 mod event;
 mod source;
+pub mod testing;
 
 pub use event::ChangeEvent;
 pub use source::ChangeSource;
