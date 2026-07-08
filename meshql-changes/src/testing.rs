@@ -32,10 +32,13 @@ fn unique_id() -> String {
 pub async fn test_detects_create(source: &dyn ChangeSource, repo: &dyn Repository) {
     drain(source).await; // settle any pre-existing state
 
+    // NB: Repository::create tags the envelope with its `tokens` argument
+    // (the caller's credentials become the ACL — the restlette convention),
+    // overwriting whatever Envelope::new was given.
     let env = repo
         .create(
-            Envelope::new(unique_id(), payload("henrietta"), vec!["farm-team".to_string()]),
-            &wildcard(),
+            Envelope::new(unique_id(), payload("henrietta"), vec![]),
+            &["farm-team".to_string()],
         )
         .await
         .expect("create");
@@ -95,8 +98,8 @@ pub async fn test_ignores_identical_rewrite(source: &dyn ChangeSource, repo: &dy
 pub async fn test_detects_delete(source: &dyn ChangeSource, repo: &dyn Repository) {
     let id = unique_id();
     repo.create(
-        Envelope::new(id.clone(), payload("doomed"), vec!["farm-team".to_string()]),
-        &wildcard(),
+        Envelope::new(id.clone(), payload("doomed"), vec![]),
+        &["farm-team".to_string()],
     )
     .await
     .expect("create");

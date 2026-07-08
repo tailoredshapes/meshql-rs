@@ -12,7 +12,9 @@
 
 mod event;
 mod source;
+mod tail;
 pub mod testing;
 
 pub use event::ChangeEvent;
 pub use source::ChangeSource;
+pub use tail::SearcherTail;
