@@ -10,6 +10,7 @@ members = [
     "meshql-cert",
     "meshql-merkql",
     "meshql-merksql",
+    "meshql-changes",
     "meshql-sqlite",
     "meshql-postgres",
     "meshql-mysql",
