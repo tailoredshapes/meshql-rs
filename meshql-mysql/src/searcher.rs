@@ -40,6 +40,7 @@ impl MysqlSearcher {
     async fn execute_query(
         &self,
         query_json: &str,
+        creds: &[String],
         at: i64,
         limit: Option<i64>,
     ) -> Result<Vec<Stash>> {
@@ -59,7 +60,14 @@ impl MysqlSearcher {
             format!("AND {}", where_part.clause)
         };
 
-        let limit_clause = if limit.is_some() {
+        // Visibility filtering happens in Rust after the fetch, so LIMIT can
+        // only be pushed into SQL for a "*" caller (who sees every row);
+        // otherwise an invisible row could consume the limit and shadow a
+        // visible match.
+        let wildcard = creds.iter().any(|t| t == "*");
+        let sql_limit = if wildcard { limit } else { None };
+
+        let limit_clause = if sql_limit.is_some() {
             "LIMIT ?".to_string()
         } else {
             String::new()
@@ -81,7 +89,7 @@ impl MysqlSearcher {
         for val in &where_part.values {
             q = q.bind(val.as_str());
         }
-        if let Some(lim) = limit {
+        if let Some(lim) = sql_limit {
             q = q.bind(lim);
         }
 
@@ -95,9 +103,18 @@ impl MysqlSearcher {
             let env_id: String = r
                 .try_get("id")
                 .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+            let tokens_json: String = r
+                .try_get("authorized_tokens")
+                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
             let payload_json: String = r
                 .try_get("payload")
                 .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+
+            let authorized_tokens: Vec<String> = serde_json::from_str(&tokens_json)
+                .map_err(|e| MeshqlError::Parse(e.to_string()))?;
+            if !meshql_core::tokens_visible_to(&authorized_tokens, creds) {
+                continue;
+            }
 
             let mut stash: Stash = serde_json::from_str(&payload_json)
                 .map_err(|e| MeshqlError::Parse(e.to_string()))?;
@@ -106,6 +123,10 @@ impl MysqlSearcher {
             stash.insert("id".to_string(), serde_json::Value::String(env_id));
 
             results.push(stash);
+        }
+
+        if let Some(lim) = limit {
+            results.truncate(lim.max(0) as usize);
         }
 
         Ok(results)
@@ -118,11 +139,11 @@ impl Searcher for MysqlSearcher {
         &self,
         template: &str,
         args: &Stash,
-        _creds: &[String],
+        creds: &[String],
         at: i64,
     ) -> Result<Option<Stash>> {
         let query_json = self.render_template(template, args)?;
-        let results = self.execute_query(&query_json, at, Some(1)).await?;
+        let results = self.execute_query(&query_json, creds, at, Some(1)).await?;
         Ok(results.into_iter().next())
     }
 
@@ -130,11 +151,11 @@ impl Searcher for MysqlSearcher {
         &self,
         template: &str,
         args: &Stash,
-        _creds: &[String],
+        creds: &[String],
         at: i64,
     ) -> Result<Vec<Stash>> {
         let query_json = self.render_template(template, args)?;
         let limit = args.get("limit").and_then(|v| v.as_i64());
-        self.execute_query(&query_json, at, limit).await
+        self.execute_query(&query_json, creds, at, limit).await
     }
 }

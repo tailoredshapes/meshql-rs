@@ -108,7 +108,7 @@ impl Searcher for MerkqlSearcher {
         &self,
         template: &str,
         args: &Stash,
-        _creds: &[String],
+        creds: &[String],
         at: i64,
     ) -> Result<Option<Stash>> {
         let query = self.render_template(template, args)?;
@@ -116,7 +116,10 @@ impl Searcher for MerkqlSearcher {
 
         let result = records
             .into_iter()
-            .find(|(_, record_json)| matcher::matches(record_json, &query))
+            .find(|(env, record_json)| {
+                matcher::matches(record_json, &query)
+                    && meshql_core::envelope_visible_to(env, creds)
+            })
             .map(|(env, _)| Self::envelope_to_stash(&env));
 
         Ok(result)
@@ -126,7 +129,7 @@ impl Searcher for MerkqlSearcher {
         &self,
         template: &str,
         args: &Stash,
-        _creds: &[String],
+        creds: &[String],
         at: i64,
     ) -> Result<Vec<Stash>> {
         let query = self.render_template(template, args)?;
@@ -139,7 +142,10 @@ impl Searcher for MerkqlSearcher {
 
         let mut results: Vec<Stash> = records
             .into_iter()
-            .filter(|(_, record_json)| matcher::matches(record_json, &query))
+            .filter(|(env, record_json)| {
+                matcher::matches(record_json, &query)
+                    && meshql_core::envelope_visible_to(env, creds)
+            })
             .map(|(env, _)| Self::envelope_to_stash(&env))
             .collect();
 

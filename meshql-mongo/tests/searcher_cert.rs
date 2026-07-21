@@ -16,6 +16,7 @@ async fn create_searcher() -> (MongoSearcher, impl std::any::Any) {
         .await
         .unwrap();
     cert::seed_searcher_data(&repo).await;
+    cert::seed_searcher_auth_data(&repo).await;
 
     let searcher = MongoSearcher::new(&uri, "test_db", &collection_name, Arc::new(NoAuth))
         .await
@@ -69,4 +70,40 @@ async fn should_respect_limit() {
 async fn should_handle_empty_query() {
     let (searcher, _c) = create_searcher().await;
     cert::test_searcher_empty_query(&searcher).await;
+}
+
+#[tokio::test]
+async fn auth_wildcard_caller_sees_all() {
+    let (searcher, _c) = create_searcher().await;
+    cert::test_searcher_auth_wildcard_caller_sees_all(&searcher).await;
+}
+
+#[tokio::test]
+async fn auth_restricted_caller_sees_only_intersecting() {
+    let (searcher, _c) = create_searcher().await;
+    cert::test_searcher_auth_restricted_caller_sees_only_intersecting(&searcher).await;
+}
+
+#[tokio::test]
+async fn auth_denies_non_intersecting() {
+    let (searcher, _c) = create_searcher().await;
+    cert::test_searcher_auth_denies_non_intersecting(&searcher).await;
+}
+
+#[tokio::test]
+async fn auth_empty_tokens_are_public() {
+    let (searcher, _c) = create_searcher().await;
+    cert::test_searcher_auth_empty_tokens_are_public(&searcher).await;
+}
+
+#[tokio::test]
+async fn auth_star_token_visible_to_all() {
+    let (searcher, _c) = create_searcher().await;
+    cert::test_searcher_auth_star_token_visible_to_all(&searcher).await;
+}
+
+#[tokio::test]
+async fn auth_latest_version_controls_visibility() {
+    let (searcher, _c) = create_searcher().await;
+    cert::test_searcher_auth_latest_version_controls_visibility(&searcher).await;
 }

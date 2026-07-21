@@ -47,7 +47,6 @@ impl MongoSearcher {
         limit: Option<i64>,
     ) -> Result<Vec<Document>> {
         let at_bson = bson::DateTime::from_millis(at);
-        let bson_tokens: Vec<Bson> = creds.iter().map(|s| Bson::String(s.clone())).collect();
 
         let json_val: serde_json::Value =
             serde_json::from_str(query_json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
@@ -57,7 +56,6 @@ impl MongoSearcher {
         let mut query_doc = stash_to_doc(obj);
 
         query_doc.insert("createdAt", doc! { "$lte": at_bson });
-        query_doc.insert("authorizedTokens", doc! { "$in": bson_tokens });
 
         let mut pipeline = vec![
             doc! { "$match": &query_doc },
@@ -71,6 +69,20 @@ impl MongoSearcher {
             doc! { "$replaceRoot": { "newRoot": "$doc" } },
             doc! { "$match": { "deleted": { "$ne": true } } },
         ];
+
+        // Visibility convention (meshql_core::envelope_visible_to), applied to
+        // the latest version only — filtering before $group would resurrect
+        // older visible versions of a now-restricted envelope. A "*" caller
+        // sees everything, so no stage is needed.
+        if !creds.iter().any(|t| t == "*") {
+            let bson_tokens: Vec<Bson> = creds.iter().map(|s| Bson::String(s.clone())).collect();
+            pipeline.push(doc! { "$match": { "$or": [
+                { "authorizedTokens": { "$exists": false } },
+                { "authorizedTokens": { "$size": 0 } },
+                { "authorizedTokens": "*" },
+                { "authorizedTokens": { "$in": bson_tokens } },
+            ] } });
+        }
 
         if let Some(l) = limit {
             pipeline.push(doc! { "$limit": l });

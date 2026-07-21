@@ -164,7 +164,10 @@ mod tests {
     #[test]
     fn tokens_visible_to_wildcard_caller_sees_everything() {
         assert!(tokens_visible_to(&toks(&["alice"]), &toks(&["*"])));
-        assert!(tokens_visible_to(&toks(&["alice", "bob"]), &toks(&["x", "*"])));
+        assert!(tokens_visible_to(
+            &toks(&["alice", "bob"]),
+            &toks(&["x", "*"])
+        ));
     }
 
     #[test]

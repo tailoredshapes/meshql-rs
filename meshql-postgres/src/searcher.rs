@@ -1,7 +1,7 @@
 use crate::query::build_where;
 use async_trait::async_trait;
 use handlebars::Handlebars;
-use meshql_core::{MeshqlError, Result, Searcher, Stash};
+use meshql_core::{Envelope, MeshqlError, Result, Searcher, Stash};
 use serde_json::json;
 use sqlx::{PgPool, Row};
 
@@ -37,11 +37,43 @@ impl PostgresSearcher {
             .map_err(|e| MeshqlError::Template(e.to_string()))
     }
 
+    fn row_to_envelope(row: &sqlx::postgres::PgRow) -> Result<Envelope> {
+        let id: String = row
+            .try_get("id")
+            .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+        let created_at_ms: i64 = row
+            .try_get("created_at_ms")
+            .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+        let deleted: bool = row
+            .try_get("deleted")
+            .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+        let tokens_json: String = row
+            .try_get("authorized_tokens")
+            .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+        let payload_json: String = row
+            .try_get("payload")
+            .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+
+        let created_at = chrono::DateTime::from_timestamp_millis(created_at_ms).unwrap_or_default();
+        let authorized_tokens: Vec<String> =
+            serde_json::from_str(&tokens_json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
+        let payload: Stash =
+            serde_json::from_str(&payload_json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
+
+        Ok(Envelope {
+            id,
+            payload,
+            created_at,
+            deleted,
+            authorized_tokens,
+        })
+    }
+
     async fn execute_query(
         &self,
         template: &str,
         args: &Stash,
-        _creds: &[String],
+        creds: &[String],
         at: i64,
         limit: Option<i64>,
     ) -> Result<Vec<Stash>> {
@@ -70,15 +102,22 @@ FROM latest WHERE rn = 1 AND deleted = FALSE",
             self.table
         );
 
+        // Visibility filtering happens in Rust after the fetch, so LIMIT can
+        // only be pushed into SQL for a "*" caller (who sees every row);
+        // otherwise an invisible row could consume the limit and shadow a
+        // visible match.
+        let wildcard = creds.iter().any(|t| t == "*");
+        let sql_limit = if wildcard { limit } else { None };
+
         let sql = if where_part.clause.is_empty() {
-            if let Some(lim) = limit {
+            if let Some(lim) = sql_limit {
                 format!("{} LIMIT {}", base_sql, lim)
             } else {
                 base_sql
             }
         } else {
             let with_where = format!("{} AND {}", base_sql, where_part.clause);
-            if let Some(lim) = limit {
+            if let Some(lim) = sql_limit {
                 format!("{} LIMIT {}", with_where, lim)
             } else {
                 with_where
@@ -97,17 +136,17 @@ FROM latest WHERE rn = 1 AND deleted = FALSE",
 
         let mut results = Vec::new();
         for row in rows {
-            let id: String = row
-                .try_get("id")
-                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
-            let payload_json: String = row
-                .try_get("payload")
-                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
-
-            let mut stash: Stash = serde_json::from_str(&payload_json)
-                .map_err(|e| MeshqlError::Parse(e.to_string()))?;
-            stash.insert("id".to_string(), json!(id));
+            let env = Self::row_to_envelope(&row)?;
+            if !meshql_core::envelope_visible_to(&env, creds) {
+                continue;
+            }
+            let mut stash = env.payload;
+            stash.insert("id".to_string(), json!(env.id));
             results.push(stash);
+        }
+
+        if let Some(lim) = limit {
+            results.truncate(lim.max(0) as usize);
         }
 
         Ok(results)

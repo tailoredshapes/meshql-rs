@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use handlebars::Handlebars;
-use meshql_core::{MeshqlError, Result, Searcher, Stash};
+use meshql_core::{envelope_visible_to, MeshqlError, Result, Searcher, Stash};
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -45,20 +45,21 @@ impl Searcher for KsqlSearcher {
         &self,
         template: &str,
         args: &Stash,
-        _creds: &[String],
+        creds: &[String],
         _at: i64,
     ) -> Result<Option<Stash>> {
         let query_obj = self.render_template(template, args)?;
         let where_part = build_where(&query_obj);
 
+        // authorized_tokens is a double-encoded JSON string in the row, so
+        // visibility can't be expressed in the ksqlDB WHERE clause. Fetch all
+        // matches (no LIMIT 1: a restricted row must not shadow a visible
+        // match) and post-filter.
         let query = if where_part.clause.is_empty() {
-            format!(
-                "SELECT * FROM {} WHERE deleted = false LIMIT 1;",
-                self.table_name
-            )
+            format!("SELECT * FROM {} WHERE deleted = false;", self.table_name)
         } else {
             format!(
-                "SELECT * FROM {} WHERE {} AND deleted = false LIMIT 1;",
+                "SELECT * FROM {} WHERE {} AND deleted = false;",
                 self.table_name, where_part.clause
             )
         };
@@ -66,17 +67,16 @@ impl Searcher for KsqlSearcher {
         debug!("KsqlSearcher.find() - Query: {}", query);
 
         match self.client.pull_query(&query).await {
-            Ok(rows) if !rows.is_empty() => {
-                match row_to_envelope(&rows[0]) {
-                    Ok(env) if !env.deleted => Ok(Some(envelope_to_stash(&env))),
-                    Ok(_) => Ok(None), // deleted
-                    Err(e) => {
-                        warn!("Failed to parse row: {}", e);
-                        Ok(None)
-                    }
+            Ok(rows) => Ok(rows.iter().find_map(|row| match row_to_envelope(row) {
+                Ok(env) if !env.deleted && envelope_visible_to(&env, creds) => {
+                    Some(envelope_to_stash(&env))
                 }
-            }
-            Ok(_) => Ok(None),
+                Ok(_) => None,
+                Err(e) => {
+                    warn!("Failed to parse row: {}", e);
+                    None
+                }
+            })),
             Err(e) => {
                 warn!("KsqlSearcher.find() query failed: {}", e);
                 Ok(None)
@@ -88,7 +88,7 @@ impl Searcher for KsqlSearcher {
         &self,
         template: &str,
         args: &Stash,
-        _creds: &[String],
+        creds: &[String],
         _at: i64,
     ) -> Result<Vec<Stash>> {
         let query_obj = self.render_template(template, args)?;
@@ -115,7 +115,9 @@ impl Searcher for KsqlSearcher {
                 let mut results: Vec<Stash> = rows
                     .iter()
                     .filter_map(|row| match row_to_envelope(row) {
-                        Ok(env) if !env.deleted => Some(envelope_to_stash(&env)),
+                        Ok(env) if !env.deleted && envelope_visible_to(&env, creds) => {
+                            Some(envelope_to_stash(&env))
+                        }
                         Ok(_) => None,
                         Err(e) => {
                             warn!("Failed to parse row: {}", e);
@@ -124,6 +126,8 @@ impl Searcher for KsqlSearcher {
                     })
                     .collect();
 
+                // limit applies after visibility filtering, so restricted rows
+                // don't consume slots a visible row should fill
                 if let Some(lim) = limit {
                     results.truncate(lim);
                 }

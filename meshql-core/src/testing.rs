@@ -311,6 +311,241 @@ pub async fn test_searcher_respects_limit(searcher: &dyn Searcher) {
     assert_eq!(results.len(), 1);
 }
 
+// ---- Searcher Authorization Certification Tests ----
+//
+// These certify the visibility convention of `meshql_core::envelope_visible_to`
+// on every Searcher read path (architecture invariant 4):
+//   - a caller holding "*" sees everything,
+//   - an envelope with empty `authorized_tokens` is public,
+//   - an envelope tagged "*" is visible to any caller,
+//   - otherwise visibility requires token intersection.
+// Visibility applies to the *latest* version of an envelope: an older visible
+// version must not resurface when the current version is restricted.
+
+fn creds(token: &str) -> Vec<String> {
+    vec![token.to_string()]
+}
+
+pub async fn seed_searcher_auth_data(repo: &dyn Repository) {
+    // (id, name, type, tokens) — repositories stamp the create() creds onto
+    // the envelope, so the same tokens are passed both places.
+    let items: Vec<(&str, &str, &str, Vec<String>)> = vec![
+        ("auth-public", "public-doc", "authPublic", vec![]),
+        ("auth-star", "star-doc", "authStar", star()),
+        ("auth-alice", "alice-doc", "authShared", creds("alice")),
+        ("auth-bob", "bob-doc", "authShared", creds("bob")),
+    ];
+
+    for (id, name, item_type, tokens) in items {
+        let mut payload = Stash::new();
+        payload.insert("name".to_string(), json!(name));
+        payload.insert("type".to_string(), json!(item_type));
+        let env = Envelope::new(id, payload, tokens.clone());
+        repo.create(env, &tokens).await.unwrap();
+    }
+
+    // Versioned envelope: v1 visible to alice, later v2 visible only to bob.
+    let mut payload_v1 = Stash::new();
+    payload_v1.insert("name".to_string(), json!("versioned-v1"));
+    payload_v1.insert("type".to_string(), json!("authVersioned"));
+    let v1 = Envelope {
+        id: "auth-versioned".to_string(),
+        payload: payload_v1,
+        created_at: chrono::Utc::now() - chrono::Duration::seconds(10),
+        deleted: false,
+        authorized_tokens: creds("alice"),
+    };
+    repo.create(v1, &creds("alice")).await.unwrap();
+
+    let mut payload_v2 = Stash::new();
+    payload_v2.insert("name".to_string(), json!("versioned-v2"));
+    payload_v2.insert("type".to_string(), json!("authVersioned"));
+    let v2 = Envelope {
+        id: "auth-versioned".to_string(),
+        payload: payload_v2,
+        created_at: chrono::Utc::now(),
+        deleted: false,
+        authorized_tokens: creds("bob"),
+    };
+    repo.create(v2, &creds("bob")).await.unwrap();
+}
+
+pub async fn test_searcher_auth_wildcard_caller_sees_all(searcher: &dyn Searcher) {
+    let args = Stash::new();
+    let now = chrono::Utc::now().timestamp_millis();
+
+    let results = searcher
+        .find_all(r#"{"payload.type": "authShared"}"#, &args, &star(), now)
+        .await
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        2,
+        "a '*' caller must see all token-restricted envelopes"
+    );
+
+    let result = searcher
+        .find(r#"{"payload.name": "bob-doc"}"#, &args, &star(), now)
+        .await
+        .unwrap();
+    assert!(
+        result.is_some(),
+        "a '*' caller must see a token-restricted envelope via find"
+    );
+}
+
+pub async fn test_searcher_auth_restricted_caller_sees_only_intersecting(searcher: &dyn Searcher) {
+    let args = Stash::new();
+    let now = chrono::Utc::now().timestamp_millis();
+
+    let results = searcher
+        .find_all(
+            r#"{"payload.type": "authShared"}"#,
+            &args,
+            &creds("alice"),
+            now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "caller 'alice' must see exactly her own envelope"
+    );
+    assert_eq!(results[0].get("name").unwrap(), &json!("alice-doc"));
+
+    // find must return the visible match even when an invisible envelope also
+    // matches the query — visibility filtering happens before any limit.
+    let result = searcher
+        .find(
+            r#"{"payload.type": "authShared"}"#,
+            &args,
+            &creds("alice"),
+            now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result
+            .expect("find must locate the visible match")
+            .get("name")
+            .unwrap(),
+        &json!("alice-doc")
+    );
+}
+
+pub async fn test_searcher_auth_denies_non_intersecting(searcher: &dyn Searcher) {
+    let args = Stash::new();
+    let now = chrono::Utc::now().timestamp_millis();
+
+    let result = searcher
+        .find(
+            r#"{"payload.name": "bob-doc"}"#,
+            &args,
+            &creds("alice"),
+            now,
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.is_none(),
+        "caller 'alice' must not see an envelope restricted to 'bob'"
+    );
+
+    let results = searcher
+        .find_all(
+            r#"{"payload.name": "bob-doc"}"#,
+            &args,
+            &creds("alice"),
+            now,
+        )
+        .await
+        .unwrap();
+    assert!(
+        results.is_empty(),
+        "find_all must not leak envelopes restricted to other tokens"
+    );
+
+    let result = searcher
+        .find(r#"{"payload.name": "bob-doc"}"#, &args, &[], now)
+        .await
+        .unwrap();
+    assert!(
+        result.is_none(),
+        "a caller with no credentials must not see a restricted envelope"
+    );
+}
+
+pub async fn test_searcher_auth_empty_tokens_are_public(searcher: &dyn Searcher) {
+    let args = Stash::new();
+    let now = chrono::Utc::now().timestamp_millis();
+
+    for caller in [creds("charlie"), vec![]] {
+        let result = searcher
+            .find(r#"{"payload.name": "public-doc"}"#, &args, &caller, now)
+            .await
+            .unwrap();
+        assert!(
+            result.is_some(),
+            "an envelope with no authorized_tokens is public (caller {caller:?})"
+        );
+    }
+}
+
+pub async fn test_searcher_auth_star_token_visible_to_all(searcher: &dyn Searcher) {
+    let args = Stash::new();
+    let now = chrono::Utc::now().timestamp_millis();
+
+    for caller in [creds("charlie"), vec![]] {
+        let result = searcher
+            .find(r#"{"payload.name": "star-doc"}"#, &args, &caller, now)
+            .await
+            .unwrap();
+        assert!(
+            result.is_some(),
+            "an envelope tagged '*' is visible to any caller (caller {caller:?})"
+        );
+    }
+}
+
+pub async fn test_searcher_auth_latest_version_controls_visibility(searcher: &dyn Searcher) {
+    let args = Stash::new();
+    let now = chrono::Utc::now().timestamp_millis();
+
+    // Latest version is restricted to bob: alice must see nothing — the older
+    // alice-visible version must not resurface.
+    let result = searcher
+        .find(
+            r#"{"payload.type": "authVersioned"}"#,
+            &args,
+            &creds("alice"),
+            now,
+        )
+        .await
+        .unwrap();
+    assert!(
+        result.is_none(),
+        "an older visible version must not resurface when the latest is restricted"
+    );
+
+    let result = searcher
+        .find(
+            r#"{"payload.type": "authVersioned"}"#,
+            &args,
+            &creds("bob"),
+            now,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result
+            .expect("bob must see the latest version")
+            .get("name")
+            .unwrap(),
+        &json!("versioned-v2")
+    );
+}
+
 pub async fn test_searcher_empty_query(searcher: &dyn Searcher) {
     let args = Stash::new();
     let results = searcher

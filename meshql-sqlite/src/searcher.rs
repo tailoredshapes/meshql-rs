@@ -119,15 +119,22 @@ SELECT id, created_at_ms, deleted, authorized_tokens, payload
 FROM latest WHERE rn = 1 AND deleted = 0"
             .to_string();
 
+        // Visibility filtering happens in Rust after the fetch, so LIMIT can
+        // only be pushed into SQL for a "*" caller (who sees every row);
+        // otherwise an invisible row could consume the limit and shadow a
+        // visible match.
+        let wildcard = creds.iter().any(|t| t == "*");
+        let sql_limit = if wildcard { limit } else { None };
+
         let sql = if where_part.clause.is_empty() {
-            if let Some(lim) = limit {
+            if let Some(lim) = sql_limit {
                 format!("{} LIMIT {}", base_sql, lim)
             } else {
                 base_sql
             }
         } else {
             let with_where = format!("{} AND {}", base_sql, where_part.clause);
-            if let Some(lim) = limit {
+            if let Some(lim) = sql_limit {
                 format!("{} LIMIT {}", with_where, lim)
             } else {
                 with_where
@@ -153,6 +160,10 @@ FROM latest WHERE rn = 1 AND deleted = 0"
             let mut stash = env.payload.clone();
             stash.insert("id".to_string(), json!(env.id));
             results.push(stash);
+        }
+
+        if let Some(lim) = limit {
+            results.truncate(lim.max(0) as usize);
         }
 
         Ok(results)
