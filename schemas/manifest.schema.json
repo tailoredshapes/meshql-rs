@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/tailoredshapes/meshql-rs/main/schemas/manifest-v1.schema.json",
+  "title": "meshql deployment manifest",
+  "description": "Describes a meshql deployment: its entities, their surfaces (GraphQL, REST), and any deployment-level surfaces (SSE change feed, MCP, search, ...). The author declares this document; anything can serve it. Consumers pick the surface kinds they understand and ignore the rest.",
+  "type": "object",
+  "required": ["meshql", "entities"],
+  "properties": {
+    "meshql": {
+      "description": "Manifest spec major version this document conforms to.",
+      "const": 1
+    },
+    "entities": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["surfaces"],
+        "properties": {
+          "surfaces": {
+            "type": "object",
+            "additionalProperties": { "$ref": "#/$defs/surface" }
+          }
+        }
+      }
+    },
+    "surfaces": {
+      "description": "Deployment-level surfaces not tied to one entity (change feed, MCP, search index, ...).",
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/surface" }
+    }
+  },
+  "$defs": {
+    "surface": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "description": "Open string. 'graphql', 'rest', and 'sse' are understood by the meshql TS client; unknown kinds pass through for other tooling.",
+          "type": "string"
+        },
+        "path": {
+          "description": "HTTP path of the surface, relative to the deployment base URL.",
+          "type": "string"
+        },
+        "schema": {
+          "description": "For kind 'graphql': the schema text (string). For kind 'rest': the entity's JSON Schema (object).",
+          "oneOf": [{ "type": "string" }, { "type": "object" }]
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

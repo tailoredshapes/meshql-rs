@@ -184,6 +184,13 @@ mod tests {
     }
 
     #[test]
+    fn envelope_visible_to_delegates_to_tokens_visible_to() {
+        let env = Envelope::new("x", Stash::new(), vec!["alice".to_string()]);
+        assert!(envelope_visible_to(&env, &["alice".to_string()]));
+        assert!(!envelope_visible_to(&env, &["bob".to_string()]));
+    }
+
+    #[test]
     fn stash_key_auth_always_authorizes() {
         let auth = StashKeyAuth::new("user_id");
         let envelope = Envelope::new("x".to_string(), Stash::new(), vec!["admin".to_string()]);
