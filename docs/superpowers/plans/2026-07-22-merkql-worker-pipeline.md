@@ -6,7 +6,13 @@
 >
 > **(a) Sequencing.** This plan depends on the three farm-retrofit plans landing first: `2026-07-22-farm-retrofit-rust.md`, `2026-07-22-farm-retrofit-java.md`, `2026-07-22-farm-retrofit-ts.md` (same `docs/superpowers/plans/` directory). Those plans make `lay_report` a real create-only event and `hen_productivity` a real projection restlette/graphlette, in all three languages. Do not start Task 1 until all three have merged. If they haven't landed, stop and say so — do not improvise around their absence.
 >
-> **(b) Schema reconciliation.** This plan was written *before* the retrofit plans executed, so it commits to an assumed field shape: `lay_report` is `{henId, eggs, timeOfDay}` (this part is settled — it's a direct quote from the approved retrofit spec) and `hen_productivity` is assumed to be `{henId, totalEggs, lastLaidAt}` plus one field this plan adds itself, `processedReportIds: [String]` (see Task 6 — required for idempotent folding, not optional polish). **Before running Task 1**, diff this plan's assumed `hen_productivity.schema.json` / `hen_productivity.graphql` shape against whatever the three retrofit plans actually landed. If the retrofit chose different field names or dropped `processedReportIds`, a human reconciles first — either add the field to the landed schema, or swap Task 6's dedup strategy for whatever the landed schema supports. Every place this plan makes a schema-name assumption is flagged inline with **"Schema-name assumption, flagged for reconciliation"**; grep for that phrase before trusting any GraphQL query string in this document.
+> **(b) Schema reconciliation — RESOLVED, 2026-07-22, before Task 1 started.** All three retrofit plans landed. Diffing this plan's assumptions against the real, merged schemas turned up three real gaps, none requiring any change to the (already-completed, already-reviewed, and in Rust's case already-pushed) retrofit branches:
+>
+> 1. **`processedReportIds` does not exist anywhere.** All three languages landed exactly `{henId, totalEggs, lastLaidAt}` for `hen_productivity` — confirmed by reading all three `hen_productivity.schema.json`/`.graphql` files directly. Reopening three finished, reviewed branches (one already pushed to two remotes) to bolt on a dedup-bookkeeping field is worse than fixing the one plan that hasn't started. **Fix:** Task 6 no longer accumulates onto a stored total with an id-dedup list. Instead the worker recomputes `totalEggs` from scratch every time by summing every one of a hen's `lay_report`s (fetched fresh via the already-existing `...ByHen` vector query — no new query needed on any backend). A full recompute of the same underlying data always yields the same answer, so it's idempotent by construction under at-least-once redelivery — no ledger field, no unbounded array growth, and it matches the exact landed shape on all three languages with zero reconciliation debt. `HenProductivity` in this plan is now exactly `{id, henId, totalEggs, lastLaidAt}`, nothing more.
+> 2. **`timeOfDay` is not a timestamp in two of the three languages.** Rust's `lay_report.schema.json` declares `timeOfDay: {type: string, format: date-time}` (an actual ISO instant), but Java's and TS's both declare `timeOfDay: {type: string, enum: [morning, afternoon, evening]}` (a category, not a point in time) — confirmed by reading all three schema files. This plan originally set `lastLaidAt = timeOfDay` verbatim, which would silently write the literal string `"evening"` into a `format: date-time` field on Java/TS. **Fix:** `lastLaidAt` is now sourced from the `ChangeEvent`'s own `created_at` (the envelope commit timestamp already carried on every `ThinEvent`, present identically on all three backends since it's a framework-level field, not a domain one), converted to ISO-8601, and merged via `max(current.last_laid_at, event_created_at_iso)`. A monotonic max is itself idempotent under redelivery of the same event (redelivering never lowers the value, and reapplying the same input yields the same output) — no `timeOfDay` value is ever read by the worker for this purpose. `timeOfDay` is still fetched as part of `LayReport` detail (useful for logging/future use) but no longer drives any written field.
+> 3. **Query names diverge by language — a real bug in this plan's own "one binary, no rebuild" goal.** Rust's farm chose the entity-named dialect (`getLayReport`, `getLayReportsByHen`, `getHenProductivityByHen`); Java's and TS's both chose the generic dialect (`getById`, `getByHen`) — confirmed by reading all three `.graphql` files (see `meshql-patterns` skill's own documented split between these two dialects, which the three retrofits picked independently and inconsistently, entity-by-entity). A worker hardcoding Rust's query names would silently 404/error against Java or TS. **Fix:** `WorkerConfig` (Task 4) gains a `query_dialect: QueryDialect` field (`EntityNamed | Generic`, env var `QUERY_DIALECT`, default `EntityNamed` matching Rust, the reference deployment this plan was drafted against). Every query-name string used anywhere in this plan is now derived from `cfg.query_dialect`, never hardcoded — see the updated Tasks 5, 7, 8, 10 below.
+>
+> Every place this plan makes a schema-name assumption is still flagged inline with **"Schema-name assumption, flagged for reconciliation"** for anything not covered by the three fixes above; grep for that phrase before trusting any remaining GraphQL query string in this document.
 >
 > **(c) Isolation.** Execute this plan in a dedicated git worktree, not on the main checkout — per `superpowers:using-git-worktrees`. `meshql-rs` is not itself a git repo at `/tank/repos/tailoredshapes/meshql-rs` per this session's environment info, so confirm the actual repo root (likely a parent directory or a differently-checked-out clone — see project memory's `tailoredshares` vs `tailoredshapes` path-confusion note) before creating the worktree, and re-verify branch + SHA before every commit.
 
@@ -93,7 +99,7 @@ pub async fn run_ext(config: ServerConfig, extra: axum::Router) -> anyhow::Resul
 - **REST `POST` never lets the caller choose the Envelope id** — `meshql-restlette/src/routes.rs::create_handler` always does `let id = Uuid::new_v4().to_string();`, ignoring anything in the request body. There is no REST-only way to upsert a projection keyed by a natural id (`henId`). `PUT /<entity>/api/:id` (`update_handler`) is the only route that takes an id from the caller, and it does a read-merge-write under that exact id (a new Envelope *version*, not a new envelope) — this is what makes `hen_productivity` a true per-hen upsert rather than a pile of disconnected creates. The worker therefore must discover a hen's existing `hen_productivity` id via GraphQL (which *does* expose ids — "GraphQL exposes ids because it's a query interface, not a resource interface") before it knows whether to `POST` (first time) or `PUT /:id` (every time after). This is exactly the Java `ProjectionUpdater` reference pattern at `/tank/repos/tailoredshapes/meshql/examples/egg-economy/src/main/java/com/meshql/examples/egg_economy/ProjectionUpdater.java` — read it before Task 7, this plan's `rest_client.rs` is a direct Rust port of its `getProjection`/`createProjection`/`updateProjection` methods.
 - **`merkql::Consumer::poll` advances its in-memory read position to the batch's tail as soon as it reads records — *before* the caller processes any of them** (verified in `merkql/src/consumer.rs::poll`: `*position = tail;` happens immediately after `read_range`, not after `commit_sync`). Consequence: if the worker fails partway through a polled batch, it must NOT call `commit_sync()` (that would durably record a position past records it never actually processed), and it must NOT simply call `poll()` again on the *same* `Consumer` next tick — that would return an empty batch forever, since the in-memory position already points past the unprocessed records that need retrying, and there is no unread API to roll it back. The correct retry unit is a **fresh `Consumer`, re-subscribed each tick**, which reads its starting position from the group's last *committed* offset (durable, on-disk, unaffected by the previous tick's abandoned in-memory advance). Task 8 implements this; get it right, it is the crux of the whole backpressure story the spec asks for.
 - **A fresh `Consumer` per tick also sidesteps a startup race**: `Consumer::subscribe` looks up `self.broker.topic(topic_name)` once, at subscribe time; if the topic doesn't exist yet (the connector hasn't produced to it yet), the consumer's position map for that topic stays empty forever, even after the topic is later created — *unless* the caller subscribes again. Rebuilding the `Consumer` every tick (already required for the point above) means the worker will correctly pick up the topic the very first tick after the connector creates it, with no special-case code.
-- **The worker's fold must be idempotent under at-least-once delivery, or replay corrupts `hen_productivity`.** Naively doing `total_eggs = current.total_eggs + report.eggs` on every delivery double-counts a redelivered event (a genuine risk here: a batch that fails halfway is retried in full next tick). `domain-design.md` states this as a hard requirement ("A worker fold that isn't deterministic/idempotent... breaks replay and makes at-least-once delivery unsafe"). Task 6 fixes this by tracking already-applied `lay_report` ids on the `hen_productivity` record itself (`processedReportIds`) and treating a redelivered id as a no-op — this is the field flagged for schema reconciliation in the header above.
+- **The worker's fold must be idempotent under at-least-once delivery, or replay corrupts `hen_productivity`.** Naively doing `total_eggs = current.total_eggs + report.eggs` on every delivery double-counts a redelivered event (a genuine risk here: a batch that fails halfway is retried in full next tick). `domain-design.md` states this as a hard requirement ("A worker fold that isn't deterministic/idempotent... breaks replay and makes at-least-once delivery unsafe"). Task 6 fixes this WITHOUT a dedup ledger: `total_eggs` is recomputed from scratch every time by summing a fresh fetch of every one of the hen's `lay_report`s (Task 5's `fetch_lay_reports_for_hen`), and `last_laid_at` is merged via `max(current, event_created_at)` — both operations are idempotent by construction under redelivery. See the schema-reconciliation note in the header above for why this replaced the plan's original accumulate-plus-`processedReportIds` design.
 - **`Box::leak(Box::new(tempfile::tempdir().unwrap()))` is the established pattern** for keeping a merkql broker's backing directory alive for a whole test process — see `examples/egg-economy/tests/pipeline.rs::broker()`. Use it verbatim; a plain `tempfile::tempdir()` local variable would be dropped (and its directory deleted) while the broker still holds file handles into it.
 - **No mocking crate exists in this workspace.** `meshql-changes/tests/sse_integration.rs` stands up a real `axum::serve` on `127.0.0.1:0` and drives it with a real `reqwest::Client` for its integration tests. Follow the same pattern for every test in this plan that needs an HTTP peer — do not add `wiremock`/`mockito`/`httpmock`.
 
@@ -619,6 +625,7 @@ mod tests {
         assert_eq!(cfg.target_graphql_base, "http://127.0.0.1:3033");
         assert_eq!(cfg.auth_header, None);
         assert_eq!(cfg.auth_value, "worker");
+        assert_eq!(cfg.query_dialect, QueryDialect::EntityNamed);
     }
 
     #[test]
@@ -628,6 +635,7 @@ mod tests {
             ("TARGET_REST_URL", "http://java-farm:8080"),
             ("WORKER_AUTH_HEADER", "x-worker-token"),
             ("WORKER_POLL_INTERVAL_MS", "250"),
+            ("QUERY_DIALECT", "generic"),
         ]
         .into();
         let cfg = WorkerConfig::from_lookup(|k| vars.get(k).map(|s| s.to_string()));
@@ -641,6 +649,18 @@ mod tests {
         assert_eq!(cfg.target_graphql_base, "http://java-farm:8080");
         assert_eq!(cfg.auth_header, Some("x-worker-token".to_string()));
         assert_eq!(cfg.poll_interval, Duration::from_millis(250));
+        // Java's and TS's farm retrofits both landed the generic dialect
+        // (getById/getByHen) rather than Rust's entity-named one — see the
+        // reconciliation note at the top of this plan. QUERY_DIALECT is
+        // what lets the SAME worker binary point at either.
+        assert_eq!(cfg.query_dialect, QueryDialect::Generic);
+    }
+
+    #[test]
+    fn from_lookup_defaults_query_dialect_to_entity_named_on_unrecognized_value() {
+        let vars: HashMap<&str, &str> = [("QUERY_DIALECT", "not-a-real-dialect")].into();
+        let cfg = WorkerConfig::from_lookup(|k| vars.get(k).map(|s| s.to_string()));
+        assert_eq!(cfg.query_dialect, QueryDialect::EntityNamed);
     }
 }
 ```
@@ -748,6 +768,45 @@ Add to `meshql-rs/examples/farm-worker/src/config.rs`, above the `#[cfg(test)]` 
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// The two GraphQL query-naming dialects the three farm retrofits landed on
+/// (see `meshql-patterns`' documented split, and the reconciliation note at
+/// the top of this plan for which language picked which). `EntityNamed` is
+/// what Rust's farm uses; `Generic` is what Java's and TS's both use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryDialect {
+    EntityNamed,
+    Generic,
+}
+
+impl QueryDialect {
+    /// The lay_report singleton query: `getLayReport(id, at)` (entity-named)
+    /// vs `getById(id, at)` (generic).
+    pub fn lay_report_by_id(self) -> &'static str {
+        match self {
+            QueryDialect::EntityNamed => "getLayReport",
+            QueryDialect::Generic => "getById",
+        }
+    }
+
+    /// The lay_report-vector-by-hen query: `getLayReportsByHen(id, at)` vs
+    /// `getByHen(id, at)`.
+    pub fn lay_reports_by_hen(self) -> &'static str {
+        match self {
+            QueryDialect::EntityNamed => "getLayReportsByHen",
+            QueryDialect::Generic => "getByHen",
+        }
+    }
+
+    /// The hen_productivity-by-hen query: `getHenProductivityByHen(id, at)`
+    /// vs `getByHen(id, at)`.
+    pub fn hen_productivity_by_hen(self) -> &'static str {
+        match self {
+            QueryDialect::EntityNamed => "getHenProductivityByHen",
+            QueryDialect::Generic => "getByHen",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
     pub merkql_dir: PathBuf,
@@ -759,6 +818,7 @@ pub struct WorkerConfig {
     pub target_graphql_base: String,
     pub auth_header: Option<String>,
     pub auth_value: String,
+    pub query_dialect: QueryDialect,
 }
 
 impl WorkerConfig {
@@ -776,6 +836,14 @@ impl WorkerConfig {
         let target_rest_base = lookup("TARGET_REST_URL").unwrap_or_else(|| default_base.clone());
         let target_graphql_base =
             lookup("TARGET_GRAPHQL_URL").unwrap_or_else(|| target_rest_base.clone());
+        let query_dialect = match lookup("QUERY_DIALECT").as_deref() {
+            Some("generic") => QueryDialect::Generic,
+            // Anything else (unset, "entity-named", or an unrecognized
+            // value) defaults to EntityNamed — Rust's dialect, the
+            // deployment this plan was drafted and end-to-end tested
+            // against.
+            _ => QueryDialect::EntityNamed,
+        };
         Self {
             merkql_dir: lookup("MERKQL_DIR")
                 .unwrap_or_else(|| "./farm-changes-log".to_string())
@@ -803,6 +871,7 @@ impl WorkerConfig {
             // retrofit's edge middleware actually expects.
             auth_header: lookup("WORKER_AUTH_HEADER"),
             auth_value: lookup("WORKER_AUTH_TOKEN").unwrap_or_else(|| "worker".to_string()),
+            query_dialect,
         }
     }
 }
@@ -823,7 +892,7 @@ cargo test -p farm-worker --lib config
 cargo build --workspace   # confirm adding the new member didn't break anything else
 ```
 
-Expected: both `config::tests` pass; the full workspace still builds.
+Expected: all three `config::tests` pass; the full workspace still builds.
 
 ```bash
 git add Cargo.toml examples/farm-worker
@@ -833,8 +902,10 @@ Scaffold farm-worker crate with env-driven WorkerConfig
 New workspace member: the language-agnostic worker that will consume
 lay_report events off merkql and write hen_productivity via REST/
 GraphQL. Config is env-var driven (SOURCE_GRAPHQL_URL, TARGET_REST_URL,
-TARGET_GRAPHQL_URL, MERKQL_DIR, WORKER_*) so one compiled binary can
-point at a Rust, Java, or TS farm deployment purely via config.
+TARGET_GRAPHQL_URL, MERKQL_DIR, QUERY_DIALECT, WORKER_*) so one
+compiled binary can point at a Rust, Java, or TS farm deployment
+purely via config — QUERY_DIALECT is what lets it also match whichever
+GraphQL query-naming convention that deployment's language landed on.
 EOF
 )"
 ```
@@ -936,7 +1007,21 @@ mod tests {
                 "getLayReport": {
                     "henId": "hen-1",
                     "eggs": 3,
-                    "timeOfDay": "2026-07-22T08:00:00Z"
+                    "timeOfDay": "morning"
+                }
+            }
+        }))
+    }
+
+    async fn echo_getbyid(Json(body): Json<Value>) -> Json<Value> {
+        let query = body["query"].as_str().unwrap_or_default();
+        assert!(query.contains("getById"), "unexpected query: {query}");
+        Json(json!({
+            "data": {
+                "getById": {
+                    "henId": "hen-1",
+                    "eggs": 3,
+                    "timeOfDay": "morning"
                 }
             }
         }))
@@ -954,14 +1039,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_lay_report_parses_a_successful_response() {
+    async fn fetch_lay_report_parses_a_successful_response_entity_named() {
         let base = start(Router::new().route("/lay_report/graph", post(echo_getlayreport))).await;
         let client = reqwest::Client::new();
 
-        let report = fetch_lay_report(&client, &base, "lr-1", 1000).await.unwrap();
+        let report = fetch_lay_report(&client, &base, "lr-1", 1000, QueryDialect::EntityNamed)
+            .await
+            .unwrap();
         assert_eq!(report.hen_id, "hen-1");
         assert_eq!(report.eggs, 3);
-        assert_eq!(report.time_of_day, "2026-07-22T08:00:00Z");
+        assert_eq!(report.time_of_day, "morning");
+    }
+
+    #[tokio::test]
+    async fn fetch_lay_report_parses_a_successful_response_generic() {
+        // Proves the SAME function, given QueryDialect::Generic, talks the
+        // dialect Java's and TS's farm retrofits actually landed
+        // (getById(id, at)) instead of Rust's getLayReport — see the
+        // reconciliation note at the top of this plan.
+        let base = start(Router::new().route("/lay_report/graph", post(echo_getbyid))).await;
+        let client = reqwest::Client::new();
+
+        let report = fetch_lay_report(&client, &base, "lr-1", 1000, QueryDialect::Generic)
+            .await
+            .unwrap();
+        assert_eq!(report.hen_id, "hen-1");
+        assert_eq!(report.eggs, 3);
     }
 
     #[tokio::test]
@@ -969,10 +1072,51 @@ mod tests {
         let base = start(Router::new().route("/lay_report/graph", post(echo_null))).await;
         let client = reqwest::Client::new();
 
-        let err = fetch_lay_report(&client, &base, "missing-id", 1000)
+        let err = fetch_lay_report(&client, &base, "missing-id", 1000, QueryDialect::EntityNamed)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("missing-id"));
+    }
+
+    async fn echo_getlayreportsbyhen(Json(body): Json<Value>) -> Json<Value> {
+        let query = body["query"].as_str().unwrap_or_default();
+        assert!(query.contains("getLayReportsByHen"), "unexpected query: {query}");
+        assert!(query.contains(r#""hen-1""#), "query missing expected hen id: {query}");
+        Json(json!({
+            "data": {
+                "getLayReportsByHen": [
+                    { "eggs": 3 },
+                    { "eggs": 2 }
+                ]
+            }
+        }))
+    }
+
+    async fn echo_getbyhen_empty(Json(_body): Json<Value>) -> Json<Value> {
+        Json(json!({ "data": { "getByHen": [] } }))
+    }
+
+    #[tokio::test]
+    async fn fetch_lay_reports_for_hen_sums_every_report_currently_on_record() {
+        let base =
+            start(Router::new().route("/lay_report/graph", post(echo_getlayreportsbyhen))).await;
+        let client = reqwest::Client::new();
+
+        let eggs = fetch_lay_reports_for_hen(&client, &base, "hen-1", 1000, QueryDialect::EntityNamed)
+            .await
+            .unwrap();
+        assert_eq!(eggs, vec![3, 2]);
+    }
+
+    #[tokio::test]
+    async fn fetch_lay_reports_for_hen_returns_empty_for_a_hen_with_no_reports() {
+        let base = start(Router::new().route("/lay_report/graph", post(echo_getbyhen_empty))).await;
+        let client = reqwest::Client::new();
+
+        let eggs = fetch_lay_reports_for_hen(&client, &base, "hen-1", 1000, QueryDialect::Generic)
+            .await
+            .unwrap();
+        assert_eq!(eggs, Vec::<i64>::new());
     }
 }
 ```
@@ -990,6 +1134,7 @@ Expected: compile errors — `fetch_lay_report` and `LayReport` are not defined;
 Add to `meshql-rs/examples/farm-worker/src/detail.rs`, above the `#[cfg(test)]` block:
 
 ```rust
+use crate::config::QueryDialect;
 use crate::graphql::graphql_query;
 use anyhow::{anyhow, Context};
 use serde::Deserialize;
@@ -1005,32 +1150,69 @@ pub struct LayReport {
 
 /// Fetch the full lay_report detail for `id`, as of `at` (epoch millis — the
 /// ChangeEvent's commit time), from the source farm's lay_report graphlette.
-///
-/// **Schema-name assumption, flagged for reconciliation**: assumes the
-/// farm-retrofit keeps the existing `getLayReport(id: ID, at: Float):
-/// LayReport` query name (only its field shape changes, per the companion
-/// spec — `date`/`count` become `timeOfDay`/`eggs` for Rust, `hen_id`/
-/// `time_of_day` become `henId`/`timeOfDay` for Java/TS). Verify this still
-/// matches after the retrofit plans land.
+/// The field shape (`henId`/`eggs`/`timeOfDay`) is identical across all
+/// three retrofits, but the QUERY NAME is not — `dialect` picks between
+/// Rust's `getLayReport` and Java/TS's `getById`. See the reconciliation
+/// note at the top of this plan.
 pub async fn fetch_lay_report(
     client: &reqwest::Client,
     graphql_base: &str,
     id: &str,
     at: i64,
+    dialect: QueryDialect,
 ) -> anyhow::Result<LayReport> {
     let url = format!("{}/lay_report/graph", graphql_base.trim_end_matches('/'));
-    let query = format!(r#"{{ getLayReport(id: "{id}", at: {at}) {{ henId eggs timeOfDay }} }}"#);
+    let query_name = dialect.lay_report_by_id();
+    let query =
+        format!(r#"{{ {query_name}(id: "{id}", at: {at}) {{ henId eggs timeOfDay }} }}"#);
     let data = graphql_query(client, &url, &query, None).await?;
     let report = data
-        .get("getLayReport")
+        .get(query_name)
         .filter(|v| !v.is_null())
         .ok_or_else(|| {
             anyhow!(
-                "getLayReport({id}) at {at} returned null — detail not yet visible or id unknown"
+                "{query_name}({id}) at {at} returned null — detail not yet visible or id unknown"
             )
         })?;
     serde_json::from_value(report.clone())
-        .context("getLayReport response did not match the assumed LayReport shape")
+        .context("lay_report detail response did not match the assumed LayReport shape")
+}
+
+/// Fetch every eggs count currently on record for `hen_id`, as of `at` —
+/// the input to `productivity::recompute`'s `report_eggs` parameter. Fresh
+/// on every call, never cached: this is what makes the worker's fold
+/// idempotent under redelivery (see the reconciliation note at the top of
+/// this plan and `productivity::recompute`'s doc comment) instead of
+/// relying on a stored dedup ledger. Only `eggs` is deserialized — the
+/// hen's identity and the rest of each report's fields aren't needed here.
+pub async fn fetch_lay_reports_for_hen(
+    client: &reqwest::Client,
+    graphql_base: &str,
+    hen_id: &str,
+    at: i64,
+    dialect: QueryDialect,
+) -> anyhow::Result<Vec<i64>> {
+    #[derive(Deserialize)]
+    struct EggsOnly {
+        eggs: i64,
+    }
+
+    let url = format!("{}/lay_report/graph", graphql_base.trim_end_matches('/'));
+    let query_name = dialect.lay_reports_by_hen();
+    let query = format!(r#"{{ {query_name}(id: "{hen_id}", at: {at}) {{ eggs }} }}"#);
+    let data = graphql_query(client, &url, &query, None).await?;
+    let list = data
+        .get(query_name)
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    list.into_iter()
+        .map(|v| {
+            serde_json::from_value::<EggsOnly>(v)
+                .map(|r| r.eggs)
+                .context("lay_report list response did not match the assumed {eggs} shape")
+        })
+        .collect()
 }
 ```
 
@@ -1049,19 +1231,23 @@ pub mod graphql;
 cargo test -p farm-worker --lib detail
 ```
 
-Expected: `fetch_lay_report_parses_a_successful_response` and `fetch_lay_report_errors_on_null_result` both pass.
+Expected: all five tests in `detail::tests` pass — `fetch_lay_report_parses_a_successful_response_entity_named`, `fetch_lay_report_parses_a_successful_response_generic`, `fetch_lay_report_errors_on_null_result`, `fetch_lay_reports_for_hen_sums_every_report_currently_on_record`, `fetch_lay_reports_for_hen_returns_empty_for_a_hen_with_no_reports`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add examples/farm-worker/src/event.rs examples/farm-worker/src/graphql.rs examples/farm-worker/src/detail.rs examples/farm-worker/src/lib.rs
 git commit -m "$(cat <<'EOF'
-farm-worker: decode thin events, add GraphQL detail lookup
+farm-worker: decode thin events, add GraphQL detail lookups
 
 ThinEvent mirrors meshql-changes' wire_json shape without depending on
 the crate itself. fetch_lay_report is the "thin notification -> query
-for detail" half of the worker, against the source farm's existing
-getLayReport(id, at) query.
+for detail" half of the worker (single report, by id); 
+fetch_lay_reports_for_hen fetches a hen's FULL current report set
+(eggs only), feeding productivity::recompute's idempotent-by-recompute
+design. Both are dialect-aware (QueryDialect::EntityNamed vs Generic)
+since Rust's and Java/TS's farm retrofits landed different GraphQL
+query names for the same queries.
 EOF
 )"
 ```
@@ -1081,10 +1267,13 @@ This is pure logic — no I/O, fast unit tests, no test server needed.
 Create `meshql-rs/examples/farm-worker/src/productivity.rs`:
 
 ```rust
-//! `hen_productivity` model + the pure fold that applies one lay_report onto
-//! it. Assumed shape per the companion retrofit spec: `{henId, totalEggs,
-//! lastLaidAt}`, PLUS `processedReportIds` (added by this plan, not the
-//! retrofit spec — see the idempotency note on `fold` below).
+//! `hen_productivity` model + the pure recompute that derives it from a
+//! hen's current lay_report set. Exact landed shape on all three
+//! languages: `{id, henId, totalEggs, lastLaidAt}` — confirmed by reading
+//! all three retrofits' `hen_productivity.schema.json`/`.graphql` directly.
+//! No dedup-ledger field: see the reconciliation note at the top of this
+//! plan for why a full recompute replaced the originally-planned
+//! accumulate-plus-processedReportIds design.
 
 #[cfg(test)]
 mod tests {
@@ -1092,46 +1281,59 @@ mod tests {
 
     #[test]
     fn first_report_on_a_hen_creates_fresh_state() {
-        let next = fold(None, "hen-1", "lr-1", 3, "2026-07-22T08:00:00Z");
+        let next = recompute(None, "hen-1", &[3], "2026-07-22T08:00:00Z");
         assert_eq!(next.hen_id, "hen-1");
         assert_eq!(next.total_eggs, 3);
         assert_eq!(next.last_laid_at, "2026-07-22T08:00:00Z");
-        assert_eq!(next.processed_report_ids, vec!["lr-1".to_string()]);
         assert_eq!(next.id, None);
     }
 
     #[test]
-    fn second_distinct_report_accumulates_and_preserves_known_id() {
+    fn second_distinct_report_recomputes_the_full_total_and_preserves_known_id() {
         let current = HenProductivity {
             id: Some("hp-99".to_string()),
             hen_id: "hen-1".to_string(),
             total_eggs: 3,
             last_laid_at: "2026-07-22T08:00:00Z".to_string(),
-            processed_report_ids: vec!["lr-1".to_string()],
         };
-        let next = fold(Some(&current), "hen-1", "lr-2", 2, "2026-07-23T08:00:00Z");
+        // Both reports' eggs, fetched fresh from the source — this is what
+        // makes the recompute safe under redelivery: it never depends on
+        // what was summed last time, only on what's true right now.
+        let next = recompute(Some(&current), "hen-1", &[3, 2], "2026-07-23T08:00:00Z");
         assert_eq!(next.id, Some("hp-99".to_string()), "known id must be preserved");
         assert_eq!(next.total_eggs, 5);
         assert_eq!(next.last_laid_at, "2026-07-23T08:00:00Z");
-        assert_eq!(
-            next.processed_report_ids,
-            vec!["lr-1".to_string(), "lr-2".to_string()]
-        );
     }
 
     #[test]
-    fn redelivering_an_already_processed_report_is_a_true_no_op() {
-        // Proves the idempotent-fold requirement domain-design.md demands
-        // for at-least-once delivery: reapplying lr-1 must NOT double-count.
+    fn redelivering_the_same_event_over_unchanged_data_is_a_true_no_op() {
+        // Proves the idempotency requirement domain-design.md demands for
+        // at-least-once delivery: recomputing over the SAME report set with
+        // the SAME (already-applied) event timestamp must reproduce
+        // identical state, not double-count anything — no ledger needed.
         let current = HenProductivity {
             id: Some("hp-99".to_string()),
             hen_id: "hen-1".to_string(),
             total_eggs: 3,
             last_laid_at: "2026-07-22T08:00:00Z".to_string(),
-            processed_report_ids: vec!["lr-1".to_string()],
         };
-        let next = fold(Some(&current), "hen-1", "lr-1", 3, "2026-07-22T08:00:00Z");
-        assert_eq!(next, current, "redelivery of an already-processed id must be a pure no-op");
+        let next = recompute(Some(&current), "hen-1", &[3], "2026-07-22T08:00:00Z");
+        assert_eq!(next, current, "redelivery over unchanged source data must be a pure no-op");
+    }
+
+    #[test]
+    fn last_laid_at_never_regresses_when_an_older_event_is_redelivered() {
+        let current = HenProductivity {
+            id: Some("hp-99".to_string()),
+            hen_id: "hen-1".to_string(),
+            total_eggs: 5,
+            last_laid_at: "2026-07-23T08:00:00Z".to_string(),
+        };
+        // An older event (e.g. the FIRST report, redelivered after the
+        // second has already landed) must not move last_laid_at backwards.
+        let next = recompute(Some(&current), "hen-1", &[3, 2], "2026-07-22T08:00:00Z");
+        assert_eq!(next.last_laid_at, "2026-07-23T08:00:00Z");
+        assert_eq!(next.total_eggs, 5);
     }
 }
 ```
@@ -1161,47 +1363,42 @@ pub struct HenProductivity {
     pub total_eggs: i64,
     #[serde(rename = "lastLaidAt")]
     pub last_laid_at: String,
-    /// Dedup bookkeeping — NOT part of the companion spec's assumed
-    /// `{henId, totalEggs, lastLaidAt}` shape. Required because the fold
-    /// below adds an eggs delta on top of the current total, which is only
-    /// safe under at-least-once redelivery (a batch that fails partway
-    /// through, per Task 8's commit discipline, is retried in full) if
-    /// already-applied lay_report ids are remembered and skipped.
-    /// domain-design.md: "A worker fold that isn't deterministic/idempotent
-    /// ... breaks ... at-least-once delivery."
-    /// **Reconcile against the actual retrofit schema before running this
-    /// plan** — either `hen_productivity.schema.json`/`.graphql` gain this
-    /// field, or swap this dedup strategy for whatever the landed schema
-    /// supports.
-    #[serde(rename = "processedReportIds", default)]
-    pub processed_report_ids: Vec<String>,
 }
 
-/// Pure fold: apply one lay_report onto the current hen_productivity state
-/// (or fresh zero state for a hen's first report). Idempotent — reapplying
-/// an already-processed `report_id` is a no-op, which is what makes
-/// at-least-once merkql delivery safe.
-pub fn fold(
+/// Pure recompute: derive the next hen_productivity state from `current`
+/// (for its known id and last_laid_at baseline — `None` means this hen has
+/// no productivity record yet) and `report_eggs`, the hen's FULL, freshly
+/// fetched set of lay_report egg counts (never an incremental delta).
+///
+/// Idempotent by construction, which is what makes this safe under
+/// at-least-once merkql delivery (domain-design.md: "A worker fold that
+/// isn't deterministic/idempotent ... breaks ... at-least-once delivery"):
+/// `total_eggs` is a sum over the CURRENT report set, so redelivering any
+/// event recomputes the same total as long as the underlying lay_report
+/// data hasn't changed — no dedup ledger needed. `last_laid_at` is
+/// `max(current.last_laid_at, event_created_at_iso)`, a monotonic merge
+/// that's idempotent for the same reason (never regresses, reapplying the
+/// same input changes nothing). Both `event_created_at_iso` and any stored
+/// `last_laid_at` must be fixed-offset ISO-8601 (`...Z`) for the string
+/// comparison to agree with chronological order — the worker only ever
+/// produces this format (see Task 8), so this holds by construction.
+pub fn recompute(
     current: Option<&HenProductivity>,
     hen_id: &str,
-    report_id: &str,
-    eggs: i64,
-    time_of_day: &str,
+    report_eggs: &[i64],
+    event_created_at_iso: &str,
 ) -> HenProductivity {
-    let mut next = current.cloned().unwrap_or_else(|| HenProductivity {
-        id: None,
+    let total_eggs: i64 = report_eggs.iter().sum();
+    let last_laid_at = match current {
+        Some(c) if c.last_laid_at.as_str() >= event_created_at_iso => c.last_laid_at.clone(),
+        _ => event_created_at_iso.to_string(),
+    };
+    HenProductivity {
+        id: current.and_then(|c| c.id.clone()),
         hen_id: hen_id.to_string(),
-        total_eggs: 0,
-        last_laid_at: String::new(),
-        processed_report_ids: Vec::new(),
-    });
-    if next.processed_report_ids.iter().any(|r| r == report_id) {
-        return next; // already folded — exactly-once effect under at-least-once delivery
+        total_eggs,
+        last_laid_at,
     }
-    next.total_eggs += eggs;
-    next.last_laid_at = time_of_day.to_string();
-    next.processed_report_ids.push(report_id.to_string());
-    next
 }
 ```
 
@@ -1228,13 +1425,12 @@ Expected: all three tests pass.
 ```bash
 git add examples/farm-worker/src/productivity.rs examples/farm-worker/src/lib.rs
 git commit -m "$(cat <<'EOF'
-farm-worker: add HenProductivity model + idempotent fold
+farm-worker: add HenProductivity model + idempotent recompute
 
-Pure, I/O-free fold with a processedReportIds dedup list so redelivery
-under at-least-once semantics can't double-count eggs. This field is
-an addition on top of the companion spec's assumed {henId, totalEggs,
-lastLaidAt} shape — flagged for reconciliation against whatever the
-farm-retrofit plans actually landed.
+Pure, I/O-free recompute over a hen's full current lay_report set —
+idempotent by construction under at-least-once redelivery, no dedup
+ledger needed. Matches the exact {henId, totalEggs, lastLaidAt} shape
+all three farm retrofits landed, with zero schema reconciliation debt.
 EOF
 )"
 ```
@@ -1288,6 +1484,20 @@ mod tests {
         Json(json!({ "data": { "getHenProductivityByHen": list } }))
     }
 
+    async fn graph_handler_generic(
+        State(store): State<FakeStore>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        let query = body["query"].as_str().unwrap_or_default();
+        assert!(query.contains("getByHen"), "unexpected query: {query}");
+        let current = store.0.lock().unwrap().clone();
+        let list = match current {
+            Some(hp) => vec![serde_json::to_value(&hp).unwrap()],
+            None => vec![],
+        };
+        Json(json!({ "data": { "getByHen": list } }))
+    }
+
     async fn post_handler(State(store): State<FakeStore>, Json(body): Json<Value>) -> Json<Value> {
         let mut hp: HenProductivity = serde_json::from_value(body).unwrap();
         hp.id = Some("hp-generated".to_string());
@@ -1319,13 +1529,33 @@ mod tests {
         (format!("http://{addr}"), store)
     }
 
+    async fn start_generic() -> (String, FakeStore) {
+        let store = FakeStore::default();
+        let router = Router::new()
+            .route("/hen_productivity/graph", post(graph_handler_generic))
+            .route("/hen_productivity/api", post(post_handler))
+            .route("/hen_productivity/api/:id", put(put_handler))
+            .with_state(store.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (format!("http://{addr}"), store)
+    }
+
     fn cfg(base: &str) -> WorkerConfig {
-        WorkerConfig::from_lookup(move |k| match k {
+        cfg_dialect(base, QueryDialect::EntityNamed)
+    }
+
+    fn cfg_dialect(base: &str, dialect: QueryDialect) -> WorkerConfig {
+        let base = base.to_string();
+        let mut c = WorkerConfig::from_lookup(move |k| match k {
             "SOURCE_GRAPHQL_URL" | "TARGET_REST_URL" | "TARGET_GRAPHQL_URL" => {
                 Some(base.to_string())
             }
             _ => None,
-        })
+        });
+        c.query_dialect = dialect;
+        c
     }
 
     #[tokio::test]
@@ -1333,6 +1563,18 @@ mod tests {
         let (base, _store) = start().await;
         let client = reqwest::Client::new();
         let result = get_current(&client, &cfg(&base), "hen-1").await.unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn get_current_uses_the_generic_dialect_query_name_when_configured() {
+        // Java's and TS's farm retrofits expose getByHen, not
+        // getHenProductivityByHen — see the reconciliation note at the top
+        // of this plan.
+        let (base, _store) = start_generic().await;
+        let client = reqwest::Client::new();
+        let c = cfg_dialect(&base, QueryDialect::Generic);
+        let result = get_current(&client, &c, "hen-1").await.unwrap();
         assert_eq!(result, None);
     }
 
@@ -1347,7 +1589,6 @@ mod tests {
             hen_id: "hen-1".to_string(),
             total_eggs: 3,
             last_laid_at: "2026-07-22T08:00:00Z".to_string(),
-            processed_report_ids: vec!["lr-1".to_string()],
         };
         write(&client, &c, &first).await.unwrap();
         let stored = store.0.lock().unwrap().clone().unwrap();
@@ -1358,7 +1599,6 @@ mod tests {
         let discovered = get_current(&client, &c, "hen-1").await.unwrap().unwrap();
         let second = HenProductivity {
             total_eggs: 5,
-            processed_report_ids: vec!["lr-1".to_string(), "lr-2".to_string()],
             ..discovered
         };
         write(&client, &c, &second).await.unwrap();
@@ -1396,17 +1636,13 @@ fn auth_header(cfg: &WorkerConfig) -> Option<(&str, &str)> {
 /// GET the current hen_productivity for `hen_id` via GraphQL, discovering
 /// its MeshQL id in the same call (GraphQL exposes ids; REST deliberately
 /// doesn't — see meshql-patterns' REST ID model). `None` means this is the
-/// hen's first lay_report.
-///
-/// **Schema-name assumption, flagged for reconciliation**: assumes the
-/// retrofit's `hen_productivity.graphql` follows farm's existing
-/// entity-named convention (`getLayReportsByHen(id, at)`,
-/// `getCoopsByFarm(id, at)`) as `getHenProductivityByHen(id: ID, at: Float):
-/// [HenProductivity]`, `id` being the hen's id. Its `RootConfig` query
-/// template MUST filter on `"payload.henId"`, not `"henId"` — see the
-/// "Facts to respect" section at the top of this plan; both the Mongo and
-/// SQLite backends silently ignore a bare `"henId"` key. Verify both the
-/// query name and its template against the actual landed schema.
+/// hen's first lay_report. Query name is dialect-aware — Rust's farm
+/// exposes `getHenProductivityByHen`, Java's and TS's both expose
+/// `getByHen` — see the reconciliation note at the top of this plan. Its
+/// `RootConfig` query template filters on `"payload.henId"` on every
+/// landed backend (Mongo, SQLite both require the `payload.` prefix — see
+/// "Facts to respect" at the top of this plan), which is an implementation
+/// detail of the target deployment's config, invisible from here.
 pub async fn get_current(
     client: &reqwest::Client,
     cfg: &WorkerConfig,
@@ -1417,19 +1653,20 @@ pub async fn get_current(
         cfg.target_graphql_base.trim_end_matches('/')
     );
     let now_ms = chrono::Utc::now().timestamp_millis();
+    let query_name = cfg.query_dialect.hen_productivity_by_hen();
     let query = format!(
-        r#"{{ getHenProductivityByHen(id: "{hen_id}", at: {now_ms}) {{ id henId totalEggs lastLaidAt processedReportIds }} }}"#
+        r#"{{ {query_name}(id: "{hen_id}", at: {now_ms}) {{ id henId totalEggs lastLaidAt }} }}"#
     );
     let data = graphql_query(client, &url, &query, auth_header(cfg)).await?;
     let list = data
-        .get("getHenProductivityByHen")
+        .get(query_name)
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
     match list.into_iter().next() {
         None => Ok(None),
         Some(v) => Ok(Some(serde_json::from_value(v).context(
-            "getHenProductivityByHen result did not match the assumed HenProductivity shape",
+            "hen_productivity-by-hen result did not match the assumed HenProductivity shape",
         )?)),
     }
 }
@@ -1494,7 +1731,7 @@ pub mod rest_client;
 cargo test -p farm-worker --lib rest_client
 ```
 
-Expected: both tests pass.
+Expected: all three tests pass (`get_current_returns_none_when_the_hen_has_no_record_yet`, `get_current_uses_the_generic_dialect_query_name_when_configured`, `write_posts_when_the_hen_has_no_known_id_then_a_later_write_puts`).
 
 - [ ] **Step 5: Commit**
 
@@ -1503,11 +1740,11 @@ git add examples/farm-worker/src/rest_client.rs examples/farm-worker/src/lib.rs
 git commit -m "$(cat <<'EOF'
 farm-worker: add REST/GraphQL upsert client for hen_productivity
 
-get_current (GraphQL read + id discovery) + write (REST POST for a
-fresh record, PUT /:id thereafter) — a direct Rust port of the Java
-ProjectionUpdater reference pattern. Enforces the single-writer
-invariant: hen_productivity is only ever touched over the network,
-exactly like any other REST caller.
+get_current (dialect-aware GraphQL read + id discovery) + write (REST
+POST for a fresh record, PUT /:id thereafter) — a direct Rust port of
+the Java ProjectionUpdater reference pattern. Enforces the
+single-writer invariant: hen_productivity is only ever touched over
+the network, exactly like any other REST caller.
 EOF
 )"
 ```
@@ -1563,13 +1800,32 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct FakeFarm {
+        // henId -> report id -> report body (mirrors the source farm's
+        // real shape closely enough for this test double: one hen can have
+        // several lay_reports).
         lay_reports: Arc<Mutex<std::collections::HashMap<String, Value>>>,
         productivity: Arc<Mutex<Option<HenProductivity>>>,
     }
 
     async fn lay_report_graph(State(farm): State<FakeFarm>, Json(body): Json<Value>) -> Json<Value> {
         let query = body["query"].as_str().unwrap_or_default();
-        // Extract the quoted id naively — good enough for a test double.
+        if query.contains("getLayReportsByHen") {
+            // Extract the quoted hen id naively — good enough for a test
+            // double. Every currently-registered report for this hen is
+            // returned, matching fetch_lay_reports_for_hen's contract of
+            // "the hen's FULL current set, fetched fresh."
+            let hen_id = query.split('"').nth(1).unwrap_or_default();
+            let reports: Vec<Value> = farm
+                .lay_reports
+                .lock()
+                .unwrap()
+                .values()
+                .filter(|r| r["henId"] == hen_id)
+                .map(|r| json!({ "eggs": r["eggs"] }))
+                .collect();
+            return Json(json!({ "data": { "getLayReportsByHen": reports } }));
+        }
+        // Otherwise: a single-report lookup by report id.
         let id = query.split('"').nth(1).unwrap_or_default();
         let report = farm.lay_reports.lock().unwrap().get(id).cloned();
         Json(json!({ "data": { "getLayReport": report } }))
@@ -1652,7 +1908,12 @@ mod tests {
 
         let hp = farm.productivity.lock().unwrap().clone().unwrap();
         assert_eq!(hp.total_eggs, 3);
-        assert_eq!(hp.last_laid_at, "2026-07-22T08:00:00Z");
+        // last_laid_at is sourced from the ChangeEvent's own created_at
+        // (1000ms epoch, from publish_thin_event above), NOT from
+        // timeOfDay — see the reconciliation note at the top of this plan
+        // for why: timeOfDay is a morning/afternoon/evening enum on two of
+        // the three landed farm retrofits, not a timestamp.
+        assert_eq!(hp.last_laid_at, "1970-01-01T00:00:01.000Z");
 
         // A fresh consumer for the SAME group must see nothing new — the
         // offset was committed.
@@ -1725,13 +1986,25 @@ Add to `worker.rs`, above the `#[cfg(test)]` block:
 
 ```rust
 use crate::config::WorkerConfig;
-use crate::detail::fetch_lay_report;
+use crate::detail::{fetch_lay_report, fetch_lay_reports_for_hen};
 use crate::event::ThinEvent;
-use crate::productivity::fold;
+use crate::productivity::recompute;
 use crate::rest_client::{get_current, write};
+use chrono::{DateTime, SecondsFormat, Utc};
 use merkql::broker::{Broker, BrokerRef};
 use merkql::consumer::{Consumer, ConsumerConfig, OffsetReset};
 use std::time::Duration;
+
+/// Render an epoch-millis timestamp (a ChangeEvent's `created_at`) as a
+/// fixed-width, `Z`-suffixed ISO-8601 instant. Every `last_laid_at` this
+/// worker ever writes goes through this one function, which is what makes
+/// `productivity::recompute`'s `max(current.last_laid_at, ...)` string
+/// comparison agree with chronological order.
+fn to_iso8601(created_at_ms: i64) -> String {
+    DateTime::<Utc>::from_timestamp_millis(created_at_ms)
+        .expect("ChangeEvent::created_at is always a valid epoch-millis timestamp")
+        .to_rfc3339_opts(SecondsFormat::Millis, true)
+}
 
 /// Process everything currently available on the topic in one poll, and
 /// commit the consumer offset only if EVERY record folded and wrote
@@ -1782,16 +2055,42 @@ pub async fn process_batch(
             continue;
         }
 
-        let report =
-            fetch_lay_report(client, &cfg.source_graphql_base, &thin.id, thin.created_at).await?;
-        let current = get_current(client, cfg, &report.hen_id).await?;
-        let next = fold(
-            current.as_ref(),
-            &report.hen_id,
+        // Deliberately NOT thin.created_at: `at` is a hard `createdAt <=
+        // at` cutoff on every backend (no fallback — a query for an id
+        // whose stored createdAt is AFTER `at` returns null/empty, full
+        // stop). thin.created_at is the redelivered event's OWN commit
+        // time, which is exactly the record we're about to fetch — using
+        // it as the cutoff would exclude that very record (and would
+        // exclude any sibling lay_report for the same hen committed later
+        // but still present in the same poll batch). now_ms is "as of
+        // right now," which is what "the hen's full CURRENT report set"
+        // (see fetch_lay_reports_for_hen's doc comment) actually means.
+        // thin.created_at is still used below, but only to feed
+        // last_laid_at's merge, where it's correct: that's specifically
+        // this event's own timestamp, not a query cutoff.
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let report = fetch_lay_report(
+            client,
+            &cfg.source_graphql_base,
             &thin.id,
-            report.eggs,
-            &report.time_of_day,
-        );
+            now_ms,
+            cfg.query_dialect,
+        )
+        .await?;
+        // Full recompute, not an incremental add — fetched fresh every
+        // time so the fold is idempotent under redelivery with no dedup
+        // ledger. See productivity::recompute's doc comment.
+        let report_eggs = fetch_lay_reports_for_hen(
+            client,
+            &cfg.source_graphql_base,
+            &report.hen_id,
+            now_ms,
+            cfg.query_dialect,
+        )
+        .await?;
+        let current = get_current(client, cfg, &report.hen_id).await?;
+        let event_created_at_iso = to_iso8601(thin.created_at);
+        let next = recompute(current.as_ref(), &report.hen_id, &report_eggs, &event_created_at_iso);
         if Some(&next) != current.as_ref() {
             write(client, cfg, &next).await?;
         }
@@ -1867,11 +2166,13 @@ git commit -m "$(cat <<'EOF'
 farm-worker: add the consumer loop (process_batch + run_forever)
 
 Whole-batch commit discipline: commit_sync() only fires after every
-record in a poll's batch folds and writes successfully, and a failed
-batch is retried by a FRESH Consumer next tick — never by re-polling
-the one that failed, since merkql::Consumer::poll advances its
-in-memory position before the caller processes anything. This is the
-backpressure behavior the pipeline spec asks for.
+record in a poll's batch recomputes and writes successfully, and a
+failed batch is retried by a FRESH Consumer next tick — never by
+re-polling the one that failed, since merkql::Consumer::poll advances
+its in-memory position before the caller processes anything. This is
+the backpressure behavior the pipeline spec asks for. Whole-batch
+redelivery is safe here because productivity::recompute is idempotent
+by construction, not because of any per-record dedup bookkeeping.
 EOF
 )"
 ```
@@ -1986,7 +2287,7 @@ use merkql::broker::{Broker, BrokerConfig, BrokerRef};
 use merkql::consumer::{ConsumerConfig, OffsetReset};
 use meshql_changes::{publish_to_merkql, run_tails, ChangeEvent, ChangeHub, ChangeSource, SearcherTail};
 use meshql_core::{
-    GraphletteConfig, NoAuth, Repository, RestletteConfig, RootConfig, Searcher, ServerConfig,
+    GraphletteConfig, Repository, RestletteConfig, RootConfig, Searcher, ServerConfig,
 };
 use meshql_sqlite::{SqliteRepository, SqliteSearcher};
 use serde_json::{json, Value};
@@ -1998,6 +2299,7 @@ use std::time::Duration;
 const LAY_REPORT_GRAPHQL: &str = r#"
 type Query {
   getLayReport(id: ID, at: Float): LayReport
+  getLayReportsByHen(id: ID, at: Float): [LayReport]
 }
 type LayReport {
   id: ID
@@ -2016,7 +2318,6 @@ type HenProductivity {
   henId: String
   totalEggs: Int
   lastLaidAt: String
-  processedReportIds: [String]
 }
 "#;
 
@@ -2047,6 +2348,10 @@ async fn start_farm() -> (String, Arc<SqliteRepository>, Arc<SqliteRepository>, 
 
     let lay_config = RootConfig::builder()
         .singleton("getLayReport", r#"{"id": "{{id}}"}"#)
+        // "payload." prefix required — see the "Facts to respect" note at
+        // the top of this plan. Feeds fetch_lay_reports_for_hen's full,
+        // freshly-fetched egg-count list.
+        .vector("getLayReportsByHen", r#"{"payload.henId": "{{id}}"}"#)
         .build();
     let hp_config = RootConfig::builder()
         // "payload." prefix required — both Mongo and sqlite nest payload
@@ -2123,7 +2428,7 @@ async fn read_hen_productivity(base: &str, hen_id: &str) -> Option<Value> {
         .post(format!("{base}/hen_productivity/graph"))
         .json(&json!({
             "query": format!(
-                r#"{{ getHenProductivityByHen(id: "{hen_id}", at: 99999999999999) {{ id henId totalEggs lastLaidAt processedReportIds }} }}"#
+                r#"{{ getHenProductivityByHen(id: "{hen_id}", at: 99999999999999) {{ id henId totalEggs lastLaidAt }} }}"#
             )
         }))
         .send()
@@ -2133,6 +2438,28 @@ async fn read_hen_productivity(base: &str, hen_id: &str) -> Option<Value> {
     body["data"]["getHenProductivityByHen"]
         .as_array()
         .and_then(|a| a.first().cloned())
+}
+
+/// GraphQL exposes ids (REST deliberately doesn't — see meshql-patterns'
+/// REST ID model), so this is how the test discovers a lay_report's
+/// server-generated id for the redelivery simulation below.
+async fn first_lay_report_id(base: &str, hen_id: &str) -> String {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{base}/lay_report/graph"))
+        .json(&json!({
+            "query": format!(
+                r#"{{ getLayReportsByHen(id: "{hen_id}", at: 99999999999999) {{ id }} }}"#
+            )
+        }))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    body["data"]["getLayReportsByHen"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 /// Drives one full tick of Component 1: poll the lay_report tail once, mirror
@@ -2167,49 +2494,71 @@ async fn full_pipeline_accumulates_across_reports_and_is_idempotent_under_redeli
     let tail = SearcherTail::new("lay_report", lay_searcher, lay_repo.clone() as Arc<dyn Repository>);
     let cfg = worker_cfg(&base);
 
+    // timeOfDay is written but deliberately never asserted on below — two
+    // of the three landed farm retrofits treat it as a morning/afternoon/
+    // evening enum, not a timestamp (see the reconciliation note at the
+    // top of this plan), so lastLaidAt is sourced from the ChangeEvent's
+    // own created_at instead, not from this field.
+
     // --- First report ---
-    post_lay_report(&base, "hen-1", 3, "2026-07-22T08:00:00Z").await;
+    post_lay_report(&base, "hen-1", 3, "morning").await;
     tick_connector(&tail, &broker).await;
     let n = tick_worker(&broker, &cfg).await;
     assert_eq!(n, 1);
 
     let hp = read_hen_productivity(&base, "hen-1").await.expect("hen_productivity created");
     assert_eq!(hp["totalEggs"], json!(3));
-    assert_eq!(hp["lastLaidAt"], json!("2026-07-22T08:00:00Z"));
+    let first_laid_at = hp["lastLaidAt"].as_str().unwrap().to_string();
+    assert!(!first_laid_at.is_empty());
     let hp_id = hp["id"].as_str().unwrap().to_string();
 
     // --- Second report, same hen: must accumulate, must keep the same id ---
-    post_lay_report(&base, "hen-1", 2, "2026-07-23T08:00:00Z").await;
+    post_lay_report(&base, "hen-1", 2, "evening").await;
     tick_connector(&tail, &broker).await;
     let n = tick_worker(&broker, &cfg).await;
     assert_eq!(n, 1);
 
     let hp = read_hen_productivity(&base, "hen-1").await.unwrap();
     assert_eq!(hp["totalEggs"], json!(5));
-    assert_eq!(hp["lastLaidAt"], json!("2026-07-23T08:00:00Z"));
+    let second_laid_at = hp["lastLaidAt"].as_str().unwrap().to_string();
+    assert!(
+        second_laid_at >= first_laid_at,
+        "lastLaidAt must advance forward as later reports land"
+    );
     assert_eq!(hp["id"], json!(hp_id), "PUT must version the SAME record, not create a new one");
 
-    // --- Idempotency: redeliver the FIRST report's event a second time ---
+    // --- Idempotency: redeliver the FIRST report's event a second time,
+    // with a deliberately OLD created_at ---
     // (simulates a batch that committed the merkql write but was retried
-    // for an unrelated reason — the fold must ignore it, not double-count).
-    let processed_ids = hp["processedReportIds"].as_array().unwrap();
-    let first_report_id = processed_ids[0].as_str().unwrap();
+    // for an unrelated reason). Unlike the original accumulate-plus-ledger
+    // design, this worker has no per-report dedup state at all — it's
+    // idempotent because it recomputes totalEggs fresh from the hen's
+    // CURRENT lay_report set every time, and merges lastLaidAt via a
+    // monotonic max. This redelivery proves both properties at once: the
+    // total must not double-count, AND the old timestamp must not regress
+    // lastLaidAt backward past what the second report already advanced it
+    // to.
+    let first_report_id = first_lay_report_id(&base, "hen-1").await;
     publish_to_merkql(
         &broker,
         &ChangeEvent {
             entity: "lay_report".to_string(),
-            id: first_report_id.to_string(),
-            created_at: 1, // exact value irrelevant — id-based dedup, not time-based
+            id: first_report_id,
+            created_at: 1, // deliberately older than either real report's created_at
             deleted: false,
             authorized_tokens: vec![],
         },
     )
     .unwrap();
     let n = tick_worker(&broker, &cfg).await;
-    assert_eq!(n, 1, "the redelivered event is still counted as 'processed' (a no-op fold)");
+    assert_eq!(n, 1, "the redelivered event is still processed (a no-op recompute)");
 
     let hp = read_hen_productivity(&base, "hen-1").await.unwrap();
     assert_eq!(hp["totalEggs"], json!(5), "redelivery must NOT double-count eggs");
+    assert_eq!(
+        hp["lastLaidAt"], json!(second_laid_at),
+        "redelivering an OLDER event must NOT regress lastLaidAt"
+    );
 }
 ```
 
@@ -2242,8 +2591,8 @@ POST lay_report -> SearcherTail -> run_merkql_sink -> merkql topic ->
 worker::process_batch -> hen_productivity, all in-process against
 sqlite (no Mongo/Kafka needed, matching examples/egg-economy's own
 pipeline test precedent). Proves accumulation across two reports for
-the same hen AND idempotency under redelivery of an already-processed
-report id.
+the same hen AND idempotency under redelivery of an already-applied
+event — via recompute-from-source, not a dedup ledger.
 EOF
 )"
 ```
