@@ -1,8 +1,10 @@
 //! Proves the per-entity Casbin auth wiring end-to-end over real HTTP:
-//!   - farm/coop/hen: full CRUD for the default ("fe") caller
-//!   - lay_report: create allowed, update/delete denied (403) for "fe"
-//!   - hen_productivity: every verb denied (403) for "fe" — no policy
-//!     row grants it anything
+//!
+//! - farm/coop/hen: full CRUD for the default ("fe") caller
+//! - lay_report: create allowed, update/delete denied (403) for "fe"
+//! - hen_productivity: every verb denied (403) for "fe" — no policy
+//!   row grants it anything
+//!
 //! Plus a direct unit-level proof that the "worker" role (which a real
 //! deployment would grant via trusted-header identity injection — see
 //! plan decision #6, out of scope to build here) can create/update

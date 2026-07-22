@@ -26,7 +26,7 @@ const HEN_PRODUCTIVITY_POLICY: &str = include_str!("../config/casbin/hen_product
 /// Build the farm ServerConfig (graphlettes only — reads stay open to
 /// everyone, per the spec) plus a hand-assembled restlette Router with
 /// per-entity Casbin auth, ready to pass as `run_ext`'s `extra` argument
-/// (after mounting `/manifest` on it — see `main.rs`).
+/// (not yet mounting `/manifest` — that lands in Task 6, see `main.rs`).
 ///
 /// Shared by `main.rs` and integration tests, so tests exercise the real
 /// wiring rather than a re-implementation of it.
@@ -45,6 +45,16 @@ pub async fn build(mongo_uri: &str, db_name: &str) -> anyhow::Result<(ServerConf
         Arc::new(CasbinAuth::from_strings(CASBIN_MODEL, ACTOR_POLICY, NoAuth).await?);
     let lay_report_auth: Arc<dyn Auth> =
         Arc::new(CasbinAuth::from_strings(CASBIN_MODEL, LAY_REPORT_POLICY, NoAuth).await?);
+    // NOTE: as wired today, no real HTTP request can ever satisfy the
+    // "worker" role this policy grants create/update to. Every caller
+    // resolves to identity "*" via NoAuth, and hen_productivity_policy.csv
+    // deliberately has no `g, *, worker` row (that's what makes this
+    // restlette deny the default caller entirely) — so hen_productivity's
+    // REST writes are locked for everyone until a real deployment adds
+    // identity-injection middleware (trusted-header, StashKeyAuth + a `g`
+    // binding, etc. — see the retrofit plan's decision #6). The worker
+    // role's grant path is proven at the unit level only, in
+    // tests/auth_policy_cert.rs's worker_role_can_create_and_update_hen_productivity.
     let hen_productivity_auth: Arc<dyn Auth> =
         Arc::new(CasbinAuth::from_strings(CASBIN_MODEL, HEN_PRODUCTIVITY_POLICY, NoAuth).await?);
 
