@@ -1418,7 +1418,7 @@ pub mod productivity;
 cargo test -p farm-worker --lib productivity
 ```
 
-Expected: all three tests pass.
+Expected: all four tests pass (`first_report_on_a_hen_creates_fresh_state`, `second_distinct_report_recomputes_the_full_total_and_preserves_known_id`, `redelivering_the_same_event_over_unchanged_data_is_a_true_no_op`, `last_laid_at_never_regresses_when_an_older_event_is_redelivered`).
 
 - [ ] **Step 5: Commit**
 
