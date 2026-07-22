@@ -18,9 +18,8 @@
 //!   idempotent-refetch contract needs.
 //!
 //! Backend caveat (see spec): the `["*"]` poll relies on searchers letting
-//! a wildcard caller see everything. All backends except Mongo currently
-//! do; on Mongo this tail is correct only under NoAuth until the adapter
-//! aligns with the meshql-core convention.
+//! a wildcard caller see everything. All backends, including Mongo as of
+//! the auth-token fix in `MongoSearcher::build_pipeline`, honor this.
 
 use crate::{ChangeEvent, ChangeSource};
 use async_trait::async_trait;
