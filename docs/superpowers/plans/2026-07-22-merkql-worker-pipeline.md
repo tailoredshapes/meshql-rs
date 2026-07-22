@@ -2005,6 +2005,11 @@ fn to_iso8601(created_at_ms: i64) -> String {
         .expect("ChangeEvent::created_at is always a valid epoch-millis timestamp")
         .to_rfc3339_opts(SecondsFormat::Millis, true)
 }
+```
+
+> **Fixed post-execution, code-quality review of this task (see commit `9335d29` on the `merkql-worker-pipeline` branch):** the `.expect()` above panics on a `created_at_ms` outside `DateTime<Utc>`'s representable range. That's a real risk, not hypothetical — Task 9 wires `run_forever` directly into `main()` with no `tokio::spawn` isolation, so this panic crashes the whole worker process, and since it happens before `commit_sync()`, a restart just re-fetches and re-panics on the same poison record forever. The landed code changes `to_iso8601`'s signature to `fn to_iso8601(created_at_ms: i64) -> Option<String>` (using `.map(...)` instead of `.expect(...)`), and the call site checks `thin.created_at` up front — right after the `deleted` check, before any network round-trips — skipping (log + `continue`) exactly like the existing unparseable-JSON and unexpected-deleted-flag cases, rather than propagating a panic. A new test, `process_batch_skips_a_record_with_an_out_of_range_created_at_without_panicking`, proves the skip-not-panic behavior and that the skipped record's offset still commits. If executing this plan fresh, use this corrected design rather than the `.expect()` shown above.
+
+```rust
 
 /// Process everything currently available on the topic in one poll, and
 /// commit the consumer offset only if EVERY record folded and wrote
