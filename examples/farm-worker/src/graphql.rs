@@ -27,7 +27,14 @@ pub async fn graphql_query(
     if !status.is_success() {
         return Err(anyhow!("GraphQL request to {url} failed: {status} {body}"));
     }
-    if let Some(errors) = body.get("errors") {
+    // meshql-graphlette's route always emits an "errors" key, using JSON
+    // null (never an omitted key) to mean "no errors" (see
+    // GraphletteRouter::build_with_auth) — the same convention
+    // meshql-graphlette's own internal HTTP resolvers already guard
+    // against (schema_builder.rs's http_graphql_find/http_graphql_find_all).
+    // Treating a present-but-null "errors" as an error would reject every
+    // successful response from a real graphlette server.
+    if let Some(errors) = body.get("errors").filter(|v| !v.is_null()) {
         return Err(anyhow!("GraphQL errors from {url}: {errors}"));
     }
     body.get("data")
