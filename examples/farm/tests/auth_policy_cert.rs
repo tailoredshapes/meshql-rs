@@ -21,7 +21,7 @@ async fn spawn_farm() -> String {
     let mongo_uri = format!("mongodb://127.0.0.1:{port}");
     let db_name = format!("farm_auth_{}", uuid::Uuid::new_v4().simple());
 
-    let (config, extra) = farm::build(&mongo_uri, &db_name).await.unwrap();
+    let (config, extra) = farm::build(&mongo_uri, &db_name, None).await.unwrap();
     let app = meshql_server::build_app_ext(config, extra).await.unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());

@@ -32,7 +32,21 @@ const HEN_PRODUCTIVITY_POLICY: &str = include_str!("../config/casbin/hen_product
 ///
 /// Shared by `main.rs` and integration tests, so tests exercise the real
 /// wiring rather than a re-implementation of it.
-pub async fn build(mongo_uri: &str, db_name: &str) -> anyhow::Result<(ServerConfig, axum::Router)> {
+///
+/// `merkql_dir`: when `Some(dir)`, additionally spawns the merkql worker
+/// pipeline's connector — a `SearcherTail` over `lay_report` fed through
+/// `run_tails` into a `ChangeHub`, mirrored onto a merkql broker opened at
+/// `dir` via `run_merkql_sink`. This is opt-in (rather than unconditional)
+/// so that callers with no interest in the merkql pipeline — e.g.
+/// `tests/auth_policy_cert.rs`, which spins up many short-lived Mongo
+/// testcontainer-backed servers in parallel — don't get a broker directory
+/// created as a side effect of calling `build`. When `None`, `build`'s
+/// behavior is byte-for-byte identical to before this parameter existed.
+pub async fn build(
+    mongo_uri: &str,
+    db_name: &str,
+    merkql_dir: Option<&std::path::Path>,
+) -> anyhow::Result<(ServerConfig, axum::Router)> {
     // Reads (GraphQL) stay open to everyone — this retrofit is about
     // write authorization, not read restriction (per spec).
     let read_auth: Arc<dyn Auth> = Arc::new(NoAuth);
@@ -90,6 +104,41 @@ pub async fn build(mongo_uri: &str, db_name: &str) -> anyhow::Result<(ServerConf
     let lay_report_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(
         MongoSearcher::new(mongo_uri, db_name, "lay_reports", Arc::clone(&read_auth)).await?,
     );
+
+    // ===== Component 1 of the merkql worker pipeline: the connector =====
+    // Tails farm's lay_report Mongo collection (via the existing, certified
+    // SearcherTail — no new storage code) and mirrors committed writes onto
+    // a merkql topic, in addition to whatever this deployment already does
+    // (the SSE change feed, GraphQL, REST). Only active when the caller
+    // opts in via `merkql_dir` — see this function's doc comment for why
+    // (avoids surprising side effects for callers, like
+    // tests/auth_policy_cert.rs, that have nothing to do with the merkql
+    // pipeline). This is the ONLY entity this farm deployment tails for
+    // merkql today — the worker pipeline only needs lay_report; add more
+    // SearcherTail entries here if a future pipeline needs another
+    // entity's changes on merkql too. Clones taken here (both `Arc`s are
+    // cheap to clone) so the originals remain free to be moved into the
+    // GraphletteConfig/restlette-router wiring below, unchanged.
+    if let Some(dir) = merkql_dir {
+        let broker = merkql::broker::Broker::open(merkql::broker::BrokerConfig::new(dir))?;
+        let change_hub = meshql_changes::ChangeHub::new(256);
+        let lay_report_tail: Arc<dyn meshql_changes::ChangeSource> =
+            Arc::new(meshql_changes::SearcherTail::new(
+                "lay_report",
+                Arc::clone(&lay_report_searcher),
+                Arc::clone(&lay_report_repo) as Arc<dyn meshql_core::Repository>,
+            ));
+        tokio::spawn(meshql_changes::run_tails(
+            change_hub.clone(),
+            vec![lay_report_tail],
+            std::time::Duration::from_millis(500),
+        ));
+        tokio::spawn(meshql_changes::run_merkql_sink(
+            change_hub.subscribe(),
+            broker,
+        ));
+    }
+
     let hen_productivity_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(
         MongoSearcher::new(
             mongo_uri,

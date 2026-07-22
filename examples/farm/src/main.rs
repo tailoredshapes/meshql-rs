@@ -6,7 +6,10 @@ const MANIFEST_JSON: &str = include_str!("../config/manifest.json");
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let (config, extra) = farm::build(MONGO_URI, DB_NAME).await?;
+    let merkql_dir =
+        std::env::var("MERKQL_DIR").unwrap_or_else(|_| "./farm-changes-log".to_string());
+    let (config, extra) =
+        farm::build(MONGO_URI, DB_NAME, Some(std::path::Path::new(&merkql_dir))).await?;
     let extra = extra.route(
         "/manifest",
         axum::routing::get(move || async move {

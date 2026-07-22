@@ -14,6 +14,8 @@ meshql-graphlette = { path = "../../meshql-graphlette" }
 meshql-restlette = { path = "../../meshql-restlette" }
 meshql-server = { path = "../../meshql-server" }
 meshql-casbin = { path = "../../meshql-casbin" }
+meshql-changes = { path = "../../meshql-changes" }
+merkql = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 anyhow = "1"
