@@ -25,7 +25,11 @@ fn manifest_validates_against_published_schema() {
         .iter_errors(&manifest)
         .map(|e| format!("{e} at {}", e.instance_path))
         .collect();
-    assert!(errors.is_empty(), "manifest invalid:\n{}", errors.join("\n"));
+    assert!(
+        errors.is_empty(),
+        "manifest invalid:\n{}",
+        errors.join("\n")
+    );
 }
 
 #[test]
@@ -56,7 +60,10 @@ fn every_entity_advertises_both_surfaces() {
         let e = entities
             .get(&entity)
             .unwrap_or_else(|| panic!("entity '{entity}' missing from manifest"));
-        assert_eq!(e["surfaces"]["graph"]["kind"], "graphql", "{entity} graph surface");
+        assert_eq!(
+            e["surfaces"]["graph"]["kind"], "graphql",
+            "{entity} graph surface"
+        );
         // Every farm entity has a matching config/json/<entity>.schema.json,
         // so every entity — hen_productivity included — must advertise an
         // api surface too. A missing api surface here is exactly the
@@ -64,5 +71,9 @@ fn every_entity_advertises_both_surfaces() {
         assert_eq!(e["surfaces"]["api"]["kind"], "rest", "{entity} api surface");
         seen += 1;
     }
-    assert_eq!(seen, entities.len(), "manifest entity count != graph file count");
+    assert_eq!(
+        seen,
+        entities.len(),
+        "manifest entity count != graph file count"
+    );
 }

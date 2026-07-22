@@ -71,8 +71,13 @@ pub async fn build(mongo_uri: &str, db_name: &str) -> anyhow::Result<(ServerConf
         MongoRepository::new(mongo_uri, db_name, "lay_reports", Arc::clone(&read_auth)).await?,
     );
     let hen_productivity_repo = Arc::new(
-        MongoRepository::new(mongo_uri, db_name, "hen_productivities", Arc::clone(&read_auth))
-            .await?,
+        MongoRepository::new(
+            mongo_uri,
+            db_name,
+            "hen_productivities",
+            Arc::clone(&read_auth),
+        )
+        .await?,
     );
 
     // --- Searchers ---
@@ -86,8 +91,13 @@ pub async fn build(mongo_uri: &str, db_name: &str) -> anyhow::Result<(ServerConf
         MongoSearcher::new(mongo_uri, db_name, "lay_reports", Arc::clone(&read_auth)).await?,
     );
     let hen_productivity_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(
-        MongoSearcher::new(mongo_uri, db_name, "hen_productivities", Arc::clone(&read_auth))
-            .await?,
+        MongoSearcher::new(
+            mongo_uri,
+            db_name,
+            "hen_productivities",
+            Arc::clone(&read_auth),
+        )
+        .await?,
     );
 
     // --- Root Configs ---
@@ -110,8 +120,18 @@ pub async fn build(mongo_uri: &str, db_name: &str) -> anyhow::Result<(ServerConf
         .vector("getHens", r#"{"name": "{{name}}"}"#)
         .vector("getHensByCoop", r#"{"coopId": "{{id}}"}"#)
         .singleton_resolver("coop", Some("coopId"), "getCoop", "/coop/graph")
-        .vector_resolver("layReports", None, "getLayReportsByHen", "/lay_report/graph")
-        .vector_resolver("productivity", None, "getHenProductivityByHen", "/hen_productivity/graph")
+        .vector_resolver(
+            "layReports",
+            None,
+            "getLayReportsByHen",
+            "/lay_report/graph",
+        )
+        .vector_resolver(
+            "productivity",
+            None,
+            "getHenProductivityByHen",
+            "/hen_productivity/graph",
+        )
         .build();
 
     let lay_report_config = RootConfig::builder()
@@ -176,9 +196,21 @@ pub async fn build(mongo_uri: &str, db_name: &str) -> anyhow::Result<(ServerConf
     // lay_report gets its own create-only policy; hen_productivity gets
     // its own worker-only policy that denies the default caller entirely.
     let restlette_router = axum::Router::new()
-        .merge(build_restlette_router("/farm/api", farm_repo, Arc::clone(&actor_auth)))
-        .merge(build_restlette_router("/coop/api", coop_repo, Arc::clone(&actor_auth)))
-        .merge(build_restlette_router("/hen/api", hen_repo, Arc::clone(&actor_auth)))
+        .merge(build_restlette_router(
+            "/farm/api",
+            farm_repo,
+            Arc::clone(&actor_auth),
+        ))
+        .merge(build_restlette_router(
+            "/coop/api",
+            coop_repo,
+            Arc::clone(&actor_auth),
+        ))
+        .merge(build_restlette_router(
+            "/hen/api",
+            hen_repo,
+            Arc::clone(&actor_auth),
+        ))
         .merge(build_restlette_router(
             "/lay_report/api",
             lay_report_repo,

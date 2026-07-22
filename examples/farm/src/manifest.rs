@@ -43,7 +43,9 @@ pub fn generate(config_dir: &Path) -> anyhow::Result<Value> {
             json!({ "kind": "graphql", "path": format!("/{entity}/graph"), "schema": graphql }),
         );
 
-        let json_schema_path = config_dir.join("json").join(format!("{entity}.schema.json"));
+        let json_schema_path = config_dir
+            .join("json")
+            .join(format!("{entity}.schema.json"));
         if json_schema_path.exists() {
             let raw = std::fs::read_to_string(&json_schema_path)
                 .with_context(|| format!("reading {}", json_schema_path.display()))?;

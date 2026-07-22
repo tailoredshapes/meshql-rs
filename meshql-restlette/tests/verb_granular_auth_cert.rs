@@ -71,8 +71,20 @@ async fn create_succeeds_update_and_delete_are_denied() {
         .send()
         .await
         .unwrap();
-    assert_eq!(update_resp.status(), 403, "update must pass \"update\", not \"create\"");
+    assert_eq!(
+        update_resp.status(),
+        403,
+        "update must pass \"update\", not \"create\""
+    );
 
-    let delete_resp = client.delete(format!("{addr}/widgets/{id}")).send().await.unwrap();
-    assert_eq!(delete_resp.status(), 403, "delete must pass \"delete\", not \"create\"");
+    let delete_resp = client
+        .delete(format!("{addr}/widgets/{id}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        delete_resp.status(),
+        403,
+        "delete must pass \"delete\", not \"create\""
+    );
 }
