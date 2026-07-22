@@ -19,10 +19,20 @@ use std::time::Duration;
 /// worker ever writes goes through this one function, which is what makes
 /// `productivity::recompute`'s `max(current.last_laid_at, ...)` string
 /// comparison agree with chronological order.
-fn to_iso8601(created_at_ms: i64) -> String {
+///
+/// Returns `None` (never panics) for a `created_at_ms` outside the range
+/// `DateTime<Utc>` can represent. `created_at` crosses a deserialization
+/// boundary from the merkql topic (`ThinEvent` via `serde_json::from_str`),
+/// so — like the unparseable-JSON and unexpected-deleted-flag cases right
+/// above this function's caller — malformed wire data must be a per-record
+/// skip, not a panic: `run_forever` (Task 9) awaits this loop directly on
+/// the main task with no `tokio::spawn` isolation, so a panic here would
+/// crash the whole worker process, and since the panic would happen before
+/// `commit_sync()`, a restart would just re-fetch and re-panic on the same
+/// poison record forever.
+fn to_iso8601(created_at_ms: i64) -> Option<String> {
     DateTime::<Utc>::from_timestamp_millis(created_at_ms)
-        .expect("ChangeEvent::created_at is always a valid epoch-millis timestamp")
-        .to_rfc3339_opts(SecondsFormat::Millis, true)
+        .map(|dt| dt.to_rfc3339_opts(SecondsFormat::Millis, true))
 }
 
 /// Process everything currently available on the topic in one poll, and
@@ -73,6 +83,20 @@ pub async fn process_batch(
             );
             continue;
         }
+        // Validate created_at up front — before spending any network
+        // round-trips on a record we'd have to discard anyway — and skip
+        // rather than panic (see to_iso8601's doc comment for why a panic
+        // here would be a process-crashing poison-pill record).
+        let event_created_at_iso = match to_iso8601(thin.created_at) {
+            Some(iso) => iso,
+            None => {
+                eprintln!(
+                    "[farm-worker] skipping lay_report event {} with out-of-range created_at={}",
+                    thin.id, thin.created_at
+                );
+                continue;
+            }
+        };
 
         // Deliberately NOT thin.created_at: `at` is a hard `createdAt <=
         // at` cutoff on every backend (no fallback — a query for an id
@@ -108,7 +132,6 @@ pub async fn process_batch(
         )
         .await?;
         let current = get_current(client, cfg, &report.hen_id).await?;
-        let event_created_at_iso = to_iso8601(thin.created_at);
         let next = recompute(
             current.as_ref(),
             &report.hen_id,
@@ -373,6 +396,57 @@ mod tests {
             records.len(),
             1,
             "the un-committed event must still be there to retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_batch_skips_a_record_with_an_out_of_range_created_at_without_panicking() {
+        // A record whose created_at can't be rendered as a DateTime<Utc>
+        // (e.g. corrupted/malformed data on the wire) must be logged and
+        // skipped, exactly like unparseable JSON or an unexpected deleted
+        // flag — never panic. A panic here would crash the whole worker
+        // process (run_forever has no tokio::spawn isolation) and, since
+        // it would happen before commit_sync(), the same poison record
+        // would be refetched and re-panic on every restart forever.
+        let broker = broker();
+        let farm = FakeFarm::default();
+        let base = start_farm(farm).await;
+        let c = cfg(&base);
+        let client = reqwest::Client::new();
+
+        publish_thin_event(&broker, "lr-poison", i64::MAX);
+
+        let mut consumer = Broker::consumer(
+            &broker,
+            ConsumerConfig {
+                group_id: c.group_id.clone(),
+                auto_commit: false,
+                offset_reset: OffsetReset::Earliest,
+            },
+        );
+        consumer.subscribe(&[c.topic.as_str()]).unwrap();
+        let n = process_batch(&mut consumer, &client, &c).await.unwrap();
+        assert_eq!(
+            n, 0,
+            "the poison record must be skipped, not counted as processed"
+        );
+
+        // A fresh consumer for the SAME group must see nothing new — a
+        // skip (unlike a batch failure) still commits, exactly like the
+        // unparseable-JSON and deleted-flag skip paths.
+        let mut consumer2 = Broker::consumer(
+            &broker,
+            ConsumerConfig {
+                group_id: c.group_id.clone(),
+                auto_commit: false,
+                offset_reset: OffsetReset::Earliest,
+            },
+        );
+        consumer2.subscribe(&[c.topic.as_str()]).unwrap();
+        let n2 = process_batch(&mut consumer2, &client, &c).await.unwrap();
+        assert_eq!(
+            n2, 0,
+            "the skipped record's offset must have been committed"
         );
     }
 }
