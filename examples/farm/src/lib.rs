@@ -12,6 +12,8 @@ use meshql_mongo::{MongoRepository, MongoSearcher};
 use meshql_restlette::build_restlette_router;
 use std::sync::Arc;
 
+pub mod manifest;
+
 const FARM_GRAPHQL: &str = include_str!("../config/graph/farm.graphql");
 const COOP_GRAPHQL: &str = include_str!("../config/graph/coop.graphql");
 const HEN_GRAPHQL: &str = include_str!("../config/graph/hen.graphql");
