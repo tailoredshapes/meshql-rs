@@ -8,6 +8,7 @@
 use crate::ChangeEvent;
 use merkql::broker::{Broker, BrokerRef};
 use merkql::record::ProducerRecord;
+use tokio::sync::broadcast;
 
 /// Publish one `ChangeEvent` onto the merkql topic named after its entity.
 /// Auto-creates the topic on first write (merkql's `Producer::send` default,
@@ -26,9 +27,44 @@ pub fn publish_to_merkql(broker: &BrokerRef, event: &ChangeEvent) -> anyhow::Res
     Ok(())
 }
 
+/// Subscribe to the hub and mirror every event onto merkql, forever. Spawn
+/// this ALONGSIDE `run_tails` — `tokio::spawn(run_merkql_sink(hub.subscribe(), broker.clone()))`
+/// — never in place of it; the SSE path is untouched.
+///
+/// Lag handling: unlike the SSE path (a lagged client just reconnects and
+/// refetches through GraphQL — the notification is lost but no data is),
+/// a lagged merkql sink has no equivalent recovery: the events it missed
+/// are never written to the topic, and the worker downstream has no other
+/// way to learn about them. This is logged loudly rather than silently
+/// skipped. Sizing `ChangeHub::new(capacity)` generously relative to write
+/// burst volume is the operator's mitigation; driving the sink directly off
+/// `ChangeSource::poll` instead of the broadcast hub (bypassing this whole
+/// class of loss) is a real improvement but out of scope for this additive
+/// change — flagged here, not solved here, per the spec's framing of the
+/// sink as "simply an additional subscriber task."
+pub async fn run_merkql_sink(mut rx: broadcast::Receiver<ChangeEvent>, broker: BrokerRef) {
+    loop {
+        match rx.recv().await {
+            Ok(event) => {
+                if let Err(e) = publish_to_merkql(&broker, &event) {
+                    eprintln!("[merkql-sink {}] publish: {e}", event.entity);
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                eprintln!(
+                    "[merkql-sink] lagged by {n} events — those events were NEVER \
+                     written to merkql; increase ChangeHub capacity"
+                );
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ChangeHub;
     use merkql::broker::{Broker, BrokerConfig, BrokerRef};
     use merkql::consumer::{ConsumerConfig, OffsetReset};
     use std::time::Duration;
@@ -97,5 +133,63 @@ mod tests {
             assert_eq!(records.len(), 1, "expected exactly one record on topic {topic}");
             assert_eq!(records[0].key.as_deref(), Some(id));
         }
+    }
+
+    #[tokio::test]
+    async fn run_merkql_sink_mirrors_hub_events_by_entity_topic() {
+        let broker = broker();
+        let hub = ChangeHub::new(16);
+        tokio::spawn(run_merkql_sink(hub.subscribe(), broker.clone()));
+
+        hub.publish(ev("lay_report", "lr-1", 1000));
+        hub.publish(ev("hen_productivity", "hp-1", 2000));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        for (topic, id) in [("lay_report", "lr-1"), ("hen_productivity", "hp-1")] {
+            let mut consumer = Broker::consumer(
+                &broker,
+                ConsumerConfig {
+                    group_id: format!("test-{topic}"),
+                    auto_commit: false,
+                    offset_reset: OffsetReset::Earliest,
+                },
+            );
+            consumer.subscribe(&[topic]).unwrap();
+            let records = consumer.poll(Duration::from_millis(50)).unwrap();
+            assert_eq!(records.len(), 1, "expected one record on topic {topic}");
+            assert_eq!(records[0].key.as_deref(), Some(id));
+        }
+    }
+
+    #[tokio::test]
+    async fn run_merkql_sink_survives_lag_and_keeps_mirroring() {
+        let broker = broker();
+        let hub = ChangeHub::new(2); // tiny buffer, easy to overrun before the task is scheduled
+        let rx = hub.subscribe();
+        tokio::spawn(run_merkql_sink(rx, broker.clone()));
+
+        for i in 0..10 {
+            hub.publish(ev("lay_report", &format!("e{i}"), i as i64));
+        }
+        // Published after the burst; must still land — proves the task
+        // logged-and-continued past the Lagged error instead of exiting
+        // (mirrors run_tails's "poll errors ... never fatal" contract).
+        hub.publish(ev("lay_report", "sentinel", 999));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut consumer = Broker::consumer(
+            &broker,
+            ConsumerConfig {
+                group_id: "test".into(),
+                auto_commit: false,
+                offset_reset: OffsetReset::Earliest,
+            },
+        );
+        consumer.subscribe(&["lay_report"]).unwrap();
+        let records = consumer.poll(Duration::from_millis(50)).unwrap();
+        assert!(
+            records.iter().any(|r| r.key.as_deref() == Some("sentinel")),
+            "sink must still be running (and mirroring) after a broadcast lag"
+        );
     }
 }

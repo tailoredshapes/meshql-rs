@@ -20,6 +20,7 @@ pub mod testing;
 
 pub use event::ChangeEvent;
 pub use hub::{run_tails, ChangeHub};
+pub use merkql_sink::{publish_to_merkql, run_merkql_sink};
 pub use source::ChangeSource;
 pub use sse::{change_stream, changes_router};
 pub use tail::SearcherTail;
