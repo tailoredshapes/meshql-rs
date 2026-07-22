@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Extension, Json, Router,
@@ -11,6 +11,22 @@ use uuid::Uuid;
 
 fn extract_stash(ext: Option<Extension<AuthContext>>) -> Stash {
     ext.map(|e| e.0 .0).unwrap_or_default()
+}
+
+/// "Honesty" headers: the as-of timestamp and tombstone state, leaked from
+/// the otherwise-internal Envelope so the FE can tell how fresh a payload is.
+fn envelope_headers(env: &Envelope) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("x-meshql-created-at"),
+        HeaderValue::from_str(&env.created_at.to_rfc3339())
+            .expect("RFC3339 timestamp is always a valid header value"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-meshql-deleted"),
+        HeaderValue::from_static(if env.deleted { "true" } else { "false" }),
+    );
+    headers
 }
 
 /// Validation result: Ok(()) to proceed, Err(message) to reject with 400.
@@ -128,6 +144,7 @@ async fn create_handler(
     let envelope = Envelope::new(id, payload, tokens.clone());
     match state.repo.create(envelope, &tokens).await {
         Ok(env) => {
+            let headers = envelope_headers(&env);
             let mut payload = env.payload;
             payload.insert("id".to_string(), serde_json::Value::String(env.id));
             let result = serde_json::Value::Object(payload);
@@ -142,7 +159,7 @@ async fn create_handler(
                 });
             }
 
-            (StatusCode::CREATED, Json(result)).into_response()
+            (StatusCode::CREATED, headers, Json(result)).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -179,9 +196,10 @@ async fn read_handler(
     let tokens = state.auth.get_auth_token(&stash);
     match state.repo.read(&id, &tokens, None).await {
         Ok(Some(env)) => {
+            let headers = envelope_headers(&env);
             let mut payload = env.payload;
             payload.insert("id".to_string(), serde_json::Value::String(env.id));
-            Json(serde_json::Value::Object(payload)).into_response()
+            (headers, Json(serde_json::Value::Object(payload))).into_response()
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -219,9 +237,10 @@ async fn update_handler(
     let envelope = Envelope::new(id, merged, tokens.clone());
     match state.repo.create(envelope, &tokens).await {
         Ok(env) => {
+            let headers = envelope_headers(&env);
             let mut payload = env.payload;
             payload.insert("id".to_string(), serde_json::Value::String(env.id));
-            Json(serde_json::Value::Object(payload)).into_response()
+            (headers, Json(serde_json::Value::Object(payload))).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
