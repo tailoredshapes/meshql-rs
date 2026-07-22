@@ -1,7 +1,7 @@
 # Farm event-sourcing retrofit
 
 **Date:** 2026-07-22
-**Status:** Brainstormed, NOT yet spec-reviewed or planned — captured under time pressure ahead of a context compaction. Treat as a faithful record of a long design conversation, not a final, vetted spec. Run it through the normal spec-review loop before writing an implementation plan.
+**Status:** Approved design, pre-implementation — passed a three-round spec-review loop (2026-07-22). Ready for implementation planning.
 **Depends on:** manifest parity (done, `2026-07-22-manifest-parity-design.md`)
 **Blocks:** the `domain` field work (needs a real event-sourced example to group events by, not artificial tags on plain CRUD entities), which blocks the TS client library.
 **Companion spec:** `2026-07-22-merkql-worker-pipeline-design.md` — the CDC bridge + worker that reads `lay_report` events and writes `hen_productivity`. That spec is Rust-only, shared across all three farm deployments; this spec is per-language (Rust, Java, TS each need their own retrofit).
@@ -47,7 +47,7 @@ Exact policy file format remains per-language (Casbin model.conf/policy.csv in J
 
 ## Manifest generator changes (all three languages)
 
-1. **Drop verb/noun filtering.** The generators built during manifest parity (Java's `ManifestGenerator.java`, TS's `manifest.ts`) already emit an `api` surface conditionally on whether a `.schema.json` file exists for that entity — that conditional logic **stays** (it's about whether a REST surface exists at all, which is still true — every entity here has one). What's being corrected is a *different, not-yet-built* filtering step (egg-economy's `ALL_VERBS`-style noun/verb hiding) that was never ported to farm's generators in the first place, so there's actually nothing to remove in the code delivered by manifest parity — this is confirming farm's *existing* generators (from the parity work) are already correct here, not a new change. Worth a conformance-test assertion confirming it stays that way as the retrofit lands (`hen_productivity` should show both surfaces, same as every other entity).
+1. **Confirm there's no verb/noun filtering to drop.** The generators built during manifest parity (Java's `ManifestGenerator.java`, TS's `manifest.ts`) already emit an `api` surface conditionally on whether a `.schema.json` file exists for that entity — that conditional logic **stays** (it's about whether a REST surface exists at all, which is still true — every entity here has one). What's being corrected is a *different, not-yet-built* filtering step (egg-economy's `ALL_VERBS`-style noun/verb hiding) that was never ported to farm's generators in the first place, so there's actually nothing to remove in the code delivered by manifest parity — this is confirming farm's *existing* generators (from the parity work) are already correct here, not a new change. Worth a conformance-test assertion confirming it stays that way as the retrofit lands (`hen_productivity` should show both surfaces, same as every other entity).
 2. **Rust's `examples/farm` needs a manifest generator built from scratch.** The original manifest-parity work ported the *concept and reference algorithm* from `egg-economy`'s Rust generator to Java's and TS's `farm` — but Rust's own `farm` example was never given one; egg-economy already had it and farm didn't need it until now. This retrofit should add `ManifestGenerator`-equivalent Rust code (mirroring `egg-economy/src/manifest.rs`) to `examples/farm`, generate its `config/manifest.json`, wire `GET /manifest` via `run_ext` (matching egg-economy's existing pattern), and add the same three-test conformance suite Java/TS already have. This closes farm out to full three-language parity on the manifest itself, not just the domain retrofit.
 
 ## What's explicitly not decided here (needs settling during implementation planning)
@@ -59,7 +59,7 @@ Exact policy file format remains per-language (Casbin model.conf/policy.csv in J
 
 ## Guidance for the implementation plan
 
-Given the retrofit now touches per-language schema changes, a per-language auth dispatch change, and (for Rust) a from-scratch manifest generator, structure the plan the way `2026-07-22-manifest-parity-design.md` structured itself: one short shared/cross-cutting section, then three explicit per-language sections naming concrete files/classes to touch — rather than one flat list of requirements. The three retrofits are more independent in practice than this spec's prose (written before the auth/schema gaps above were found) implies.
+Given the retrofit now touches per-language schema changes, a per-language auth dispatch change, and (for Rust) a from-scratch manifest generator, structure the plan with one short shared/cross-cutting section, then three explicit per-language sections naming concrete files/classes to touch — rather than one flat list of requirements. (`2026-07-22-manifest-parity-design.md` is a partial precedent for this shape — it has a Rust reference-algorithm section plus two per-language port sections, not three symmetric sections, since Rust's farm didn't need a manifest generator at the time. This retrofit genuinely needs three full per-language sections, Rust included.) The three retrofits are more independent in practice than this spec's prose (written before the auth/schema gaps above were found) implies.
 
 ## Out of scope
 
