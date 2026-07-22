@@ -19,7 +19,7 @@ MeshQL-RS is the Rust implementation of [MeshQL](https://tailoredshapes.github.i
 | **Graphlette** | GraphQL endpoint for an entity — queries, federation resolvers |
 | **Restlette** | REST endpoint for an entity — CRUD, bulk ops, JSON Schema validation |
 | **Resolver** | Connects entities across graphlettes (singleton for 1:1, vector for 1:N) |
-| **Envelope** | Internal wrapper: `{id, payload, created_at, deleted}` |
+| **Envelope** | Internal wrapper: `{id, payload, created_at, deleted}` — stays internal except for opt-in "honesty" fields (see below) |
 
 ## Features
 
@@ -27,6 +27,8 @@ MeshQL-RS is the Rust implementation of [MeshQL](https://tailoredshapes.github.i
 - **Federation**: Resolvers connect entities across graphlettes via HTTP or in-process calls
 - **Multiple datastores**: MongoDB, PostgreSQL, MySQL, SQLite, MerkQL — mix and match
 - **Temporal queries**: Point-in-time reads on any query
+- **"Honesty" as-of freshness**: REST responses carry `X-Meshql-Created-At`/`X-Meshql-Deleted` headers; GraphQL types can opt into a `createdAt` field — so the FE always knows how fresh a payload is
+- **Change feed**: `meshql-changes` streams SSE change notifications so clients don't have to poll for read-your-writes
 - **Async throughout**: Built on Tokio and Axum for efficient async I/O
 - **Type-safe**: Rust's type system catches configuration errors at compile time
 
@@ -42,7 +44,13 @@ meshql-rs/
 ├── meshql-postgres/    # PostgreSQL adapter (sqlx)
 ├── meshql-mysql/       # MySQL adapter (sqlx)
 ├── meshql-sqlite/      # SQLite adapter (sqlx)
-├── meshql-merkql/      # MerkQL adapter
+├── meshql-merkql/      # MerkQL adapter (embedded event log)
+├── meshql-merksql/     # ksqlDB-style streaming SQL engine over merkql
+├── meshql-ksql/        # Confluent Cloud ksqlDB/Kafka adapter (HTTP-only)
+├── meshql-casbin/      # RBAC authorization (wraps another Auth)
+├── meshql-changes/     # SSE change feed + deployment manifest generator
+├── meshql-mcp/         # Auto-derived MCP server for LLM agents
+├── meshql-lambda/      # AWS Lambda adapter (meshql-server on lambda_http)
 ├── meshql-cert/        # Cucumber BDD test suite
 └── examples/
     ├── farm/                    # Hierarchical federation (4 entities)

@@ -47,12 +47,12 @@ manifest route included).
 
 ## Caveats
 
-- **Mongo + real auth:** `SearcherTail` polls with `["*"]` credentials and
-  relies on searchers honoring the meshql-core wildcard-caller convention.
-  The Mongo searcher currently does not (tracked separately), so on Mongo
-  this tail is correct only for `NoAuth` deployments.
 - A byte-identical rewrite, or a token-only ACL change with an identical
   payload, is invisible to the poll-based tail (see `src/tail.rs` docs).
+  Note that `hash_row` deliberately excludes the opt-in `createdAt` field
+  some searchers now inject (see the "honesty" section of the top-level
+  skill/README) — that field changes on every write by definition, so
+  hashing it would defeat this dedup entirely.
 
 ## Design
 

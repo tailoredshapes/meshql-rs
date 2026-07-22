@@ -35,7 +35,7 @@ These are the contract, enforced by the certification suite:
 3. **Soft delete.** `remove` appends a tombstone version (`deleted: true`). All read paths exclude records whose *latest applicable version* is deleted. A temporal read *before* the deletion still returns the record.
 4. **Token filtering on every read.** A record is visible iff its `authorized_tokens` is empty, contains `"*"`, the caller holds `"*"`, or the sets intersect (see `envelope_visible_to` in `meshql-core/src/auth.rs`). `create` stamps the caller's tokens onto the envelope.
 5. **Template rendering.** Searchers render the Handlebars template with `args` into a JSON object, then translate keys: `id` → envelope id column/field; anything else → payload path (e.g. Postgres: `(payload::jsonb)->>'breed' = $n`, see `meshql-postgres/src/query.rs`). Always parameterize — never splice rendered values into SQL.
-6. **Searcher returns payloads, not envelopes.** `find`/`find_all` return the payload Stash with `id` merged in, ready for GraphQL resolution.
+6. **Searcher returns payloads, not envelopes.** `find`/`find_all` return the payload Stash with `id` merged in, ready for GraphQL resolution. Also merge in `createdAt` (RFC3339 string, from the Envelope's `created_at`) right next to `id` — this is what lets a `.graphql` type opt into the "honesty" as-of field (`createdAt: String`) with zero resolver code, since `meshql-graphlette`'s scalar field resolver is a generic `stash.get(&field_name)` lookup. Never merge in `deleted` — search results already exclude deleted/superseded versions, so there's nothing to expose.
 
 ## Adding a new adapter
 

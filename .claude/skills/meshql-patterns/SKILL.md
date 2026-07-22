@@ -25,6 +25,15 @@ Follow these in every change; they are what the architecture excels at:
 5. **Storage is pluggable, behavior is certified.** Datastores only implement `Repository` + `Searcher` (`meshql-core/src/lib.rs`). All business behavior lives above the traits. A new adapter must pass the shared certification tests (`meshql-core/src/testing.rs`, `meshql-cert`).
 6. **Pick your scale — one size does not fit all.** The same abstraction deliberately has an in-process form and a distributed form, and choosing a different implementation for dev/test than for production is *idiomatic*, not a compromise. In-memory SQLite or merkql for a test; Postgres, Mongo, or Kafka for prod. A poll-based CDC tail in-process; a native change-stream connector in prod. The behavior contract (certification, the trait, the fold) is identical; only the deployment weight changes. When you see two implementations of one seam, that is the design working — do not collapse them.
 
+## Honesty: as-of freshness
+
+The FE should be able to tell how fresh a payload is, so it can show a "pending" state and let the user refresh instead of silently rendering stale data. Envelope metadata stays internal (invariant 2 links `created_at` to versioning, not exposure) except for two deliberate, minimal leaks:
+
+- **REST**: `create`/`read`/`update` responses carry `X-Meshql-Created-At` (RFC3339) and `X-Meshql-Deleted` (`true`/`false`) response headers — automatic, no config, the JSON body stays payload-only. Not present on `list` or `delete` (see `references/storage-adapters.md` and `meshql-restlette/src/routes.rs`).
+- **GraphQL**: every Searcher merges `createdAt` (RFC3339) into the result Stash next to `id`. A type opts in by declaring `createdAt: String` — the scalar field resolver is a generic map lookup, so no resolver code is needed. `deleted` is never exposed (search results already exclude deleted/superseded versions).
+
+Don't widen this: no other Envelope field (`authorized_tokens`, etc.) should ever leak into a REST body or an unopted GraphQL field.
+
 ## Naming and layout conventions
 
 | Thing | Convention | Example |
@@ -81,6 +90,7 @@ A meshql system is a small Rust binary owned by the service developer — there 
 - **Custom commands/side effects**: don't bolt logic into adapters. Use `build_restlette_router_ext` (validators, defaults, `post_create` side effects) or `run_ext` extra Axum routes for computed endpoints. See `meshql-restlette/src/routes.rs`.
 - **Auth beyond NoAuth**: `StashKeyAuth` extracts identity from a request stash key; wrap with `CasbinAuth` (`meshql-casbin`) for role-based action checks (`authorize_action(creds, "write")`). Pass via `run_with_auth`/`build_app_with_auth`.
 - **Exposing a deployment to LLM agents at runtime** → use the existing `meshql-mcp` crate (`meshql-mcp/README.md`), not this skill.
+- **FE needs to know how fresh data is / show a "pending" state** → see "Honesty: as-of freshness" above; add `createdAt: String` to the GraphQL type, nothing else to do.
 
 ## Anti-patterns to flag
 

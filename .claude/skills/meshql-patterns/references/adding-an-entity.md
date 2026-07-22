@@ -28,6 +28,7 @@ type Query {
 
 Rules:
 - **Every** query takes `at: Float` (epoch millis, point-in-time read — not `Int`, which is 32-bit in GraphQL and overflows on millis).
+- **Optional:** add `createdAt: String` to a type to opt into the "honesty" as-of field — every Searcher already merges it into the result Stash (RFC3339, next to `id`), so declaring the field is all that's needed; no resolver code. Omit it and it's simply not selectable. (REST gets the equivalent via `X-Meshql-Created-At`/`X-Meshql-Deleted` response headers automatically — see SKILL.md.)
 - Query naming: this example uses the entity-named dialect (`getWidget`/`getWidgets`/`getWidgetsBy<Parent>`) matching the repo's examples. If the service will be exposed to LLM agents via `meshql-mcp` auto-derivation, use the generic dialect instead (`getById`/`getAll`/`getByName`/`getBy<X>Id`) — the MCP parser matches those names exactly. See SKILL.md "Query naming".
 - Federated fields (`parent: Parent`) get a local type definition with just the fields you want reachable from this entity. One level of nesting is the norm.
 
@@ -97,6 +98,7 @@ If the new entity is the *target* of relations, also add the reverse query (`get
 - `POST/GET/PUT/DELETE /widget/api[/:id]` with schema validation, defaults, soft delete, versioning
 - `POST /widget/graph` GraphQL with temporal reads and federation
 - Authorization filtering on every read, via the `Auth` passed to repo/searcher/server
+- `X-Meshql-Created-At`/`X-Meshql-Deleted` response headers on REST `create`/`read`/`update` — the "honesty" as-of fields, automatic, no config needed
 
 ## 5. Validators, defaults, and side effects (commands)
 
