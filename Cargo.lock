@@ -1336,13 +1336,18 @@ name = "farm"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "meshql-core",
  "meshql-graphlette",
  "meshql-mongo",
  "meshql-restlette",
  "meshql-server",
+ "reqwest",
  "serde_json",
+ "testcontainers",
+ "testcontainers-modules",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

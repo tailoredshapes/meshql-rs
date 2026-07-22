@@ -3,8 +3,8 @@
   "type": "object",
   "properties": {
     "henId": { "type": "string" },
-    "date": { "type": "string", "format": "date" },
-    "count": { "type": "integer" }
+    "eggs": { "type": "integer", "minimum": 0 },
+    "timeOfDay": { "type": "string", "format": "date-time" }
   },
-  "required": ["henId", "date", "count"]
+  "required": ["henId", "eggs", "timeOfDay"]
 }

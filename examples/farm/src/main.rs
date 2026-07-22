@@ -70,9 +70,8 @@ async fn main() -> anyhow::Result<()> {
 
     let lay_report_config = RootConfig::builder()
         .singleton("getLayReport", r#"{"id": "{{id}}"}"#)
-        .vector("getLayReports", r#"{"date": "{{date}}"}"#)
-        .vector("getLayReportsByHen", r#"{"henId": "{{id}}"}"#)
-        // Lay reports have a hen (resolved via hen graphlette)
+        .vector("getLayReports", "{}")
+        .vector("getLayReportsByHen", r#"{"payload.henId": "{{id}}"}"#)
         .singleton_resolver("hen", Some("henId"), "getHen", "/hen/graph")
         .build();
 

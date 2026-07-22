@@ -14,8 +14,8 @@ type Coop {
 
 type LayReport {
     id: ID
-    date: String
-    count: Int
+    eggs: Int
+    timeOfDay: String
 }
 
 type Query {
