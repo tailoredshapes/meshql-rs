@@ -1370,6 +1370,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "farm-worker"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "merkql",
+ "meshql-changes",
+ "meshql-core",
+ "meshql-graphlette",
+ "meshql-restlette",
+ "meshql-server",
+ "meshql-sqlite",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "fast_chemail"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

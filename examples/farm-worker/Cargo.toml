@@ -1,0 +1,33 @@
+[package]
+name = "farm-worker"
+version = "0.1.0"
+edition = "2021"
+description = "Shared, language-agnostic worker: consumes lay_report events off a merkql topic (written by the meshql-changes merkql sink) and folds them into hen_productivity via REST/GraphQL against any farm deployment (Rust, Java, or TS)."
+
+[lib]
+name = "farm_worker"
+path = "src/lib.rs"
+
+[[bin]]
+name = "farm-worker"
+path = "src/main.rs"
+
+[dependencies]
+merkql = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+anyhow = "1"
+
+[dev-dependencies]
+axum = { workspace = true }
+tempfile = "3"
+meshql-core = { path = "../../meshql-core" }
+meshql-sqlite = { path = "../../meshql-sqlite" }
+meshql-graphlette = { path = "../../meshql-graphlette" }
+meshql-restlette = { path = "../../meshql-restlette" }
+meshql-server = { path = "../../meshql-server" }
+meshql-changes = { path = "../../meshql-changes" }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
