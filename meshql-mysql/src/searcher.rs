@@ -103,6 +103,9 @@ impl MysqlSearcher {
             let env_id: String = r
                 .try_get("id")
                 .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+            let created_at_ms: i64 = r
+                .try_get("created_at_ms")
+                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
             let tokens_json: String = r
                 .try_get("authorized_tokens")
                 .map_err(|e| MeshqlError::Storage(e.to_string()))?;
@@ -119,8 +122,16 @@ impl MysqlSearcher {
             let mut stash: Stash = serde_json::from_str(&payload_json)
                 .map_err(|e| MeshqlError::Parse(e.to_string()))?;
 
-            // Merge id into the stash so callers can find by id field
+            // Merge id and createdAt into the stash so callers can find by id
+            // field and GraphQL schemas can opt into an as-of timestamp.
             stash.insert("id".to_string(), serde_json::Value::String(env_id));
+            let created_at = chrono::DateTime::from_timestamp_millis(created_at_ms)
+                .unwrap_or_default()
+                .to_rfc3339();
+            stash.insert(
+                "createdAt".to_string(),
+                serde_json::Value::String(created_at),
+            );
 
             results.push(stash);
         }

@@ -159,6 +159,7 @@ FROM latest WHERE rn = 1 AND deleted = 0"
             }
             let mut stash = env.payload.clone();
             stash.insert("id".to_string(), json!(env.id));
+            stash.insert("createdAt".to_string(), json!(env.created_at.to_rfc3339()));
             results.push(stash);
         }
 

@@ -62,6 +62,10 @@ pub fn document_to_result_stash(doc: &Document) -> Option<Stash> {
     let payload_doc = doc.get_document("payload").ok()?;
     let mut stash = doc_to_stash(payload_doc);
     stash.insert("id".to_string(), Value::String(id));
+    if let Ok(created_at) = doc.get_datetime("createdAt") {
+        let rfc3339 = created_at.to_chrono().to_rfc3339();
+        stash.insert("createdAt".to_string(), Value::String(rfc3339));
+    }
     Some(stash)
 }
 

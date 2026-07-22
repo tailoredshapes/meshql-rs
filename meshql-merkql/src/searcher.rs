@@ -98,6 +98,7 @@ impl MerkqlSearcher {
     fn envelope_to_stash(env: &Envelope) -> Stash {
         let mut stash = env.payload.clone();
         stash.insert("id".to_string(), json!(env.id));
+        stash.insert("createdAt".to_string(), json!(env.created_at.to_rfc3339()));
         stash
     }
 }

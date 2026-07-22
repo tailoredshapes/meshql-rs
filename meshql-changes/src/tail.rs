@@ -64,9 +64,16 @@ impl SearcherTail {
     /// difference between versions hashes as a change — a harmless extra
     /// notification (client refetch is idempotent). In-process hash only —
     /// never persisted.
+    ///
+    /// `createdAt` (the opt-in "honesty" as-of field some searchers now
+    /// inject) is excluded: it changes on every rewrite by definition, even
+    /// a byte-identical one, so hashing it would defeat the whole point of
+    /// this dedup — every no-op rewrite would look like a change.
     fn hash_row(row: &Stash) -> u64 {
         let mut h = DefaultHasher::new();
-        serde_json::to_string(row)
+        let mut row = row.clone();
+        row.remove("createdAt");
+        serde_json::to_string(&row)
             .expect("Stash is always serializable")
             .hash(&mut h);
         h.finish()

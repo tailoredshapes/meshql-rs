@@ -67,6 +67,10 @@ pub fn row_to_envelope(row: &HashMap<String, Value>) -> anyhow::Result<Envelope>
 pub fn envelope_to_stash(envelope: &Envelope) -> Stash {
     let mut stash = envelope.payload.clone();
     stash.insert("id".to_string(), json!(envelope.id));
+    stash.insert(
+        "createdAt".to_string(),
+        json!(envelope.created_at.to_rfc3339()),
+    );
     stash
 }
 
