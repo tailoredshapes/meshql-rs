@@ -5,10 +5,12 @@ pub trait Auth: Send + Sync {
     fn is_authorized(&self, credentials: &[String], envelope: &Envelope) -> bool;
 
     /// Whether a caller holding `credentials` (resolved roles) may perform
-    /// `action` (e.g. `"write"`). Used by mutating handlers (create/update/
-    /// delete) to enforce role permissions in the service, not just at the
-    /// edge. Default: allow — implementations that don't model actions
-    /// (NoAuth, StashKeyAuth) impose no restriction; CasbinAuth overrides.
+    /// `action` (`"create"`, `"update"`, or `"delete"` — meshql-restlette's
+    /// create/update/delete handlers each pass their own verb, not a shared
+    /// `"write"`). Used by mutating handlers to enforce role permissions in
+    /// the service, not just at the edge. Default: allow — implementations
+    /// that don't model actions (NoAuth, StashKeyAuth) impose no
+    /// restriction; CasbinAuth overrides.
     fn authorize_action(&self, _credentials: &[String], _action: &str) -> bool {
         true
     }
