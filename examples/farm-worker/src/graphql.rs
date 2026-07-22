@@ -15,7 +15,9 @@ pub async fn graphql_query(
     query: &str,
     auth: Option<(&str, &str)>,
 ) -> anyhow::Result<Value> {
-    let mut req = client.post(url).json(&serde_json::json!({ "query": query }));
+    let mut req = client
+        .post(url)
+        .json(&serde_json::json!({ "query": query }));
     if let Some((name, value)) = auth {
         req = req.header(name, value);
     }

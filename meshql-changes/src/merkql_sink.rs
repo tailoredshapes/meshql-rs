@@ -130,7 +130,11 @@ mod tests {
             );
             consumer.subscribe(&[topic]).unwrap();
             let records = consumer.poll(Duration::from_millis(50)).unwrap();
-            assert_eq!(records.len(), 1, "expected exactly one record on topic {topic}");
+            assert_eq!(
+                records.len(),
+                1,
+                "expected exactly one record on topic {topic}"
+            );
             assert_eq!(records[0].key.as_deref(), Some(id));
         }
     }

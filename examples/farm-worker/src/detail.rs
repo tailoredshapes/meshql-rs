@@ -32,8 +32,7 @@ pub async fn fetch_lay_report(
 ) -> anyhow::Result<LayReport> {
     let url = format!("{}/lay_report/graph", graphql_base.trim_end_matches('/'));
     let query_name = dialect.lay_report_by_id();
-    let query =
-        format!(r#"{{ {query_name}(id: "{id}", at: {at}) {{ henId eggs timeOfDay }} }}"#);
+    let query = format!(r#"{{ {query_name}(id: "{id}", at: {at}) {{ henId eggs timeOfDay }} }}"#);
     let data = graphql_query(client, &url, &query, None).await?;
     let report = data
         .get(query_name)
@@ -94,8 +93,14 @@ mod tests {
     async fn echo_getlayreport(Json(body): Json<Value>) -> Json<Value> {
         let query = body["query"].as_str().unwrap_or_default();
         assert!(query.contains("getLayReport"), "unexpected query: {query}");
-        assert!(query.contains(r#""lr-1""#), "query missing expected id: {query}");
-        assert!(query.contains("at: 1000"), "query missing expected at: {query}");
+        assert!(
+            query.contains(r#""lr-1""#),
+            "query missing expected id: {query}"
+        );
+        assert!(
+            query.contains("at: 1000"),
+            "query missing expected at: {query}"
+        );
         Json(json!({
             "data": {
                 "getLayReport": {
@@ -166,16 +171,28 @@ mod tests {
         let base = start(Router::new().route("/lay_report/graph", post(echo_null))).await;
         let client = reqwest::Client::new();
 
-        let err = fetch_lay_report(&client, &base, "missing-id", 1000, QueryDialect::EntityNamed)
-            .await
-            .unwrap_err();
+        let err = fetch_lay_report(
+            &client,
+            &base,
+            "missing-id",
+            1000,
+            QueryDialect::EntityNamed,
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("missing-id"));
     }
 
     async fn echo_getlayreportsbyhen(Json(body): Json<Value>) -> Json<Value> {
         let query = body["query"].as_str().unwrap_or_default();
-        assert!(query.contains("getLayReportsByHen"), "unexpected query: {query}");
-        assert!(query.contains(r#""hen-1""#), "query missing expected hen id: {query}");
+        assert!(
+            query.contains("getLayReportsByHen"),
+            "unexpected query: {query}"
+        );
+        assert!(
+            query.contains(r#""hen-1""#),
+            "query missing expected hen id: {query}"
+        );
         Json(json!({
             "data": {
                 "getLayReportsByHen": [
@@ -196,9 +213,10 @@ mod tests {
             start(Router::new().route("/lay_report/graph", post(echo_getlayreportsbyhen))).await;
         let client = reqwest::Client::new();
 
-        let eggs = fetch_lay_reports_for_hen(&client, &base, "hen-1", 1000, QueryDialect::EntityNamed)
-            .await
-            .unwrap();
+        let eggs =
+            fetch_lay_reports_for_hen(&client, &base, "hen-1", 1000, QueryDialect::EntityNamed)
+                .await
+                .unwrap();
         assert_eq!(eggs, vec![3, 2]);
     }
 
