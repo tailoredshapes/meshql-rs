@@ -1,0 +1,5 @@
+p, fe, /*, create
+p, fe, /*, update
+p, fe, /*, delete
+
+g, *, fe
