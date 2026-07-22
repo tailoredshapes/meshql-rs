@@ -357,7 +357,7 @@ package com.meshql.core.config;
 
 import com.meshql.core.Auth;
 import com.meshql.core.Envelope;
-import com.meshql.core.Stash;
+import com.tailoredshapes.stash.Stash;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -1935,7 +1935,7 @@ Edit `Main.java`, right before the `Config config = Config.builder()...` block, 
         Auth layReportAuth = CasbinAuth.create(
                 "/app/config/casbin/model.conf",
                 "/app/config/casbin/lay_report-policy.csv",
-                new NoAuth(java.util.List.of("public"), true));
+                new NoAuth(List.of("public"), true));
 
         // Verb-aware auth for hen_productivity: only the worker service
         // account (identified by a JWT `sub` claim mapped to the "worker"
