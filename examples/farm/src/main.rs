@@ -10,6 +10,7 @@ const FARM_GRAPHQL: &str = include_str!("../config/graph/farm.graphql");
 const COOP_GRAPHQL: &str = include_str!("../config/graph/coop.graphql");
 const HEN_GRAPHQL: &str = include_str!("../config/graph/hen.graphql");
 const LAY_REPORT_GRAPHQL: &str = include_str!("../config/graph/lay_report.graphql");
+const HEN_PRODUCTIVITY_GRAPHQL: &str = include_str!("../config/graph/hen_productivity.graphql");
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,6 +25,9 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(MongoRepository::new(MONGO_URI, DB_NAME, "hens", Arc::clone(&auth)).await?);
     let lay_report_repo =
         Arc::new(MongoRepository::new(MONGO_URI, DB_NAME, "lay_reports", Arc::clone(&auth)).await?);
+    let hen_productivity_repo = Arc::new(
+        MongoRepository::new(MONGO_URI, DB_NAME, "hen_productivities", Arc::clone(&auth)).await?,
+    );
 
     // --- Searchers ---
     let farm_searcher: Arc<dyn meshql_core::Searcher> =
@@ -34,6 +38,9 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(MongoSearcher::new(MONGO_URI, DB_NAME, "hens", Arc::clone(&auth)).await?);
     let lay_report_searcher: Arc<dyn meshql_core::Searcher> =
         Arc::new(MongoSearcher::new(MONGO_URI, DB_NAME, "lay_reports", Arc::clone(&auth)).await?);
+    let hen_productivity_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(
+        MongoSearcher::new(MONGO_URI, DB_NAME, "hen_productivities", Arc::clone(&auth)).await?,
+    );
 
     // --- Root Configs ---
     let farm_config = RootConfig::builder()
@@ -66,12 +73,25 @@ async fn main() -> anyhow::Result<()> {
             "getLayReportsByHen",
             "/lay_report/graph",
         )
+        .vector_resolver(
+            "productivity",
+            None,
+            "getHenProductivityByHen",
+            "/hen_productivity/graph",
+        )
         .build();
 
     let lay_report_config = RootConfig::builder()
         .singleton("getLayReport", r#"{"id": "{{id}}"}"#)
         .vector("getLayReports", "{}")
         .vector("getLayReportsByHen", r#"{"payload.henId": "{{id}}"}"#)
+        .singleton_resolver("hen", Some("henId"), "getHen", "/hen/graph")
+        .build();
+
+    let hen_productivity_config = RootConfig::builder()
+        .singleton("getHenProductivity", r#"{"id": "{{id}}"}"#)
+        .vector("getHenProductivities", "{}")
+        .vector("getHenProductivityByHen", r#"{"payload.henId": "{{id}}"}"#)
         .singleton_resolver("hen", Some("henId"), "getHen", "/hen/graph")
         .build();
 
@@ -102,6 +122,12 @@ async fn main() -> anyhow::Result<()> {
                 root_config: lay_report_config,
                 searcher: lay_report_searcher,
             },
+            GraphletteConfig {
+                path: "/hen_productivity/graph".to_string(),
+                schema_text: HEN_PRODUCTIVITY_GRAPHQL.to_string(),
+                root_config: hen_productivity_config,
+                searcher: hen_productivity_searcher,
+            },
         ],
         restlettes: vec![
             RestletteConfig {
@@ -123,6 +149,11 @@ async fn main() -> anyhow::Result<()> {
                 path: "/lay_report/api".to_string(),
                 schema_json: serde_json::json!({}),
                 repository: lay_report_repo,
+            },
+            RestletteConfig {
+                path: "/hen_productivity/api".to_string(),
+                schema_json: serde_json::json!({}),
+                repository: hen_productivity_repo,
             },
         ],
     };
