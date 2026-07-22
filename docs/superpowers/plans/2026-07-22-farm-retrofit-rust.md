@@ -830,7 +830,7 @@ This is the task that implements decisions 3, 5, and 6. It moves the entire wiri
       let lay_report_config = RootConfig::builder()
           .singleton("getLayReport", r#"{"id": "{{id}}"}"#)
           .vector("getLayReports", "{}")
-          .vector("getLayReportsByHen", r#"{"henId": "{{id}}"}"#)
+          .vector("getLayReportsByHen", r#"{"payload.henId": "{{id}}"}"#)
           .singleton_resolver("hen", Some("henId"), "getHen", "/hen/graph")
           .build();
 
