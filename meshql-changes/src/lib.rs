@@ -12,6 +12,7 @@
 
 mod event;
 mod hub;
+mod merkql_sink;
 mod source;
 mod sse;
 mod tail;

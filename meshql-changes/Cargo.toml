@@ -8,6 +8,7 @@ repository = "https://github.com/tailoredshapes/meshql-rs"
 
 [dependencies]
 meshql-core = { version = "0.1.0", path = "../meshql-core" }
+merkql = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { version = "0.1", features = ["sync"] }
@@ -22,3 +23,4 @@ meshql-sqlite = { version = "0.1.0", path = "../meshql-sqlite" }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 futures = "0.3"
+tempfile = "3"
