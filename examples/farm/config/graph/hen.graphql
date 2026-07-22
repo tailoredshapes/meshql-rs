@@ -5,6 +5,7 @@ type Hen {
     dateOfBirth: String
     coop: Coop
     layReports: [LayReport]
+    productivity: [HenProductivity]
 }
 
 type Coop {
@@ -14,8 +15,14 @@ type Coop {
 
 type LayReport {
     id: ID
-    date: String
-    count: Int
+    eggs: Int
+    timeOfDay: String
+}
+
+type HenProductivity {
+    id: ID
+    totalEggs: Int
+    lastLaidAt: String
 }
 
 type Query {

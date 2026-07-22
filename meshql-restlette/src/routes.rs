@@ -134,7 +134,7 @@ async fn create_handler(
     let id = Uuid::new_v4().to_string();
     let stash = extract_stash(auth_ctx);
     let tokens = state.auth.get_auth_token(&stash);
-    if !state.auth.authorize_action(&tokens, "write") {
+    if !state.auth.authorize_action(&tokens, "create") {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "write not permitted for your role"})),
@@ -214,7 +214,7 @@ async fn update_handler(
 ) -> impl IntoResponse {
     let stash = extract_stash(auth_ctx);
     let tokens = state.auth.get_auth_token(&stash);
-    if !state.auth.authorize_action(&tokens, "write") {
+    if !state.auth.authorize_action(&tokens, "update") {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "write not permitted for your role"})),
@@ -253,7 +253,7 @@ async fn delete_handler(
 ) -> impl IntoResponse {
     let stash = extract_stash(auth_ctx);
     let tokens = state.auth.get_auth_token(&stash);
-    if !state.auth.authorize_action(&tokens, "write") {
+    if !state.auth.authorize_action(&tokens, "delete") {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "write not permitted for your role"})),

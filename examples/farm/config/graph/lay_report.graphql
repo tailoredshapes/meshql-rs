@@ -1,8 +1,8 @@
 type LayReport {
     id: ID
     henId: String
-    date: String
-    count: Int
+    eggs: Int
+    timeOfDay: String
     hen: Hen
 }
 
@@ -13,6 +13,6 @@ type Hen {
 
 type Query {
     getLayReport(id: ID, at: Float): LayReport
-    getLayReports(date: String, at: Float): [LayReport]
+    getLayReports(at: Float): [LayReport]
     getLayReportsByHen(id: ID, at: Float): [LayReport]
 }
