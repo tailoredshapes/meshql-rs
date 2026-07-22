@@ -1261,6 +1261,8 @@ Also fixes a latent bug while touching this code: `getAuthToken` called `enforce
 
   Create `examples/farm/config/graph/hen_productivity.graphql`:
   ```graphql
+  scalar Date
+
   type Hen {
     name: String!
     id: ID
