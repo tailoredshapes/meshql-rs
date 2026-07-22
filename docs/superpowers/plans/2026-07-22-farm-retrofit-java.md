@@ -36,6 +36,7 @@
 **Files:**
 - Modify: `core/src/main/java/com/meshql/core/Auth.java`
 - Modify: `auth/noop/src/main/java/com/meshql/auth/noop/NoAuth.java`
+- Modify: `auth/noop/pom.xml` (found during plan review: this module has no test dependency at all today — see Step 2 below)
 - Test: `auth/noop/src/test/java/com/meshql/auth/noop/NoAuthTest.java` (create if it doesn't already exist)
 
 - [ ] **Step 1: Check whether `NoAuthTest` already exists**
@@ -44,9 +45,30 @@
 find /tank/repos/tailoredshapes/meshql/auth/noop/src/test -iname "*.java"
 ```
 
-If it exists, read it first so your new test methods match its existing style. If it doesn't exist, you're creating it fresh in Step 2.
+If it exists, read it first so your new test methods match its existing style. If it doesn't exist, you're creating it fresh in Step 3.
 
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 2: Add the missing JUnit test dependency**
+
+`auth/noop` has never had a test class before this task, and `auth/noop/pom.xml` currently declares no test dependencies at all (confirmed via `mvn -pl auth/noop dependency:tree` — no `org.junit.jupiter:*` artifact anywhere, and the root `meshql-java` parent pom only pins versions via `dependencyManagement`, it doesn't add the dependency itself). Without this, Step 4's test won't even compile (`import org.junit.jupiter.api.Test;` fails with "package does not exist"), which would be confusing since it looks like a different failure than the one Step 4 describes.
+
+Edit `auth/noop/pom.xml`, adding inside the existing `<dependencies>` block (after the `core` dependency), matching the exact pattern already used in `auth/casbin/pom.xml`:
+
+```xml
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-engine</artifactId>
+            <scope>test</scope>
+        </dependency>
+```
+
+No `<version>` needed — it's managed centrally via the parent POM's `dependencyManagement`, same as every other module that already has tests.
+
+- [ ] **Step 3: Write the failing test**
 
 Add to (or create) `auth/noop/src/test/java/com/meshql/auth/noop/NoAuthTest.java`:
 
@@ -80,15 +102,15 @@ class NoAuthTest {
 }
 ```
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [ ] **Step 4: Run the test to verify it fails**
 
 ```bash
 mvn test -pl auth/noop -am -Dtest=NoAuthTest
 ```
 
-Expected: compile error — `authorizeAction` does not exist on `Auth`/`NoAuth`. (If `NoAuthTest.java` didn't exist before Step 2, this is your first-ever run of the class; the failure mode is the same either way — a compile failure, not a red assertion — because the method doesn't exist yet.)
+Expected: compile error — `authorizeAction` does not exist on `Auth`/`NoAuth`. (With Step 2's dependency in place, this is a normal "method doesn't exist yet" compile failure — not a "package org.junit.jupiter.api does not exist" failure. If you see the latter, Step 2 wasn't applied correctly.)
 
-- [ ] **Step 4: Add the interface method**
+- [ ] **Step 5: Add the interface method**
 
 Edit `core/src/main/java/com/meshql/core/Auth.java`:
 
@@ -123,7 +145,7 @@ public interface Auth {
 }
 ```
 
-- [ ] **Step 5: Override in `NoAuth` for explicit, testable semantics**
+- [ ] **Step 6: Override in `NoAuth` for explicit, testable semantics**
 
 Edit `auth/noop/src/main/java/com/meshql/auth/noop/NoAuth.java`, adding after `isAuthorized`:
 
@@ -134,7 +156,7 @@ Edit `auth/noop/src/main/java/com/meshql/auth/noop/NoAuth.java`, adding after `i
     }
 ```
 
-- [ ] **Step 6: Run the test to verify it passes**
+- [ ] **Step 7: Run the test to verify it passes**
 
 ```bash
 mvn test -pl auth/noop -am -Dtest=NoAuthTest
@@ -142,7 +164,7 @@ mvn test -pl auth/noop -am -Dtest=NoAuthTest
 
 Expected: `BUILD SUCCESS`, `Tests run: 2, Failures: 0, Errors: 0`.
 
-- [ ] **Step 7: Run the full `core` and `auth` test suites to confirm no regression**
+- [ ] **Step 8: Run the full `core` and `auth` test suites to confirm no regression**
 
 ```bash
 mvn test -pl core,auth/noop,auth/jwt,auth/casbin -am
@@ -150,11 +172,12 @@ mvn test -pl core,auth/noop,auth/jwt,auth/casbin -am
 
 Expected: `BUILD SUCCESS` — `JWTSubAuthorizer` and `CasbinAuth` compile unchanged (they inherit the default `authorizeAction`; `CasbinAuth` gets its real override in Task 2).
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git add core/src/main/java/com/meshql/core/Auth.java \
         auth/noop/src/main/java/com/meshql/auth/noop/NoAuth.java \
+        auth/noop/pom.xml \
         auth/noop/src/test/java/com/meshql/auth/noop/NoAuthTest.java
 git commit -m "feat(auth): add verb-aware Auth.authorizeAction, wire into NoAuth"
 ```
@@ -295,6 +318,7 @@ git commit -m "feat(auth): implement CasbinAuth.authorizeAction via enforcer.enf
 
 **Files:**
 - Modify: `core/src/main/java/com/meshql/core/config/RestletteConfig.java`
+- Modify: `core/pom.xml` (found during plan review: `core` has no test dependency at all today — see Step 2 below)
 - Test: `core/src/test/java/com/meshql/core/config/RestletteConfigTest.java` (create if it doesn't already exist — check first)
 
 - [ ] **Step 1: Check for an existing test file**
@@ -303,7 +327,28 @@ git commit -m "feat(auth): implement CasbinAuth.authorizeAction via enforcer.enf
 find /tank/repos/tailoredshapes/meshql/core/src/test -iname "RestletteConfigTest.java"
 ```
 
-- [ ] **Step 2: Write the failing test**
+- [ ] **Step 2: Add the missing JUnit test dependency**
+
+`core/src/test` exists (it has `logback-test.xml`) but has never had an actual test class before this task, and `core/pom.xml` currently declares no `org.junit.jupiter:*` dependency at all (confirmed via `mvn -pl core dependency:tree`; the root `meshql-java` parent pom only pins JUnit's version via `dependencyManagement`, it doesn't add the dependency itself). Without this, Step 4's test won't compile at all (`import org.junit.jupiter.api.Test;` fails with "package does not exist"), not the ".auth(...) method missing" failure Step 4 describes.
+
+Edit `core/pom.xml`, adding inside the existing `<dependencies>` block, matching the exact pattern already used in `auth/casbin/pom.xml`:
+
+```xml
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-engine</artifactId>
+            <scope>test</scope>
+        </dependency>
+```
+
+No `<version>` needed — managed centrally via the parent POM's `dependencyManagement`.
+
+- [ ] **Step 3: Write the failing test**
 
 Create (or extend) `core/src/test/java/com/meshql/core/config/RestletteConfigTest.java`:
 
@@ -355,15 +400,15 @@ class RestletteConfigTest {
 }
 ```
 
-- [ ] **Step 3: Run the test to verify it fails**
+- [ ] **Step 4: Run the test to verify it fails**
 
 ```bash
 mvn test -pl core -am -Dtest=RestletteConfigTest
 ```
 
-Expected: compile error — `RestletteConfig.Builder` has no `.auth(...)` method and `RestletteConfig` has no `auth()` accessor.
+Expected: compile error — `RestletteConfig.Builder` has no `.auth(...)` method and `RestletteConfig` has no `auth()` accessor. (With Step 2's dependency in place, this is a normal "method doesn't exist yet" compile failure, not a "package org.junit.jupiter.api does not exist" one.)
 
-- [ ] **Step 4: Add the `auth` field**
+- [ ] **Step 5: Add the `auth` field**
 
 Edit `core/src/main/java/com/meshql/core/config/RestletteConfig.java`:
 
@@ -452,7 +497,7 @@ public record RestletteConfig(
 }
 ```
 
-- [ ] **Step 5: Run the test to verify it passes**
+- [ ] **Step 6: Run the test to verify it passes**
 
 ```bash
 mvn test -pl core -am -Dtest=RestletteConfigTest
@@ -460,7 +505,7 @@ mvn test -pl core -am -Dtest=RestletteConfigTest
 
 Expected: `BUILD SUCCESS`, `Tests run: 2, Failures: 0, Errors: 0`.
 
-- [ ] **Step 6: Confirm the record change doesn't break other callers**
+- [ ] **Step 7: Confirm the record change doesn't break other callers**
 
 ```bash
 mvn compile -pl core,server,api/restlette,examples/farm -am
@@ -468,7 +513,7 @@ mvn compile -pl core,server,api/restlette,examples/farm -am
 
 Expected: `BUILD SUCCESS`. (The 6-arg canonical record constructor changed shape; any code constructing `new RestletteConfig(...)` positionally — as opposed to via `.builder()` — would break here. `grep -rn "new RestletteConfig(" --include="*.java"` first if this fails, to find and fix positional call sites.)
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add core/src/main/java/com/meshql/core/config/RestletteConfig.java \
