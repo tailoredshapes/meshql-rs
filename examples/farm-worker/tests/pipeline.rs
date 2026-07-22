@@ -3,13 +3,28 @@
 //!
 //!   POST /lay_report/api (REST)
 //!     -> SearcherTail (storage-layer CDC, no restlette hook)
-//!       -> run_merkql_sink (Component 1: the connector)
-//!         -> merkql topic "lay_report"
-//!           -> farm_worker::worker::process_batch (Component 2: the worker)
-//!             -> GET /lay_report/graph (detail lookup)
-//!             -> GET /hen_productivity/graph (read current)
-//!             -> POST or PUT /hen_productivity/api (write)
-//!               -> GET /hen_productivity/graph confirms the result
+//!       -> ChangeHub (fan-out — the SAME hub examples/farm wires
+//!          run_tails/run_merkql_sink onto in production)
+//!         -> publish_to_merkql (Component 1: the connector's produce side)
+//!           -> merkql topic "lay_report"
+//!             -> farm_worker::worker::process_batch (Component 2: the worker)
+//!               -> GET /lay_report/graph (detail lookup)
+//!               -> GET /hen_productivity/graph (read current)
+//!               -> POST or PUT /hen_productivity/api (write)
+//!                 -> GET /hen_productivity/graph confirms the result
+//!
+//! `tick_connector` drives a real `ChangeHub` (`hub.publish` + a
+//! `try_recv()` drain loop) rather than calling `publish_to_merkql`
+//! directly off the tail — the fan-out hop is real infrastructure
+//! `examples/farm` depends on in production (see its `build()`), not
+//! just a detail of this test's plumbing. What's still NOT exercised here
+//! is `run_tails`/`run_merkql_sink`/`run_forever` themselves — the
+//! interval-loop wrappers around these same calls — because spawning them
+//! and sleeping would trade this test's determinism for a small amount of
+//! extra realism; those wrappers are covered in isolation by
+//! `meshql-changes`' own unit tests (`hub.rs`, `merkql_sink.rs`) and
+//! `worker.rs`'s `run_forever`... which itself has no dedicated test
+//! (it's a thin loop around `process_batch`, already covered here).
 //!
 //! Also proves idempotency: redelivering the same lay_report id onto the
 //! merkql topic must not double-count its eggs.
@@ -18,7 +33,7 @@ use farm_worker::config::WorkerConfig;
 use farm_worker::worker::process_batch;
 use merkql::broker::{Broker, BrokerConfig, BrokerRef};
 use merkql::consumer::{ConsumerConfig, OffsetReset};
-use meshql_changes::{publish_to_merkql, ChangeEvent, ChangeSource, SearcherTail};
+use meshql_changes::{publish_to_merkql, ChangeEvent, ChangeHub, ChangeSource, SearcherTail};
 use meshql_core::{
     GraphletteConfig, Repository, RestletteConfig, RootConfig, Searcher, ServerConfig,
 };
@@ -27,6 +42,7 @@ use serde_json::{json, Value};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 const LAY_REPORT_GRAPHQL: &str = r#"
 type Query {
@@ -207,13 +223,26 @@ async fn first_lay_report_id(base: &str, hen_id: &str) -> String {
         .to_string()
 }
 
-/// Drives one full tick of Component 1: poll the lay_report tail once, mirror
-/// whatever it finds onto merkql. Calling this directly (rather than
-/// spawning run_tails/run_merkql_sink and sleeping) keeps the test
-/// deterministic instead of racing a background poll interval.
-async fn tick_connector(tail: &SearcherTail, broker: &BrokerRef) {
+/// Drives one full tick of Component 1: poll the lay_report tail, fan the
+/// result out through a REAL `ChangeHub` (the same fan-out `run_tails`
+/// publishes onto and `run_merkql_sink` subscribes from in production —
+/// see `examples/farm::build()`), then drain that hub's receiver
+/// non-blockingly and mirror each event onto merkql. `hub.publish` is
+/// synchronous and `rx.try_recv()` never awaits, so calling this directly
+/// (rather than spawning `run_tails`/`run_merkql_sink` and sleeping) stays
+/// fully deterministic — no interval-loop timing to race — while still
+/// exercising the real hub, not just its two endpoints in isolation.
+async fn tick_connector(
+    tail: &SearcherTail,
+    hub: &ChangeHub,
+    rx: &mut broadcast::Receiver<ChangeEvent>,
+    broker: &BrokerRef,
+) {
     let events = tail.poll().await.unwrap();
     for ev in events {
+        hub.publish(ev);
+    }
+    while let Ok(ev) = rx.try_recv() {
         publish_to_merkql(broker, &ev).unwrap();
     }
 }
@@ -242,6 +271,11 @@ async fn full_pipeline_accumulates_across_reports_and_is_idempotent_under_redeli
         lay_repo.clone() as Arc<dyn Repository>,
     );
     let cfg = worker_cfg(&base);
+    // Matches examples/farm::build()'s own ChangeHub::new(256) capacity —
+    // ample for this test's handful of events, so try_recv() never races
+    // a lagged buffer.
+    let hub = ChangeHub::new(256);
+    let mut hub_rx = hub.subscribe();
 
     // timeOfDay is written but deliberately never asserted on below — two
     // of the three landed farm retrofits treat it as a morning/afternoon/
@@ -251,7 +285,7 @@ async fn full_pipeline_accumulates_across_reports_and_is_idempotent_under_redeli
 
     // --- First report ---
     post_lay_report(&base, "hen-1", 3, "morning").await;
-    tick_connector(&tail, &broker).await;
+    tick_connector(&tail, &hub, &mut hub_rx, &broker).await;
     let n = tick_worker(&broker, &cfg).await;
     assert_eq!(n, 1);
 
@@ -265,15 +299,21 @@ async fn full_pipeline_accumulates_across_reports_and_is_idempotent_under_redeli
 
     // --- Second report, same hen: must accumulate, must keep the same id ---
     post_lay_report(&base, "hen-1", 2, "evening").await;
-    tick_connector(&tail, &broker).await;
+    tick_connector(&tail, &hub, &mut hub_rx, &broker).await;
     let n = tick_worker(&broker, &cfg).await;
     assert_eq!(n, 1);
 
     let hp = read_hen_productivity(&base, "hen-1").await.unwrap();
     assert_eq!(hp["totalEggs"], json!(5));
     let second_laid_at = hp["lastLaidAt"].as_str().unwrap().to_string();
+    // Strict >, not >=: this must prove lastLaidAt actually ADVANCES, not
+    // merely that it doesn't regress — a >= check would also pass a buggy
+    // implementation that freezes lastLaidAt at its first-ever value. The
+    // two REST POSTs are separated by real network round-trips (an
+    // intervening tick_connector + tick_worker), so a millisecond tie
+    // isn't a realistic flake risk here.
     assert!(
-        second_laid_at >= first_laid_at,
+        second_laid_at > first_laid_at,
         "lastLaidAt must advance forward as later reports land"
     );
     assert_eq!(
