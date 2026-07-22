@@ -172,12 +172,12 @@ This is a breaking schema change (`date`→`timeOfDay`, `count`→`eggs`), so wr
       timeOfDay: String
   }
   ```
-- [ ] **Step 6: Update `main.rs`'s `lay_report_config`.** In `examples/farm/src/main.rs`, replace lines 71-77:
+- [ ] **Step 6: Update `main.rs`'s `lay_report_config`.** In `examples/farm/src/main.rs`, replace lines 71-77. Note this also fixes a pre-existing, unrelated bug while we're here: the current `getLayReportsByHen` template is missing the `payload.` prefix Mongo-backed payload-field queries need (same class of bug fixed for `hen_productivity` — see decision 3's cross-reference; `meshql-mongo`'s converters nest payload fields under a `payload` subdocument, so a bare `henId` filter silently matches nothing against real Mongo):
   ```rust
   let lay_report_config = RootConfig::builder()
       .singleton("getLayReport", r#"{"id": "{{id}}"}"#)
       .vector("getLayReports", "{}")
-      .vector("getLayReportsByHen", r#"{"henId": "{{id}}"}"#)
+      .vector("getLayReportsByHen", r#"{"payload.henId": "{{id}}"}"#)
       .singleton_resolver("hen", Some("henId"), "getHen", "/hen/graph")
       .build();
   ```
