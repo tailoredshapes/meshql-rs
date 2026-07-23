@@ -152,22 +152,22 @@ pub async fn build(
     // --- Root Configs ---
     let farm_config = RootConfig::builder()
         .singleton("getFarm", r#"{"id": "{{id}}"}"#)
-        .vector("getFarms", r#"{"name": "{{name}}"}"#)
+        .vector("getFarms", r#"{"payload.name": "{{name}}"}"#)
         .vector_resolver("coops", None, "getCoopsByFarm", "/coop/graph")
         .build();
 
     let coop_config = RootConfig::builder()
         .singleton("getCoop", r#"{"id": "{{id}}"}"#)
-        .vector("getCoops", r#"{"name": "{{name}}"}"#)
-        .vector("getCoopsByFarm", r#"{"farmId": "{{id}}"}"#)
+        .vector("getCoops", r#"{"payload.name": "{{name}}"}"#)
+        .vector("getCoopsByFarm", r#"{"payload.farmId": "{{id}}"}"#)
         .singleton_resolver("farm", Some("farmId"), "getFarm", "/farm/graph")
         .vector_resolver("hens", None, "getHensByCoop", "/hen/graph")
         .build();
 
     let hen_config = RootConfig::builder()
         .singleton("getHen", r#"{"id": "{{id}}"}"#)
-        .vector("getHens", r#"{"name": "{{name}}"}"#)
-        .vector("getHensByCoop", r#"{"coopId": "{{id}}"}"#)
+        .vector("getHens", r#"{"payload.name": "{{name}}"}"#)
+        .vector("getHensByCoop", r#"{"payload.coopId": "{{id}}"}"#)
         .singleton_resolver("coop", Some("coopId"), "getCoop", "/coop/graph")
         .vector_resolver(
             "layReports",
