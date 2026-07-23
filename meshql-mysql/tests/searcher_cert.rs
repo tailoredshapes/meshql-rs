@@ -1,10 +1,20 @@
 use meshql_core::testing as cert;
 use meshql_mysql::{MysqlRepository, MysqlSearcher};
+use std::time::Duration;
 use testcontainers::runners::AsyncRunner;
+use testcontainers::ImageExt;
 use testcontainers_modules::mysql::Mysql;
 
 async fn create_searcher() -> (MysqlSearcher, impl std::any::Any) {
-    let container = Mysql::default().start().await.unwrap();
+    // See repo_cert.rs's create_repo() for the full explanation: this file
+    // starts 14 MySQL containers concurrently (one per #[tokio::test]), and
+    // that contention can push MySQL's ~25-30s uncontended two-phase
+    // bootstrap past testcontainers' 60s default startup timeout.
+    let container = Mysql::default()
+        .with_startup_timeout(Duration::from_secs(180))
+        .start()
+        .await
+        .unwrap();
     let port = container.get_host_port_ipv4(3306).await.unwrap();
     // testcontainers-modules mysql defaults: root with empty password, db = "test"
     let url = format!("mysql://root:@127.0.0.1:{port}/test");
