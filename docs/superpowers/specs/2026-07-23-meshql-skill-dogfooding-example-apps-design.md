@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-23
 **Status:** Approved design, pre-implementation
-**Depends on:** `meshql-iron` installed and validated in `meshql-rs`, `meshql`, `meshobj` (`docs/superpowers/specs/2026-07-23-meshql-iron-skill-design.md`, complete). `meshql-patterns` and `merkql-architecture` currently exist only in `meshql-rs` — porting them to `meshql` and `meshobj` is a prerequisite of this project, not already-done groundwork (see below).
+**Depends on:** `meshql-iron` installed and validated in `meshql-rs`, `meshql`, `meshobj` (`docs/superpowers/specs/2026-07-23-meshql-iron-skill-design.md`, complete) — including its own previously-open item, honesty-field parity (`X-Meshql-Created-At`/`createdAt`) on the Java and TypeScript backends, which was independently confirmed present on both during that project (see that spec's implementation notes). `meshql-patterns` and `merkql-architecture` currently exist only in `meshql-rs` — porting them to `meshql` and `meshobj` is a prerequisite of this project, not already-done groundwork (see below).
 **Unblocks:** nothing downstream yet.
 
 ## Motivation
@@ -51,7 +51,7 @@ Order is a deliberate complexity ramp: prove the oversight loop mechanics on pur
 
 **1. Builder agent dispatch.** One fresh subagent per app, zero context from any prior app in this project or from this spec. The brief is short and deliberately does not name entities or architecture:
 
-> Build a [CMS / Twitter clone / asset management app / CRM] on meshql. Work in the `[meshql-rs / meshobj / meshql]` repo. Use merkql for the event log — [for the Rust apps: "you're already in Rust, so this is direct" / for TS and Java apps: "your app's main language is [TS/Java]; merkql itself is Rust-only, so the event meshlette's connector and worker will need to be a small Rust piece — check `merkql-architecture` if you're unsure how that composes"]. Build both backend and frontend, fully working end to end, with tests. Report what you built and why.
+> Build a [CMS / CRM / Twitter clone / asset management app] on meshql. Work in the `[meshql-rs / meshql-rs / meshobj / meshql]` repo. Use merkql for the event log — [for the Rust apps: "you're already in Rust, so this is direct" / for TS and Java apps: "your app's main language is [TS/Java]; merkql itself is Rust-only, so the event meshlette's connector and worker will need to be a small Rust piece — check `merkql-architecture` if you're unsure how that composes"]. Build both backend and frontend, fully working end to end, with tests. Report what you built and why.
 
 **2. "Fully formed" bar.** Not feature-complete software — a working demonstrator: backend entities appropriate to the domain (however many the agent judges necessary), full REST+GraphQL surfaces, at least one real event→worker→domain slice via merkql, a working frontend (vanilla per this project's standing frontend conventions, built using `meshql-iron`) demonstrating the core workflow end to end, and passing tests.
 
