@@ -10,10 +10,10 @@
 
 **Grounding facts verified before writing this plan** (do not re-verify — these are settled):
 - `X-Meshql-Created-At`/`X-Meshql-Deleted` REST headers and opt-in `createdAt` GraphQL field exist on **all three** backends' `main` branches: Rust (`meshql-restlette/src/routes.rs`), Java (`api/restlette/src/main/java/com/meshql/api/restlette/CrudHandler.java:269-272`), TypeScript (`core/restlette/src/crud.ts:54-58`). No hedging needed in `honesty.md` — just per-repo citations.
-- The event-sourced `lay_report`/`hen_productivity` shape (the pair `worked-example.md` is grounded in) is **not on any repo's `main`** — it exists on `merkql-worker-pipeline` (meshql-rs), `farm-retrofit-java` (meshql), `farm-retrofit-ts` (meshobj), none yet merged. Existing worktrees are already checked out at `meshql/.worktrees/farm-retrofit-java` and `meshobj/.worktrees/farm-retrofit-ts`; meshql-rs has no worktree for `merkql-worker-pipeline` (branch exists, not currently checked out anywhere).
+- The event-sourced `lay_report`/`hen_productivity` shape (the pair `worked-example.md` is grounded in) is **not on any repo's `main`** — it exists on `merkql-worker-pipeline` (meshql-rs), `farm-retrofit-java` (meshql), `farm-retrofit-ts` (meshobj), none yet merged. All three already have a worktree checked out: `meshql-rs/.worktrees/merkql-worker-pipeline`, `meshql/.worktrees/farm-retrofit-java`, `meshobj/.worktrees/farm-retrofit-ts` — use the existing worktree, do not attempt `git worktree add` for a branch that's already checked out elsewhere (Git refuses).
 - All three `examples/farm` deployments (once on their event-sourced branch) run on port `3033`.
 - The manifest schema/shape is identical across backends by construction (manifest-parity project). Rust's manifest uses entity-named queries (`getLayReportsByHen`); Java's retrofit branch uses the generic dialect (`getByHen`) instead — confirmed by direct inspection. This is real, useful variation for `manifest-discovery.md` to call out: **never hardcode query names, always read them from the manifest's SDL**.
-- TS's `farm-retrofit-ts` branch README (`examples/farm/README.md`) already documents `lay_report` as create-only with `PUT`/`DELETE` returning `403` for every caller, and `hen_productivity` writable only by a `worker`-role caller — real, load-bearing prior art for `event-vs-domain-mesh.md`'s detection heuristic.
+- **meshobj's** `farm-retrofit-ts` branch README (`examples/farm/README.md`) already documents `lay_report` as create-only with `PUT`/`DELETE` returning `403` for every caller, and `hen_productivity` writable only by a `worker`-role caller — real, load-bearing prior art for `event-vs-domain-mesh.md`'s detection heuristic. **This README doesn't exist in `meshql-rs`'s or `meshql`'s own `examples/farm`** (neither has a README documenting the split in this repo currently) — `event-vs-domain-mesh.md` quotes it as an illustrative example of what deployment docs for this pattern look like, attributed explicitly to the TS example, not presented as "this repo's own docs." Since the file installs byte-identical into all three repos, it must not claim the quote comes from "examples/farm's README" generically.
 - The skill installs to `.claude/skills/meshql-iron/` on each repo's primary checkout (`meshql-rs`, `meshql`, `meshobj` — their `main`-branch working directories, not the feature-branch worktrees), since that's the enduring location Claude Code loads skills from regardless of which branch is later checked out there.
 
 ---
@@ -264,10 +264,12 @@ This is a **recommended pattern, not a technology requirement** — nothing in m
 
 The manifest lists entities and their surfaces; it does not say "this one is event-mesh." That relationship lives inside the Worker's code, which isn't published anywhere. Determine it in this order:
 
-1. **Check the deployment's own documentation first.** A deployment built with this pattern usually says so in prose, because it isn't machine-readable elsewhere. Example, verbatim from `examples/farm`'s README on the branch that has this shape:
+1. **Check the deployment's own documentation first.** A deployment built with this pattern usually says so in prose, because it isn't machine-readable elsewhere. Example — the `meshobj` (TypeScript) implementation's `examples/farm` README documents its own `lay_report`/`hen_productivity` split this way (quoted here as an illustration of what to look for; this specific README doesn't exist verbatim in every implementation's copy of `examples/farm`):
 
    > `lay_report` (`POST /lay_report/api`) is a domain event, not a mutable record... It's create-only — `PUT`/`DELETE` against `/lay_report/api/:id` are rejected (`403`) for every caller.
    > `hen_productivity` is a read model folded from `lay_report` events... what's unusual is *who* writes to it: only a `worker`-role caller... can write to it.
+
+   If the deployment you're targeting has no such doc, that's not evidence the pattern isn't in use — move on to behavioral probing.
 
 2. **Failing that, probe behavior.** Attempt a `PUT` or `DELETE` against the entity's restlette (on a throwaway record, if you're not sure) — a `403` is a strong signal the entity is create-only by design, not by accident. Check whether its JSON Schema forbids fields an update would need to change.
 
@@ -651,13 +653,11 @@ This is prose an agent follows, not code with unit tests — reading it back to 
 
 - [ ] **Step 1: Stand up a live deployment with the event-sourced shape**
 
-Use whichever of the three backends is most convenient (they're equivalent for this test). For `meshql-rs`, from a checkout of `merkql-worker-pipeline` (check `main` first — if `lay_report`/`hen_productivity` have been merged since this plan was written, prefer `main`):
+Use whichever of the three backends is most convenient (they're equivalent for this test). For `meshql-rs`, use the worktree that's already checked out at `.worktrees/merkql-worker-pipeline` (check `main` first — if `lay_report`/`hen_productivity` have been merged since this plan was written, prefer `main` and skip the worktree entirely). `examples/farm` on this branch has no docker-compose or README of its own; start MongoDB directly and run the binary against it:
 
 ```bash
-cd /tank/repos/tailoredshapes/meshql-rs
-git worktree add /tmp/meshql-iron-validate merkql-worker-pipeline
-cd /tmp/meshql-iron-validate/examples/farm
-# start MongoDB per the crate's docker-compose / README, then:
+docker run --rm -d --name meshql-iron-validate-mongo -p 27017:27017 mongo:7
+cd /tank/repos/tailoredshapes/meshql-rs/.worktrees/merkql-worker-pipeline/examples/farm
 cargo run
 ```
 
@@ -682,8 +682,9 @@ This is not pass/fail against exact code — it's whether the skill was *suffici
 - [ ] **Step 4: Tear down**
 
 ```bash
-cd /tank/repos/tailoredshapes/meshql-rs
-git worktree remove /tmp/meshql-iron-validate
+docker stop meshql-iron-validate-mongo
 ```
+
+(The `.worktrees/merkql-worker-pipeline` worktree is pre-existing and shared with other work on this branch — do not remove it.)
 
 No commit for this task — it's a review checkpoint, not a code change. If Step 3 finds a gap and you fix a reference doc, that fix gets its own commit in the relevant repo, and Steps 1-3 should be re-run once against the fix.
