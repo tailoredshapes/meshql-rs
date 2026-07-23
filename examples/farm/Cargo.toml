@@ -3,6 +3,10 @@ name = "farm"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "farm"
+path = "src/lib.rs"
+
 [[bin]]
 name = "farm"
 path = "src/main.rs"
@@ -16,3 +20,10 @@ meshql-server = { path = "../../meshql-server" }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 anyhow = "1"
+axum = { workspace = true }
+
+[dev-dependencies]
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["mongo"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+uuid = { workspace = true }
