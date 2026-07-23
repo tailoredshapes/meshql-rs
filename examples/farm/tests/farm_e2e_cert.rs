@@ -30,7 +30,12 @@ async fn spawn_farm_server(mongo_uri: &str, db_name: &str) -> String {
     addr
 }
 
-async fn graphql(client: &reqwest::Client, addr: &str, path: &str, query: &str) -> serde_json::Value {
+async fn graphql(
+    client: &reqwest::Client,
+    addr: &str,
+    path: &str,
+    query: &str,
+) -> serde_json::Value {
     let resp = client
         .post(format!("{addr}{path}"))
         .json(&serde_json::json!({ "query": query }))

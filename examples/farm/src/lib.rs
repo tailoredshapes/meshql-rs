@@ -17,9 +17,8 @@ pub async fn build(mongo_uri: &str, db_name: &str) -> anyhow::Result<ServerConfi
         Arc::new(MongoRepository::new(mongo_uri, db_name, "coops", Arc::clone(&auth)).await?);
     let hen_repo =
         Arc::new(MongoRepository::new(mongo_uri, db_name, "hens", Arc::clone(&auth)).await?);
-    let lay_report_repo = Arc::new(
-        MongoRepository::new(mongo_uri, db_name, "lay_reports", Arc::clone(&auth)).await?,
-    );
+    let lay_report_repo =
+        Arc::new(MongoRepository::new(mongo_uri, db_name, "lay_reports", Arc::clone(&auth)).await?);
 
     // --- Searchers ---
     let farm_searcher: Arc<dyn meshql_core::Searcher> =
@@ -28,9 +27,8 @@ pub async fn build(mongo_uri: &str, db_name: &str) -> anyhow::Result<ServerConfi
         Arc::new(MongoSearcher::new(mongo_uri, db_name, "coops", Arc::clone(&auth)).await?);
     let hen_searcher: Arc<dyn meshql_core::Searcher> =
         Arc::new(MongoSearcher::new(mongo_uri, db_name, "hens", Arc::clone(&auth)).await?);
-    let lay_report_searcher: Arc<dyn meshql_core::Searcher> = Arc::new(
-        MongoSearcher::new(mongo_uri, db_name, "lay_reports", Arc::clone(&auth)).await?,
-    );
+    let lay_report_searcher: Arc<dyn meshql_core::Searcher> =
+        Arc::new(MongoSearcher::new(mongo_uri, db_name, "lay_reports", Arc::clone(&auth)).await?);
 
     // --- Root Configs ---
     let farm_config = RootConfig::builder()
