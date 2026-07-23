@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-23
 **Status:** Approved design, pre-implementation
-**Depends on:** nothing new — consumes work already merged and pushed: `meshql-changes` (manifest + honesty, `meshql-rs` main) and the manifest port to Java/TS (`docs/superpowers/plans/2026-07-22-manifest-parity.md`, landed on the `farm-retrofit-java`/`farm-retrofit-ts` branches, not yet pushed by the user as of this writing)
+**Depends on:** `meshql-changes` (manifest + honesty mechanism) is merged and pushed on `meshql-rs` main. But `examples/farm`'s `hen_productivity` entity — the event/domain pair `worked-example.md` and the Validation acceptance test are grounded in — is **not** on `meshql-rs` main; it exists on the already-pushed `merkql-worker-pipeline` branch (which has `farm-retrofit-rust` merged into it, so it has the full event-sourced farm shape: `lay_report` create-only + `hen_productivity` worker-maintained projection + the fold-worker). Build and validate this project against that branch, not main, unless it's been merged by the time implementation starts. The manifest port to Java/TS (`docs/superpowers/plans/2026-07-22-manifest-parity.md`) similarly landed on the `farm-retrofit-java`/`farm-retrofit-ts` branches, not yet pushed by the user as of this writing — the same caveat applies to those two repos' copies of the skill.
 **Unblocks:** nothing downstream yet — this is the terminal piece of the "FE client" thread opened by `docs/superpowers/specs/2026-07-07-meshql-changes-design.md`
 
 ## Motivation
@@ -57,6 +57,8 @@ graph TD
     DR -.serves.-> DG
     DG -->|"read: query, at: timestamp"| User
 ```
+
+**"Meshlette"** — the term the rule list below uses throughout, not labeled on the diagram: one entity's Restlette+Graphlette pair over a shared store (e.g. `coop`'s restlette and graphlette together are the `coop` meshlette). "Event mesh" and "domain mesh" each contain several meshlettes. `event-vs-domain-mesh.md` must define this explicitly, in its own prose, before presenting the rule list — an agent with no other context won't otherwise know what a rule like "Workers SHOULD be one per meshlette" is even scoped to.
 
 Rule list, carried verbatim into `references/event-vs-domain-mesh.md` (not paraphrased — precision matters here):
 
@@ -116,7 +118,7 @@ Each installation has the identical structure and (barring trivial per-repo path
 
 ### `SKILL.md`
 
-The entry point and the only thing loaded by default. Short trigger description — loads when the task is building a frontend or API client against a meshql deployment. A condensed version of the core principle (write via the event restlette, read via the domain graphlette, honesty timestamps tell you freshness) short enough to act on without opening a reference doc for the common case. A decision guide pointing into `references/` for depth, in the same style as `meshql-patterns`' own decision guide (e.g. "Discovering what a deployment exposes → read `manifest-discovery.md`. Distinguishing event vs. domain entities → read `event-vs-domain-mesh.md`.").
+The entry point and the only thing loaded by default. Requires the same YAML frontmatter `meshql-patterns/SKILL.md` uses (`name`/`description`) — without it the skill won't auto-load at all, since that's what Claude Code's skill discovery reads to decide when to surface it. Short trigger description — loads when the task is building a frontend or API client against a meshql deployment. A condensed version of the core principle (write via the event restlette, read via the domain graphlette, honesty timestamps tell you freshness) short enough to act on without opening a reference doc for the common case. A decision guide pointing into `references/` for depth, in the same style as `meshql-patterns`' own decision guide (e.g. "Discovering what a deployment exposes → read `manifest-discovery.md`. Distinguishing event vs. domain entities → read `event-vs-domain-mesh.md`.").
 
 ### `references/manifest-discovery.md`
 
@@ -134,7 +136,7 @@ And the explicit caveat that this whole section only applies when the pattern is
 
 ### `references/honesty.md`
 
-The mechanics of `X-Meshql-Created-At` (REST, on create/read/update responses) and `createdAt` (GraphQL, opt-in per type — only selectable if the schema declares it). Two cases:
+The mechanics of `X-Meshql-Created-At` (REST, on create/read/update responses) and `createdAt` (GraphQL, opt-in per type — only selectable if the schema declares it). **These fields are confirmed to exist on `meshql-rs`; presence on the Java (`meshql`) and TypeScript (`meshobj`) backends has not been independently verified as part of this design** — check before writing this doc's Java/TS copies, and if either backend lacks them, that installation's `honesty.md` needs to say so rather than describe a mechanism that isn't there. Two cases, once the fields are confirmed present:
 
 - **Same-entity read-your-writes** (wrote a `coop`, reading that `coop` back): a clean, mechanical comparison — if the read's `createdAt` is `>=` the write's `X-Meshql-Created-At`, the read reflects the write.
 - **Cross-entity/projection freshness** (wrote `lay_report`, care about `hen_productivity`): no direct timestamp comparison is possible — the write and the projection are different records entirely, and the manifest has no way to encode that one feeds the other (same gap as above, same reason: that relationship lives inside the worker, not in anything published). Guidance here is a pragmatic heuristic, not a mechanism: show a pending/"recording..." affordance after the write, refetch the projection, and expect it to resolve within a read or two — the common case is a worker that processes faster than a page refresh, not a system that needs sophisticated retry/backoff logic. This doc points at the user's existing global frontend conventions (pending state, let the user refresh, never silently render stale data) rather than restating them.
@@ -145,11 +147,11 @@ A single, concrete, real-code walkthrough grounded in `examples/farm` — the on
 
 ## Validation
 
-This is prose an agent follows, not code with unit tests — reading it back to check it "sounds right" isn't a meaningful test of whether it actually works for someone with no other context. The acceptance test: dispatch a fresh agent with **zero context beyond the skill itself**, pointed at a live, running `examples/farm` deployment (Rust's — already pushed and runnable without any push action from the user), with a task like "build a minimal page that lists hens and lets you submit a lay report, showing when the count updates." Review the result for whether it actually respects the event/domain split and handles honesty timestamps sensibly — not whether the agent could paraphrase the skill back, but whether the skill alone was sufficient to produce a correct frontend.
+This is prose an agent follows, not code with unit tests — reading it back to check it "sounds right" isn't a meaningful test of whether it actually works for someone with no other context. The acceptance test: dispatch a fresh agent with **zero context beyond the skill itself**, pointed at a live, running `examples/farm` deployment from the `merkql-worker-pipeline` branch (see Depends On — this is the branch with the full event-sourced shape; check whether it's since been merged to main and prefer main if so), with a task like "build a minimal page that lists hens and lets you submit a lay report, showing when the count updates." Review the result for whether it actually respects the event/domain split and handles honesty timestamps sensibly — not whether the agent could paraphrase the skill back, but whether the skill alone was sufficient to produce a correct frontend.
 
 ## Summary of what this design intentionally leaves open
 
 - **SSE-driven invalidation** as a future, separate module, if it's ever built.
 - **Extending the manifest schema** to explicitly label event-mesh vs. domain-mesh entities, which would remove the detection-heuristic section of `event-vs-domain-mesh.md` entirely if it ever happens — deliberately not pursued now because the split is a convention, not a technology requirement, and baking it into the schema would make it look like one.
 - **A runnable companion app** alongside the skill (rather than just a worked-example doc) — the natural upgrade if the worked-example doc alone turns out not to be enough to reliably produce correct frontends during validation.
-- **Honesty parity confirmation on Java/TS** — this design assumes the REST/GraphQL honesty fields exist identically on all three backends (matching the manifest-parity precedent), but that was not independently re-verified while writing this spec; worth a quick check before or during implementation.
+- **Honesty parity confirmation on Java/TS** — see the caveat now stated directly in the `honesty.md` section above, not just here: whether `X-Meshql-Created-At`/`createdAt` actually exist on the Java and TypeScript backends has not been independently verified as part of this design (no prior project ported them the way `2026-07-22-manifest-parity-design.md` ported the manifest — that doc covers manifest porting only, not honesty). Confirm before or during implementation, per repo, before writing that repo's `honesty.md`.
