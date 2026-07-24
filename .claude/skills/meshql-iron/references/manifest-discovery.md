@@ -59,3 +59,7 @@ Paths in the manifest are already absolute (`/coop/graph`, `/coop/api`) — use 
 ## Stability
 
 This doc is stable because the manifest schema itself (`schemas/manifest.schema.json`, `"meshql": 1` in every document) is stable and versioned. A deployment that changes its entity shapes changes what the manifest reports — it doesn't require a different fetching strategy on your end.
+
+## When you're building both halves yourself
+
+Everything above assumes you're writing a frontend against a deployment you didn't design — that's when hardcoding a query name or field is dangerous, because you're guessing at someone else's contract. If you're authoring the backend and frontend in the same task, you already know the schema you just wrote; hardcoding the query names and payload fields you yourself defined is fine and doesn't need a runtime `/manifest` fetch to justify it. Still generate and commit the manifest (other consumers, and your own future self, will need it), and don't let the two drift — but the frontend code itself doesn't have to rediscover what its own author already knows.
