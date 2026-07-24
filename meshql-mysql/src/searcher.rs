@@ -73,6 +73,11 @@ impl MysqlSearcher {
             String::new()
         };
 
+        // Canonical result ordering (meshql_core::envelope_order): the resolved
+        // version's created_at, then the envelope id. Must precede LIMIT so the
+        // limit truncates a meaningful prefix. `COLLATE utf8mb4_bin` forces byte
+        // ordering — MySQL's default collation is case-insensitive and would
+        // disagree with the other adapters.
         let sql = format!(
             r#"WITH latest AS (
                 SELECT id, created_at_ms, deleted, authorized_tokens, payload,
@@ -82,6 +87,7 @@ impl MysqlSearcher {
             SELECT id, created_at_ms, deleted, authorized_tokens, payload
             FROM latest WHERE rn = 1 AND deleted = 0
             {dynamic_where}
+            ORDER BY created_at_ms ASC, id COLLATE utf8mb4_bin ASC
             {limit_clause}"#
         );
 

@@ -126,20 +126,21 @@ FROM latest WHERE rn = 1 AND deleted = 0"
         let wildcard = creds.iter().any(|t| t == "*");
         let sql_limit = if wildcard { limit } else { None };
 
-        let sql = if where_part.clause.is_empty() {
-            if let Some(lim) = sql_limit {
-                format!("{} LIMIT {}", base_sql, lim)
-            } else {
-                base_sql
-            }
+        let mut sql = if where_part.clause.is_empty() {
+            base_sql
         } else {
-            let with_where = format!("{} AND {}", base_sql, where_part.clause);
-            if let Some(lim) = sql_limit {
-                format!("{} LIMIT {}", with_where, lim)
-            } else {
-                with_where
-            }
+            format!("{} AND {}", base_sql, where_part.clause)
         };
+
+        // Canonical result ordering (meshql_core::envelope_order): the resolved
+        // version's created_at, then the envelope id. Must precede LIMIT so the
+        // limit truncates a meaningful prefix. SQLite's default TEXT collation
+        // is BINARY, which matches the byte ordering the other adapters use.
+        sql.push_str(" ORDER BY created_at_ms ASC, id ASC");
+
+        if let Some(lim) = sql_limit {
+            sql = format!("{} LIMIT {}", sql, lim);
+        }
 
         let mut q = sqlx::query(&sql).bind(cutoff_ms);
         for val in &where_part.values {

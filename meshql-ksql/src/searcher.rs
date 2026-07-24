@@ -1,6 +1,10 @@
 use async_trait::async_trait;
 use handlebars::Handlebars;
-use meshql_core::{envelope_visible_to, MeshqlError, Result, Searcher, Stash};
+use meshql_core::{
+    envelope_order, envelope_visible_to, Envelope, MeshqlError, Result, Searcher, Stash,
+};
+use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, warn};
 
@@ -37,6 +41,28 @@ impl KsqlSearcher {
             serde_json::from_str(&rendered).map_err(|e| MeshqlError::Parse(e.to_string()))?;
         Ok(query_obj)
     }
+
+    /// Parse pull-query rows into the visible envelopes, in canonical result
+    /// order (`meshql_core::envelope_order`).
+    ///
+    /// ksqlDB pull queries accept no ORDER BY, and Kafka gives no ordering
+    /// across partitions, so the sort has to happen client-side. Rows that fail
+    /// to parse are dropped with a warning, as before.
+    fn ordered_visible(rows: &[HashMap<String, Value>], creds: &[String]) -> Vec<Envelope> {
+        let mut envelopes: Vec<Envelope> = rows
+            .iter()
+            .filter_map(|row| match row_to_envelope(row) {
+                Ok(env) if !env.deleted && envelope_visible_to(&env, creds) => Some(env),
+                Ok(_) => None,
+                Err(e) => {
+                    warn!("Failed to parse row: {}", e);
+                    None
+                }
+            })
+            .collect();
+        envelopes.sort_by(envelope_order);
+        envelopes
+    }
 }
 
 #[async_trait]
@@ -67,16 +93,11 @@ impl Searcher for KsqlSearcher {
         debug!("KsqlSearcher.find() - Query: {}", query);
 
         match self.client.pull_query(&query).await {
-            Ok(rows) => Ok(rows.iter().find_map(|row| match row_to_envelope(row) {
-                Ok(env) if !env.deleted && envelope_visible_to(&env, creds) => {
-                    Some(envelope_to_stash(&env))
-                }
-                Ok(_) => None,
-                Err(e) => {
-                    warn!("Failed to parse row: {}", e);
-                    None
-                }
-            })),
+            // First in canonical result order, not first in whatever order
+            // ksqlDB happened to return the rows.
+            Ok(rows) => Ok(Self::ordered_visible(&rows, creds)
+                .first()
+                .map(envelope_to_stash)),
             Err(e) => {
                 warn!("KsqlSearcher.find() query failed: {}", e);
                 Ok(None)
@@ -112,22 +133,14 @@ impl Searcher for KsqlSearcher {
 
         match self.client.pull_query(&query).await {
             Ok(rows) => {
-                let mut results: Vec<Stash> = rows
+                let mut results: Vec<Stash> = Self::ordered_visible(&rows, creds)
                     .iter()
-                    .filter_map(|row| match row_to_envelope(row) {
-                        Ok(env) if !env.deleted && envelope_visible_to(&env, creds) => {
-                            Some(envelope_to_stash(&env))
-                        }
-                        Ok(_) => None,
-                        Err(e) => {
-                            warn!("Failed to parse row: {}", e);
-                            None
-                        }
-                    })
+                    .map(envelope_to_stash)
                     .collect();
 
-                // limit applies after visibility filtering, so restricted rows
-                // don't consume slots a visible row should fill
+                // limit applies after ordering and after visibility filtering,
+                // so it truncates a meaningful prefix and restricted rows don't
+                // consume slots a visible row should fill
                 if let Some(lim) = limit {
                     results.truncate(lim);
                 }

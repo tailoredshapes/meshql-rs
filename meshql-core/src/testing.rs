@@ -1,4 +1,5 @@
 use crate::{Envelope, Repository, Searcher, Stash};
+use chrono::{DateTime, Utc};
 use serde_json::json;
 
 const STAR: &str = "*";
@@ -811,6 +812,284 @@ pub async fn test_repository_auth_latest_version_controls_visibility(repo: &dyn 
     assert!(
         ids_of(&listed).contains(&REPO_AUTH_VERSIONED),
         "list must return the latest version to 'bob'"
+    );
+}
+
+// ---- Searcher Ordering Certification Tests ----
+//
+// These certify the canonical result ordering documented on
+// `meshql_core::envelope_order`: a result set comes back in the insertion order
+// of the envelopes it contains — the *resolved* (latest-at-or-before-`at`)
+// version's `created_at`, then the envelope `id` to break millisecond ties —
+// and `limit` truncates that order, so it returns a meaningful prefix rather
+// than an arbitrary subset.
+//
+// The rest of the searcher cert suite asserts only set membership and result
+// counts, so an adapter returning rows in arbitrary order passes it — these
+// certs close that gap. They also pin cross-adapter equivalence: the same data
+// returns the same sequence from every adapter, including the millisecond-tie
+// case, which is the reason the `id` tiebreaker is applied uniformly instead of
+// deferring to each backend's own sequence (log offset / rowid).
+
+const ORDER_TYPE: &str = "ordering";
+const ORDER_TIE_TYPE: &str = "orderingTie";
+const ORDER_COUNT: usize = 12;
+/// Sorts before every `ord-NN` id, so an adapter ordering by id alone — or by
+/// the *first* version's position — puts it first instead of last.
+const ORDER_MULTI: &str = "aaa-multi";
+const ORDER_STEP_MS: i64 = 10_000;
+/// 2024-01-01T00:00:00Z. The seeded timeline is absolute rather than relative
+/// to "now" so a cert can address a specific point in it by arithmetic, without
+/// depending on the adapter echoing `createdAt` back in its results (merksql
+/// does not) or on how fast the seeding loop ran.
+const ORDER_BASE_MS: i64 = 1_704_067_200_000;
+
+fn order_at(offset_ms: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp_millis(ORDER_BASE_MS + offset_ms).expect("valid seed timestamp")
+}
+
+fn order_query() -> String {
+    format!(r#"{{"payload.type": "{ORDER_TYPE}"}}"#)
+}
+
+fn ordered_ids(results: &[Stash]) -> Vec<String> {
+    results
+        .iter()
+        .map(|s| {
+            s.get("id")
+                .and_then(|v| v.as_str())
+                .expect("every result carries its envelope id")
+                .to_string()
+        })
+        .collect()
+}
+
+/// The full expected sequence for `ORDER_TYPE`: the twelve single-version
+/// envelopes in insertion order, then the multi-version envelope — whose
+/// *latest* version was written after all of them.
+fn expected_order() -> Vec<String> {
+    let mut ids: Vec<String> = (0..ORDER_COUNT).map(|i| format!("ord-{i:02}")).collect();
+    ids.push(ORDER_MULTI.to_string());
+    ids
+}
+
+fn ordering_envelope(id: &str, name: &str, item_type: &str, created_at: DateTime<Utc>) -> Envelope {
+    let mut payload = Stash::new();
+    payload.insert("name".to_string(), json!(name));
+    payload.insert("type".to_string(), json!(item_type));
+    Envelope {
+        id: id.to_string(),
+        payload,
+        created_at,
+        deleted: false,
+        authorized_tokens: star(),
+    }
+}
+
+pub async fn seed_searcher_ordering_data(repo: &dyn Repository) {
+    for i in 0..ORDER_COUNT {
+        let id = format!("ord-{i:02}");
+        let at = order_at(ORDER_STEP_MS * i as i64);
+        repo.create(ordering_envelope(&id, &id, ORDER_TYPE, at), &star())
+            .await
+            .unwrap();
+    }
+
+    // A multi-version record. v1 lands between ord-00 and ord-01; v2 supersedes
+    // it after the whole run. Reading now must place it last (v2's position);
+    // reading as of a cutoff before v2 must place it second (v1's position).
+    let v1_at = order_at(ORDER_STEP_MS / 2);
+    let v2_at = order_at(ORDER_STEP_MS * (ORDER_COUNT as i64 + 1));
+    repo.create(
+        ordering_envelope(ORDER_MULTI, "multi-v1", ORDER_TYPE, v1_at),
+        &star(),
+    )
+    .await
+    .unwrap();
+    repo.create(
+        ordering_envelope(ORDER_MULTI, "multi-v2", ORDER_TYPE, v2_at),
+        &star(),
+    )
+    .await
+    .unwrap();
+
+    // Two envelopes sharing an identical created_at, written in reverse id
+    // order. `created_at` is millisecond-precision, so this is not a contrived
+    // case — concurrent writers collide. Every adapter must resolve the tie the
+    // same way: by id, regardless of which was physically written first.
+    let tie_at = order_at(1_000);
+    for id in ["tie-b", "tie-a"] {
+        repo.create(ordering_envelope(id, id, ORDER_TIE_TYPE, tie_at), &star())
+            .await
+            .unwrap();
+    }
+}
+
+pub async fn test_searcher_ordering_limit_truncates_in_insertion_order(searcher: &dyn Searcher) {
+    let now = Utc::now().timestamp_millis();
+    let expected = expected_order();
+
+    let all = searcher
+        .find_all(&order_query(), &Stash::new(), &star(), now)
+        .await
+        .unwrap();
+    assert_eq!(
+        ordered_ids(&all),
+        expected,
+        "an unlimited result set must come back in insertion order"
+    );
+
+    // The limit must select a prefix of that order — not an arbitrary subset of
+    // the same size.
+    for lim in [1usize, 5, ORDER_COUNT] {
+        let mut args = Stash::new();
+        args.insert("limit".to_string(), json!(lim));
+        let limited = searcher
+            .find_all(&order_query(), &args, &star(), now)
+            .await
+            .unwrap();
+        assert_eq!(
+            ordered_ids(&limited),
+            expected[..lim],
+            "limit {lim} must return the first {lim} envelopes in insertion order"
+        );
+    }
+
+    // find() is the same order, taken one deep.
+    let first = searcher
+        .find(&order_query(), &Stash::new(), &star(), now)
+        .await
+        .unwrap()
+        .expect("find must locate the first envelope in insertion order");
+    assert_eq!(
+        first.get("id").unwrap(),
+        &json!(expected[0]),
+        "find must return the first envelope in insertion order"
+    );
+}
+
+pub async fn test_searcher_ordering_is_stable_across_repeated_queries(searcher: &dyn Searcher) {
+    let now = Utc::now().timestamp_millis();
+    let mut args = Stash::new();
+    args.insert("limit".to_string(), json!(5));
+
+    let mut seen: Vec<Vec<String>> = Vec::new();
+    for _ in 0..4 {
+        let results = searcher
+            .find_all(&order_query(), &args, &star(), now)
+            .await
+            .unwrap();
+        seen.push(ordered_ids(&results));
+    }
+
+    for (i, run) in seen.iter().enumerate().skip(1) {
+        assert_eq!(
+            run, &seen[0],
+            "repeat {i} of an identical query returned a different order"
+        );
+    }
+    assert_eq!(
+        seen[0],
+        expected_order()[..5],
+        "the stable order must be the canonical one"
+    );
+}
+
+pub async fn test_searcher_ordering_uses_resolved_version_position(searcher: &dyn Searcher) {
+    let now = Utc::now().timestamp_millis();
+
+    let all = searcher
+        .find_all(&order_query(), &Stash::new(), &star(), now)
+        .await
+        .unwrap();
+    let ids = ordered_ids(&all);
+    assert_eq!(
+        ids.last().map(String::as_str),
+        Some(ORDER_MULTI),
+        "a record's position is its *latest* version's position, not its first"
+    );
+    assert_eq!(
+        all.last().unwrap().get("name").unwrap(),
+        &json!("multi-v2"),
+        "the resolved version must be the latest one"
+    );
+}
+
+/// The as-of half of the cert above: ordering follows the version resolved at
+/// the `at` cutoff, so a record moves within the result set as the cutoff moves.
+///
+/// Only for adapters whose Searcher honours `at`. `KsqlSearcher` reads a ksqlDB
+/// TABLE, which materializes the latest version per key only, so it ignores the
+/// cutoff and cannot satisfy this.
+pub async fn test_searcher_ordering_as_of_uses_version_resolved_at_cutoff(searcher: &dyn Searcher) {
+    // Read as of ord-05's own timestamp. The multi-version record resolves to
+    // v1, which was written near the start — so it must move back to second
+    // place, and carry v1's payload.
+    let cutoff = ORDER_BASE_MS + ORDER_STEP_MS * 5;
+
+    let as_of = searcher
+        .find_all(&order_query(), &Stash::new(), &star(), cutoff)
+        .await
+        .unwrap();
+    let expected_as_of: Vec<String> = vec![
+        "ord-00".to_string(),
+        ORDER_MULTI.to_string(),
+        "ord-01".to_string(),
+        "ord-02".to_string(),
+        "ord-03".to_string(),
+        "ord-04".to_string(),
+        "ord-05".to_string(),
+    ];
+    assert_eq!(
+        ordered_ids(&as_of),
+        expected_as_of,
+        "as-of ordering must use the version resolved at the cutoff"
+    );
+    assert_eq!(
+        as_of[1].get("name").unwrap(),
+        &json!("multi-v1"),
+        "the version resolved at the cutoff must be v1"
+    );
+
+    // ...and the limit still truncates that order.
+    let mut args = Stash::new();
+    args.insert("limit".to_string(), json!(2));
+    let limited = searcher
+        .find_all(&order_query(), &args, &star(), cutoff)
+        .await
+        .unwrap();
+    assert_eq!(
+        ordered_ids(&limited),
+        expected_as_of[..2],
+        "limit must truncate the as-of order too"
+    );
+}
+
+pub async fn test_searcher_ordering_breaks_millisecond_ties_by_id(searcher: &dyn Searcher) {
+    let now = Utc::now().timestamp_millis();
+    let query = format!(r#"{{"payload.type": "{ORDER_TIE_TYPE}"}}"#);
+
+    let results = searcher
+        .find_all(&query, &Stash::new(), &star(), now)
+        .await
+        .unwrap();
+    assert_eq!(
+        ordered_ids(&results),
+        vec!["tie-a".to_string(), "tie-b".to_string()],
+        "envelopes sharing a created_at millisecond order by id — uniformly on \
+         every adapter, so two adapters holding the same data agree"
+    );
+
+    let mut args = Stash::new();
+    args.insert("limit".to_string(), json!(1));
+    let limited = searcher
+        .find_all(&query, &args, &star(), now)
+        .await
+        .unwrap();
+    assert_eq!(
+        ordered_ids(&limited),
+        vec!["tie-a".to_string()],
+        "a limit over tied envelopes must still be deterministic"
     );
 }
 

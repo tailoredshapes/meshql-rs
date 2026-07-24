@@ -84,6 +84,13 @@ impl MongoSearcher {
             ] } });
         }
 
+        // Canonical result ordering (meshql_core::envelope_order): the resolved
+        // version's createdAt, then the envelope id. $group emits its buckets in
+        // an unspecified order, so without this stage the result set — and any
+        // $limit applied to it — is arbitrary. Mongo compares strings by byte,
+        // matching the other adapters.
+        pipeline.push(doc! { "$sort": { "createdAt": 1, "id": 1 } });
+
         if let Some(l) = limit {
             pipeline.push(doc! { "$limit": l });
         }

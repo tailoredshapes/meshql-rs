@@ -18,6 +18,7 @@ async fn create_searcher() -> (SqliteRepository, SqliteSearcher) {
     let searcher = SqliteSearcher::new_with_pool(pool).await.unwrap();
     cert::seed_searcher_data(&repo).await;
     cert::seed_searcher_auth_data(&repo).await;
+    cert::seed_searcher_ordering_data(&repo).await;
     (repo, searcher)
 }
 
@@ -103,4 +104,34 @@ async fn auth_star_token_visible_to_all() {
 async fn auth_latest_version_controls_visibility() {
     let (_repo, searcher) = create_searcher().await;
     cert::test_searcher_auth_latest_version_controls_visibility(&searcher).await;
+}
+
+#[tokio::test]
+async fn ordering_limit_truncates_in_insertion_order() {
+    let (_repo, searcher) = create_searcher().await;
+    cert::test_searcher_ordering_limit_truncates_in_insertion_order(&searcher).await;
+}
+
+#[tokio::test]
+async fn ordering_is_stable_across_repeated_queries() {
+    let (_repo, searcher) = create_searcher().await;
+    cert::test_searcher_ordering_is_stable_across_repeated_queries(&searcher).await;
+}
+
+#[tokio::test]
+async fn ordering_uses_resolved_version_position() {
+    let (_repo, searcher) = create_searcher().await;
+    cert::test_searcher_ordering_uses_resolved_version_position(&searcher).await;
+}
+
+#[tokio::test]
+async fn ordering_breaks_millisecond_ties_by_id() {
+    let (_repo, searcher) = create_searcher().await;
+    cert::test_searcher_ordering_breaks_millisecond_ties_by_id(&searcher).await;
+}
+
+#[tokio::test]
+async fn ordering_as_of_uses_version_resolved_at_cutoff() {
+    let (_repo, searcher) = create_searcher().await;
+    cert::test_searcher_ordering_as_of_uses_version_resolved_at_cutoff(&searcher).await;
 }

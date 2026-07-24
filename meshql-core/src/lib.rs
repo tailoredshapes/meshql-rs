@@ -38,6 +38,36 @@ impl Envelope {
     }
 }
 
+/// Canonical ordering of a result set (architecture invariant: a result set is
+/// returned in the insertion order of the envelopes it contains, so a `limit`
+/// truncates a meaningful prefix rather than an arbitrary subset).
+///
+/// meshql is append-only: there is no edit, only a new `Envelope` version
+/// sharing a canonical `id`. A read resolves each `id` to the latest version
+/// at-or-before the `at` cutoff, and *that* version's position in the log is
+/// the record's position in the result set. So the sort key is the **resolved**
+/// version's `created_at`, not the id's first appearance.
+///
+/// `created_at` is millisecond-precision, so two envelopes can genuinely tie.
+/// The tiebreaker is the envelope `id`, byte-ordered. Every adapter applies the
+/// same two keys — including the ones that *do* have a monotonic sequence
+/// (merkql log offset, SQLite `rowid`). Using the sequence as the primary sort
+/// key would be truer to physical insertion order on those two adapters, but it
+/// would make them disagree with Postgres/MySQL/Mongo/ksql — which have no such
+/// sequence — whenever two envelopes land in the same millisecond. Cross-adapter
+/// equivalence is worth more than sub-millisecond fidelity, so the sequence is
+/// used only where it already was: to decide *which version* of an id resolves
+/// when two versions share a millisecond.
+///
+/// The key is a total order over a result set, because a result set holds at
+/// most one resolved version per `id`.
+pub fn envelope_order(a: &Envelope, b: &Envelope) -> std::cmp::Ordering {
+    a.created_at
+        .timestamp_millis()
+        .cmp(&b.created_at.timestamp_millis())
+        .then_with(|| a.id.cmp(&b.id))
+}
+
 #[async_trait::async_trait]
 pub trait Repository: Send + Sync {
     async fn create(&self, envelope: Envelope, tokens: &[String]) -> Result<Envelope>;

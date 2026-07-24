@@ -68,6 +68,9 @@ impl MerkqlSearcher {
                     continue;
                 }
 
+                // `>=` keeps the *last* record in log order when two versions
+                // of an id share a millisecond — merkql's log offset is the
+                // sequence that breaks the version-resolution tie.
                 let entry = by_id
                     .entry(env.id.clone())
                     .or_insert_with(|| (env_ms, env.clone()));
@@ -78,7 +81,7 @@ impl MerkqlSearcher {
         }
 
         // Convert to (Envelope, full JSON for matching) — filter deleted
-        let results: Vec<(Envelope, serde_json::Value)> = by_id
+        let mut results: Vec<(Envelope, serde_json::Value)> = by_id
             .into_values()
             .filter(|(_, env)| !env.deleted)
             .map(|(_, env)| {
@@ -90,6 +93,11 @@ impl MerkqlSearcher {
                 (env, record_json)
             })
             .collect();
+
+        // `by_id` is a HashMap, so its iteration order is arbitrary and varies
+        // run to run. Restore the canonical result order before any caller can
+        // apply a limit to it.
+        results.sort_by(|(a, _), (b, _)| meshql_core::envelope_order(a, b));
 
         Ok(results)
     }
