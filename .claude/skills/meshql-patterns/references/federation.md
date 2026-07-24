@@ -37,6 +37,8 @@ Reads `farmId` from the parent Coop object, then invokes `getFarm` on `/farm/gra
 
 `foreign_key: None` means "pass this object's own `id`". The target graphlette must define `getCoopsByFarm` with template `{"farmId": "{{id}}"}` — **the relation query lives on the child entity's RootConfig**, the resolver on the parent's. Forgetting one half is the most common federation bug.
 
+**The relation query's GraphQL argument must be named `id`, whatever the field it filters on.** Resolvers pass the parent's key under the literal argument name `id`, so the child's `Query` field has to declare `getCoopsByFarm(id: ID, at: Float)` — *not* `getCoopsByFarm(farmId: ID, at: Float)`, however much more natural that reads. Get this wrong and there's no error: the resolver passes `id`, the query binds nothing, the template renders empty, and the field silently resolves to `null`/`[]` forever. The Handlebars template still refers to the *payload* field being matched (`{"farmId": "{{id}}"}` — `farmId` is the stored field, `{{id}}` is the incoming argument), which is exactly why the mismatch is easy to introduce and hard to spot.
+
 ## Internal vs HTTP resolution
 
 - `singleton_resolver` / `vector_resolver` take a target that can be a local path (`"/coop/graph"`) or a full URL to a remote meshql service. `meshql-server::build_app*` registers every local graphlette's searcher in a `ResolverRegistry` keyed by path, so local-path resolution happens **in-process** — no HTTP hop.

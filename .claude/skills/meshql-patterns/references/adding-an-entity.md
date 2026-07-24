@@ -46,6 +46,10 @@ Rules:
 }
 ```
 
+**`schema_json` is published, not enforced — wire validation yourself.** `build_restlette_router*` carries this schema into the manifest (so clients can discover the write contract) but does **not** validate incoming payloads against it. A `POST` with missing required fields or wrong types is accepted as-is. Two independent product builds have now discovered this the same way — by writing a test asserting a bad payload gets rejected, and watching it come back `201`.
+
+If writes need to actually be validated (they almost always do), use `build_restlette_router_ext`'s `validator` extension point with a compiled JSON Schema validator (the `jsonschema` crate), pointed at the same schema file the manifest publishes — so the published contract and the enforced contract can't drift. Don't assume declaring `schema_json` is sufficient, and don't write a test that only asserts the *happy* path, which passes either way.
+
 This validates the REST write payload. It describes the **payload** only — never include `id`, `created_at`, `deleted`, or `authorized_tokens`; those are Envelope metadata managed by the framework.
 
 ## 3. Wire it in `main.rs`
