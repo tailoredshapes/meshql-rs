@@ -70,6 +70,8 @@ graph TD
 
 This is a **recommended pattern, not a technology requirement** — nothing in meshql enforces it, the same way nothing in a web framework enforces MVC. Follow it when a deployment is built this way; don't assume every meshql deployment is structured this way, and don't force event/domain ceremony onto an entity that's just doing plain CRUD.
 
+**This "don't force it" guidance is about consuming or reading an already-built deployment — it is not license to skip event-sourcing when you're the one designing a new backend from scratch.** If you're building both the backend and the frontend in the same task (not just writing a frontend against something someone else already built), the decision about which entities should be events vs. domain projections is governed by `meshql-patterns`' `references/domain-design.md`, whose own opening line calls this "the pattern meshql is built for" — a considerably stronger stance than "recommended, don't force it." Read that file before treating "plain CRUD for everything" as a neutral default; it usually isn't one. This distinction matters because it's easy to conflate the two: a sentence that's correct advice for a consumer ("don't invent structure that isn't there") reads, out of context, like permission for a designer to skip structure that should be there.
+
 ## Detecting the split — the manifest doesn't label it
 
 The manifest lists entities and their surfaces; it does not say "this one is event-mesh." That relationship lives inside the Worker's code, which isn't published anywhere. Determine it in this order:
