@@ -100,7 +100,7 @@ async fn build_cross_service_servers() -> (String, String) {
             "coops",
             None,
             "getCoopsByFarm",
-            &format!("{addr_b}/coop/graph"),
+            format!("{addr_b}/coop/graph"),
         )
         .build();
 
@@ -128,7 +128,7 @@ async fn build_cross_service_servers() -> (String, String) {
             "farm",
             Some("farmId"),
             "getFarm",
-            &format!("{addr_a}/farm/graph"),
+            format!("{addr_a}/farm/graph"),
         )
         .build();
 

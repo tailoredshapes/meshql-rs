@@ -546,6 +546,274 @@ pub async fn test_searcher_auth_latest_version_controls_visibility(searcher: &dy
     );
 }
 
+// ---- Repository Authorization Certification Tests ----
+//
+// The mirror image of the searcher auth certs above, for the Repository read
+// paths (architecture invariant 4: *every* read path filters by tokens).
+// The rest of the repository cert suite creates every envelope with `"*"`
+// authorized_tokens, so an adapter that ignores `tokens` entirely still
+// passes it — these certs close that gap.
+//
+// Same convention as `meshql_core::envelope_visible_to`:
+//   - a caller holding "*" sees everything,
+//   - an envelope with empty `authorized_tokens` is public,
+//   - an envelope tagged "*" is visible to any caller,
+//   - otherwise visibility requires token intersection.
+// Visibility applies to the *latest* version of an envelope: an older visible
+// version must not resurface when the current version is restricted.
+
+const REPO_AUTH_PUBLIC: &str = "repo-auth-public";
+const REPO_AUTH_STAR: &str = "repo-auth-star";
+const REPO_AUTH_ALICE: &str = "repo-auth-alice";
+const REPO_AUTH_BOB: &str = "repo-auth-bob";
+const REPO_AUTH_VERSIONED: &str = "repo-auth-versioned";
+
+fn ids_of(envelopes: &[Envelope]) -> Vec<&str> {
+    envelopes.iter().map(|e| e.id.as_str()).collect()
+}
+
+pub async fn seed_repository_auth_data(repo: &dyn Repository) {
+    // (id, name, tokens) — adapters that stamp the create() creds onto the
+    // envelope and adapters that persist the envelope as given must agree, so
+    // the same tokens are passed both places.
+    let items: Vec<(&str, &str, Vec<String>)> = vec![
+        (REPO_AUTH_PUBLIC, "public-doc", vec![]),
+        (REPO_AUTH_STAR, "star-doc", star()),
+        (REPO_AUTH_ALICE, "alice-doc", creds("alice")),
+        (REPO_AUTH_BOB, "bob-doc", creds("bob")),
+    ];
+
+    for (id, name, tokens) in items {
+        let mut payload = Stash::new();
+        payload.insert("name".to_string(), json!(name));
+        let env = Envelope::new(id, payload, tokens.clone());
+        repo.create(env, &tokens).await.unwrap();
+    }
+
+    // Versioned envelope: v1 visible to alice, later v2 visible only to bob.
+    let mut payload_v1 = Stash::new();
+    payload_v1.insert("name".to_string(), json!("versioned-v1"));
+    let v1 = Envelope {
+        id: REPO_AUTH_VERSIONED.to_string(),
+        payload: payload_v1,
+        created_at: chrono::Utc::now() - chrono::Duration::seconds(10),
+        deleted: false,
+        authorized_tokens: creds("alice"),
+    };
+    repo.create(v1, &creds("alice")).await.unwrap();
+
+    let mut payload_v2 = Stash::new();
+    payload_v2.insert("name".to_string(), json!("versioned-v2"));
+    let v2 = Envelope {
+        id: REPO_AUTH_VERSIONED.to_string(),
+        payload: payload_v2,
+        created_at: chrono::Utc::now(),
+        deleted: false,
+        authorized_tokens: creds("bob"),
+    };
+    repo.create(v2, &creds("bob")).await.unwrap();
+}
+
+pub async fn test_repository_auth_wildcard_caller_sees_all(repo: &dyn Repository) {
+    for id in [
+        REPO_AUTH_PUBLIC,
+        REPO_AUTH_STAR,
+        REPO_AUTH_ALICE,
+        REPO_AUTH_BOB,
+        REPO_AUTH_VERSIONED,
+    ] {
+        assert!(
+            repo.read(id, &star(), None).await.unwrap().is_some(),
+            "a '*' caller must be able to read {id}"
+        );
+    }
+
+    let listed = repo.list(&star()).await.unwrap();
+    let ids = ids_of(&listed);
+    for id in [
+        REPO_AUTH_PUBLIC,
+        REPO_AUTH_STAR,
+        REPO_AUTH_ALICE,
+        REPO_AUTH_BOB,
+        REPO_AUTH_VERSIONED,
+    ] {
+        assert!(ids.contains(&id), "list must return {id} to a '*' caller");
+    }
+
+    let all: Vec<String> = vec![REPO_AUTH_ALICE.to_string(), REPO_AUTH_BOB.to_string()];
+    let found = repo.read_many(&all, &star()).await.unwrap();
+    assert_eq!(
+        found.len(),
+        2,
+        "read_many must return every envelope to a '*' caller"
+    );
+}
+
+pub async fn test_repository_auth_restricted_caller_sees_only_intersecting(repo: &dyn Repository) {
+    let alice = creds("alice");
+
+    let own = repo.read(REPO_AUTH_ALICE, &alice, None).await.unwrap();
+    assert_eq!(
+        own.expect("caller 'alice' must read her own envelope")
+            .payload
+            .get("name")
+            .unwrap(),
+        &json!("alice-doc")
+    );
+
+    let listed = repo.list(&alice).await.unwrap();
+    let ids = ids_of(&listed);
+    assert!(
+        ids.contains(&REPO_AUTH_ALICE),
+        "list must return alice's own"
+    );
+    assert!(
+        ids.contains(&REPO_AUTH_PUBLIC),
+        "list must return the public envelope"
+    );
+    assert!(
+        ids.contains(&REPO_AUTH_STAR),
+        "list must return the '*'-tagged envelope"
+    );
+    assert!(
+        !ids.contains(&REPO_AUTH_BOB),
+        "list must not leak an envelope restricted to 'bob'"
+    );
+
+    let both: Vec<String> = vec![REPO_AUTH_ALICE.to_string(), REPO_AUTH_BOB.to_string()];
+    let found = repo.read_many(&both, &alice).await.unwrap();
+    assert_eq!(
+        ids_of(&found),
+        vec![REPO_AUTH_ALICE],
+        "read_many must return only the envelopes visible to 'alice'"
+    );
+}
+
+pub async fn test_repository_auth_denies_non_intersecting(repo: &dyn Repository) {
+    for caller in [creds("alice"), creds("charlie"), vec![]] {
+        assert!(
+            repo.read(REPO_AUTH_BOB, &caller, None)
+                .await
+                .unwrap()
+                .is_none(),
+            "read must not return an envelope restricted to 'bob' (caller {caller:?})"
+        );
+
+        let listed = repo.list(&caller).await.unwrap();
+        assert!(
+            !ids_of(&listed).contains(&REPO_AUTH_BOB),
+            "list must not leak an envelope restricted to 'bob' (caller {caller:?})"
+        );
+
+        let ids = vec![REPO_AUTH_BOB.to_string()];
+        assert!(
+            repo.read_many(&ids, &caller).await.unwrap().is_empty(),
+            "read_many must not leak an envelope restricted to 'bob' (caller {caller:?})"
+        );
+
+        assert!(
+            !repo.remove(REPO_AUTH_BOB, &caller).await.unwrap(),
+            "remove must not act on an envelope restricted to 'bob' (caller {caller:?})"
+        );
+    }
+
+    // ...and after all those denied attempts, bob's envelope is still there.
+    assert!(
+        repo.read(REPO_AUTH_BOB, &creds("bob"), None)
+            .await
+            .unwrap()
+            .is_some(),
+        "a denied remove must not have deleted the envelope"
+    );
+}
+
+pub async fn test_repository_auth_empty_tokens_are_public(repo: &dyn Repository) {
+    for caller in [creds("charlie"), vec![]] {
+        assert!(
+            repo.read(REPO_AUTH_PUBLIC, &caller, None)
+                .await
+                .unwrap()
+                .is_some(),
+            "an envelope with no authorized_tokens is public (caller {caller:?})"
+        );
+
+        let listed = repo.list(&caller).await.unwrap();
+        assert!(
+            ids_of(&listed).contains(&REPO_AUTH_PUBLIC),
+            "list must return the public envelope (caller {caller:?})"
+        );
+
+        let ids = vec![REPO_AUTH_PUBLIC.to_string()];
+        assert_eq!(
+            repo.read_many(&ids, &caller).await.unwrap().len(),
+            1,
+            "read_many must return the public envelope (caller {caller:?})"
+        );
+    }
+}
+
+pub async fn test_repository_auth_star_token_visible_to_all(repo: &dyn Repository) {
+    for caller in [creds("charlie"), vec![]] {
+        assert!(
+            repo.read(REPO_AUTH_STAR, &caller, None)
+                .await
+                .unwrap()
+                .is_some(),
+            "an envelope tagged '*' is visible to any caller (caller {caller:?})"
+        );
+
+        let listed = repo.list(&caller).await.unwrap();
+        assert!(
+            ids_of(&listed).contains(&REPO_AUTH_STAR),
+            "list must return the '*'-tagged envelope (caller {caller:?})"
+        );
+
+        let ids = vec![REPO_AUTH_STAR.to_string()];
+        assert_eq!(
+            repo.read_many(&ids, &caller).await.unwrap().len(),
+            1,
+            "read_many must return the '*'-tagged envelope (caller {caller:?})"
+        );
+    }
+}
+
+pub async fn test_repository_auth_latest_version_controls_visibility(repo: &dyn Repository) {
+    // Latest version is restricted to bob: alice must see nothing — the older
+    // alice-visible version must not resurface.
+    assert!(
+        repo.read(REPO_AUTH_VERSIONED, &creds("alice"), None)
+            .await
+            .unwrap()
+            .is_none(),
+        "an older visible version must not resurface when the latest is restricted"
+    );
+
+    let listed = repo.list(&creds("alice")).await.unwrap();
+    assert!(
+        !ids_of(&listed).contains(&REPO_AUTH_VERSIONED),
+        "list must not resurface an older visible version"
+    );
+
+    let current = repo
+        .read(REPO_AUTH_VERSIONED, &creds("bob"), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        current
+            .expect("bob must read the latest version")
+            .payload
+            .get("name")
+            .unwrap(),
+        &json!("versioned-v2")
+    );
+
+    let listed = repo.list(&creds("bob")).await.unwrap();
+    assert!(
+        ids_of(&listed).contains(&REPO_AUTH_VERSIONED),
+        "list must return the latest version to 'bob'"
+    );
+}
+
 pub async fn test_searcher_empty_query(searcher: &dyn Searcher) {
     let args = Stash::new();
     let results = searcher

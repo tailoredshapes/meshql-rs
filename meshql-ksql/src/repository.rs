@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use meshql_core::{Envelope, MeshqlError, Repository, Result};
+use meshql_core::{envelope_visible_to, Envelope, MeshqlError, Repository, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -106,7 +106,7 @@ impl Repository for KsqlRepository {
     async fn read(
         &self,
         id: &str,
-        _tokens: &[String],
+        tokens: &[String],
         at: Option<DateTime<Utc>>,
     ) -> Result<Option<Envelope>> {
         let escaped_id = Self::escape_id(id);
@@ -125,7 +125,7 @@ impl Repository for KsqlRepository {
                     Ok(rows) if !rows.is_empty() => {
                         let env = row_to_envelope(&rows[0])
                             .map_err(|e| MeshqlError::Parse(e.to_string()))?;
-                        if env.deleted {
+                        if env.deleted || !envelope_visible_to(&env, tokens) {
                             return Ok(None);
                         }
                         return Ok(Some(env));
@@ -154,7 +154,7 @@ impl Repository for KsqlRepository {
                     Ok(rows) if !rows.is_empty() => {
                         let env = row_to_envelope(&rows[0])
                             .map_err(|e| MeshqlError::Parse(e.to_string()))?;
-                        if env.deleted {
+                        if env.deleted || !envelope_visible_to(&env, tokens) {
                             return Ok(None);
                         }
                         return Ok(Some(env));
@@ -174,7 +174,7 @@ impl Repository for KsqlRepository {
         }
     }
 
-    async fn list(&self, _tokens: &[String]) -> Result<Vec<Envelope>> {
+    async fn list(&self, tokens: &[String]) -> Result<Vec<Envelope>> {
         let query = format!("SELECT * FROM {} WHERE deleted = false;", self.table_name);
 
         for _ in 0..self.max_retries {
@@ -182,9 +182,13 @@ impl Repository for KsqlRepository {
                 Ok(rows) if !rows.is_empty() => {
                     let mut envelopes = Vec::new();
                     for row in &rows {
+                        // The ksqlDB TABLE holds only the latest version per
+                        // id, so visibility is decided on the latest version.
                         match row_to_envelope(row) {
-                            Ok(env) if !env.deleted => envelopes.push(env),
-                            Ok(_) => {} // skip deleted
+                            Ok(env) if !env.deleted && envelope_visible_to(&env, tokens) => {
+                                envelopes.push(env)
+                            }
+                            Ok(_) => {} // skip deleted / not visible to caller
                             Err(e) => {
                                 warn!("Failed to parse row: {}", e);
                             }

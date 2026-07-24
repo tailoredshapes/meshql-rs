@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use meshql_core::{Envelope, MeshqlError, Repository, Result, Stash};
+use meshql_core::{envelope_visible_to, Envelope, MeshqlError, Repository, Result, Stash};
 use sqlx::MySqlPool;
 use sqlx::Row;
 use std::collections::HashMap;
@@ -105,7 +105,7 @@ impl Repository for MysqlRepository {
     async fn read(
         &self,
         id: &str,
-        _tokens: &[String],
+        tokens: &[String],
         at: Option<DateTime<Utc>>,
     ) -> Result<Option<Envelope>> {
         let cutoff_ms = at.unwrap_or_else(Utc::now).timestamp_millis() + 1;
@@ -153,7 +153,10 @@ impl Repository for MysqlRepository {
                     payload_json,
                 )?;
 
-                if env.deleted {
+                // Visibility is decided on the resolved version — filtering in
+                // SQL before picking the latest row would resurface an older
+                // visible version of a now-restricted envelope.
+                if env.deleted || !envelope_visible_to(&env, tokens) {
                     Ok(None)
                 } else {
                     Ok(Some(env))
@@ -162,7 +165,7 @@ impl Repository for MysqlRepository {
         }
     }
 
-    async fn list(&self, _tokens: &[String]) -> Result<Vec<Envelope>> {
+    async fn list(&self, tokens: &[String]) -> Result<Vec<Envelope>> {
         let table = &self.table;
         let sql = format!(
             r#"SELECT e.id, e.created_at_ms, e.deleted, e.authorized_tokens, e.payload
@@ -203,7 +206,9 @@ impl Repository for MysqlRepository {
                 tokens_json,
                 payload_json,
             )?;
-            results.push(env);
+            if envelope_visible_to(&env, tokens) {
+                results.push(env);
+            }
         }
 
         Ok(results)

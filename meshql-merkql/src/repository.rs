@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use merkql::broker::BrokerRef;
 use merkql::consumer::{ConsumerConfig, OffsetReset};
 use merkql::record::ProducerRecord;
-use meshql_core::{Envelope, MeshqlError, Repository, Result};
+use meshql_core::{envelope_visible_to, Envelope, MeshqlError, Repository, Result};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -98,7 +98,7 @@ impl Repository for MerkqlRepository {
     async fn read(
         &self,
         id: &str,
-        _tokens: &[String],
+        tokens: &[String],
         at: Option<DateTime<Utc>>,
     ) -> Result<Option<Envelope>> {
         // Convert optional cutoff to milliseconds; use current time if None
@@ -112,13 +112,18 @@ impl Repository for MerkqlRepository {
         };
         let envelopes = self.read_all_envelopes()?;
         let result = Self::latest_for_id(&envelopes, id, cutoff_ms);
-        // Return None if deleted
-        Ok(result.filter(|env| !env.deleted))
+        // Return None if deleted or not visible to the caller. Visibility is
+        // decided on the resolved version — filtering earlier would resurface
+        // an older visible version of a now-restricted envelope.
+        Ok(result.filter(|env| !env.deleted && envelope_visible_to(env, tokens)))
     }
 
-    async fn list(&self, _tokens: &[String]) -> Result<Vec<Envelope>> {
+    async fn list(&self, tokens: &[String]) -> Result<Vec<Envelope>> {
         let envelopes = self.read_all_envelopes()?;
-        Ok(Self::latest_per_id_not_deleted(&envelopes))
+        Ok(Self::latest_per_id_not_deleted(&envelopes)
+            .into_iter()
+            .filter(|env| envelope_visible_to(env, tokens))
+            .collect())
     }
 
     async fn remove(&self, id: &str, tokens: &[String]) -> Result<bool> {

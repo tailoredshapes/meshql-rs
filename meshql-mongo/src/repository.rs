@@ -1,7 +1,7 @@
 use crate::converters::{document_to_envelope, envelope_to_document};
 use bson::{doc, Bson, Document};
 use chrono::{DateTime, Utc};
-use meshql_core::{Auth, Envelope, MeshqlError, Repository, Result};
+use meshql_core::{envelope_visible_to, Auth, Envelope, MeshqlError, Repository, Result};
 use mongodb::Collection;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -52,14 +52,17 @@ impl Repository for MongoRepository {
         at: Option<DateTime<Utc>>,
     ) -> Result<Option<Envelope>> {
         let at_bson = bson::DateTime::from_chrono(at.unwrap_or_else(Utc::now));
-        let bson_tokens: Vec<Bson> = tokens.iter().map(|s| Bson::String(s.clone())).collect();
 
+        // Visibility (meshql_core::envelope_visible_to) is applied in Rust to
+        // the resolved version, below — matching on authorizedTokens here
+        // would both mis-state the convention (empty tokens are public, "*" is
+        // visible to everyone) and resurface an older visible version of a
+        // now-restricted envelope.
         let pipeline = vec![
             doc! {
                 "$match": {
                     "id": id,
                     "createdAt": { "$lte": at_bson },
-                    "authorizedTokens": { "$in": bson_tokens },
                 }
             },
             doc! { "$sort": { "createdAt": -1 } },
@@ -81,7 +84,7 @@ impl Repository for MongoRepository {
                 .deserialize_current()
                 .map_err(|e| MeshqlError::Storage(e.to_string()))?;
             let env = document_to_envelope(&doc);
-            Ok(env.filter(|e| !e.deleted))
+            Ok(env.filter(|e| !e.deleted && envelope_visible_to(e, tokens)))
         } else {
             Ok(None)
         }
@@ -89,13 +92,11 @@ impl Repository for MongoRepository {
 
     async fn list(&self, tokens: &[String]) -> Result<Vec<Envelope>> {
         let now = bson::DateTime::now();
-        let bson_tokens: Vec<Bson> = tokens.iter().map(|s| Bson::String(s.clone())).collect();
 
         let pipeline = vec![
             doc! {
                 "$match": {
                     "createdAt": { "$lte": now },
-                    "authorizedTokens": { "$in": bson_tokens },
                 }
             },
             doc! { "$sort": { "id": 1, "createdAt": -1 } },
@@ -125,7 +126,10 @@ impl Repository for MongoRepository {
                 .deserialize_current()
                 .map_err(|e| MeshqlError::Storage(e.to_string()))?;
             if let Some(env) = document_to_envelope(&doc) {
-                results.push(env);
+                // Visibility applied after $group, on the latest version only.
+                if envelope_visible_to(&env, tokens) {
+                    results.push(env);
+                }
             }
         }
 
@@ -162,7 +166,6 @@ impl Repository for MongoRepository {
     }
 
     async fn read_many(&self, ids: &[String], tokens: &[String]) -> Result<Vec<Envelope>> {
-        let bson_tokens: Vec<Bson> = tokens.iter().map(|s| Bson::String(s.clone())).collect();
         let bson_ids: Vec<Bson> = ids.iter().map(|s| Bson::String(s.clone())).collect();
         let now = bson::DateTime::now();
 
@@ -171,7 +174,6 @@ impl Repository for MongoRepository {
                 "$match": {
                     "id": { "$in": bson_ids },
                     "createdAt": { "$lte": now },
-                    "authorizedTokens": { "$in": bson_tokens },
                 }
             },
             doc! { "$sort": { "id": 1, "createdAt": -1 } },
@@ -201,7 +203,10 @@ impl Repository for MongoRepository {
                 .deserialize_current()
                 .map_err(|e| MeshqlError::Storage(e.to_string()))?;
             if let Some(env) = document_to_envelope(&doc) {
-                results.push(env);
+                // Visibility applied after $group, on the latest version only.
+                if envelope_visible_to(&env, tokens) {
+                    results.push(env);
+                }
             }
         }
 

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use meshql_core::{Envelope, MeshqlError, Repository, Result};
+use meshql_core::{envelope_visible_to, Envelope, MeshqlError, Repository, Result};
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 
@@ -124,7 +124,7 @@ impl Repository for PostgresRepository {
     async fn read(
         &self,
         id: &str,
-        _tokens: &[String],
+        tokens: &[String],
         at: Option<DateTime<Utc>>,
     ) -> Result<Option<Envelope>> {
         let cutoff_ms = match at {
@@ -149,7 +149,10 @@ impl Repository for PostgresRepository {
             None => Ok(None),
             Some(r) => {
                 let env = Self::row_to_envelope(&r)?;
-                if env.deleted {
+                // Visibility is decided on the resolved version — filtering in
+                // SQL before picking the latest row would resurface an older
+                // visible version of a now-restricted envelope.
+                if env.deleted || !envelope_visible_to(&env, tokens) {
                     Ok(None)
                 } else {
                     Ok(Some(env))
@@ -158,7 +161,7 @@ impl Repository for PostgresRepository {
         }
     }
 
-    async fn list(&self, _tokens: &[String]) -> Result<Vec<Envelope>> {
+    async fn list(&self, tokens: &[String]) -> Result<Vec<Envelope>> {
         let sql = format!(
             "SELECT DISTINCT ON (id) id, created_at_ms, deleted, authorized_tokens, payload
              FROM {} WHERE deleted = FALSE
@@ -172,7 +175,10 @@ impl Repository for PostgresRepository {
 
         let mut results = Vec::new();
         for row in rows {
-            results.push(Self::row_to_envelope(&row)?);
+            let env = Self::row_to_envelope(&row)?;
+            if envelope_visible_to(&env, tokens) {
+                results.push(env);
+            }
         }
         Ok(results)
     }
