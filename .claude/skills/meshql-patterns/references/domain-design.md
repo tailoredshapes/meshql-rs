@@ -21,6 +21,24 @@ The key realization ("¿por qué no dos?"): **you keep both, and workers transla
 4. **Create noun meshes.** Same wiring, but nothing writes them through the public API — workers write them via their repository.
 5. **Build one worker per noun.** Each worker consumes the events it needs, folds them into its noun, and writes it. One worker owns one noun so nouns can be added, rebuilt, and scaled independently.
 
+## Run an actual event storm — don't skip straight to code
+
+Steps 1–2 above are usually done badly when done silently in your head. **Event storming** (Alberto Brandolini's technique — sticky notes on a wall, or the written equivalent here) is a concrete process for doing them properly, and its categories map almost one-to-one onto meshql's own concepts. Produce this as a real, written artifact (a markdown doc is fine) *before* wiring anything — not a mental pass you skip straight through:
+
+| Event storm artifact | meshql concept |
+|---|---|
+| **Domain Events** (past tense: "Article Published", "Hens Bought") | Event-mesh entities — the verbs. Each becomes a create-only restlette. |
+| **Commands** (imperative: "Publish Article", "Buy Hens") | The REST payload shape of a `POST` to the corresponding event restlette. |
+| **Actors / Roles** (who issues a command — an editor, a customer, a system) | Casbin roles (`meshql-casbin`, see the "Auth beyond NoAuth" entry in `SKILL.md`'s decision guide) — who's authorized to write which event. Don't default to `NoAuth` once you've named actors; wire the roles you just identified. |
+| **Policies** ("whenever X happens, then Y should happen") | **Workers.** A policy *is* a worker's fold-and-react loop — this is the most direct mapping in the table. A multi-step policy (event → triggers a new command → new event) is a worker that, after folding, also issues a follow-up write via REST. |
+| **Aggregates** (the consistency boundary around a command) | The event mesh's write-side boundary — what one event commits atomically, and what a restlette's validators should actually check. |
+| **Read Models / Views** (what someone needs to see) | Domain-mesh projections — the nouns from step 2 above, one worker each. |
+| **Hotspots** (open questions, conflicting opinions, "we're not sure yet") | Write them down explicitly in the design artifact and flag them for the human. Don't silently resolve a hotspot with a guess — that's exactly the kind of decision that should surface, not disappear into an implementation choice nobody reviewed. |
+
+**Ground the storm in reality, not a blank page.** If an established product already exists in the same problem space, look at how it actually models the domain (its real entities, its real event/state lifecycle) before inventing your own from scratch — a green-field brainstorm reliably misses events and edge cases that someone else already discovered the hard way. Adapt the domain shape, not the code.
+
+Once the storm is done, steps 3–5 above are close to mechanical: Domain Events → event meshes, Read Models → noun meshes, Policies → workers.
+
 ## The write-path rule (the crux)
 
 **Front ends write business events. They never write domain models — not even the actor-nouns.**
