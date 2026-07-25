@@ -8,7 +8,8 @@ use anyhow::{anyhow, bail, Context};
 use async_trait::async_trait;
 use merkql::broker::{Broker, BrokerRef};
 use merkql::consumer::{Consumer, ConsumerConfig, OffsetReset};
-use meshql_changes::{ChangeEvent, ChangeSource};
+use merkql::record::Record;
+use meshql_changes::{ChangeEvent, ChangeSource, SeekableSource};
 use meshql_core::Envelope;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -22,6 +23,10 @@ pub struct MerkqlTopicSource {
     topic: String,
     /// Whether `poll` should attach the Envelope's `payload` to each event.
     include_payload: bool,
+    /// Kept so `backfill` can open a SECOND, throwaway consumer. The one
+    /// below is permanently at the live tail (see `backfill`), and merkql
+    /// v0.2.0 has no seek API, so replay needs its own reader.
+    broker: BrokerRef,
     /// `Consumer::poll` is synchronous and needs `&mut self`, but
     /// `ChangeSource::poll` takes `&self` from an async context. A
     /// `std::sync::Mutex` is the right lock here precisely because the
@@ -90,8 +95,106 @@ impl MerkqlTopicSource {
         Ok(Self {
             topic: topic.to_string(),
             include_payload,
+            broker,
             consumer: Mutex::new(consumer),
         })
+    }
+
+    /// The single Record → ChangeEvent mapping.
+    ///
+    /// Shared by `poll` and `backfill` deliberately: the same log record is
+    /// delivered live by one and replayed by the other, and the streamlette
+    /// handler dedupes ACROSS them by cursor. Two copies of this that drifted
+    /// would surface as one change arriving twice in two different shapes —
+    /// the kind of bug that only shows up on a client reconnect.
+    fn to_change_event(&self, record: &Record) -> anyhow::Result<ChangeEvent> {
+        let envelope: Envelope = serde_json::from_str(&record.value).with_context(|| {
+            format!(
+                "decoding envelope at {}:{} on '{}'",
+                record.partition, record.offset, self.topic
+            )
+        })?;
+        Ok(ChangeEvent {
+            entity: self.topic.clone(),
+            id: envelope.id,
+            created_at: envelope.created_at.timestamp_millis(),
+            deleted: envelope.deleted,
+            authorized_tokens: envelope.authorized_tokens,
+            cursor: Some(format!("{}:{}", record.partition, record.offset)),
+            // The Envelope's `payload` field, NEVER the whole Envelope: this
+            // is serialized verbatim into the SSE frame, and the `WireEvent`
+            // split only strips the top-level `authorized_tokens` — it cannot
+            // police tokens nested inside a payload.
+            payload: self
+                .include_payload
+                .then(|| serde_json::Value::Object(envelope.payload)),
+        })
+    }
+}
+
+/// `"{partition}:{offset}"`, the format `to_change_event` emits.
+///
+/// Deliberately minimal — Task 10 owns the full unusable-cursor policy. This
+/// rejects only what could never address THIS log: anything unparseable, and
+/// any partition but 0 (a streamlette topic is single-partition by
+/// construction; `MerkqlTopicSource::new` refuses anything else).
+fn parse_cursor(cursor: &str) -> Option<u64> {
+    let (partition, offset) = cursor.split_once(':')?;
+    if partition.parse::<u32>().ok()? != 0 {
+        return None;
+    }
+    offset.parse::<u64>().ok()
+}
+
+#[async_trait]
+impl SeekableSource for MerkqlTopicSource {
+    /// Replay everything strictly after `cursor`.
+    ///
+    /// **Uses a second, throwaway consumer, not `self.consumer`.** The
+    /// source's own consumer cannot replay: `Consumer::poll` reads
+    /// `position..tail` and then sets `position = tail`, and merkql v0.2.0
+    /// exposes no seek/rewind. The pump has been draining that consumer, so
+    /// it sits at the live tail permanently.
+    ///
+    /// So: a fresh consumer with a FRESH group id (a reused one would find a
+    /// committed offset, which `subscribe` prefers over `OffsetReset` —
+    /// silently starting the replay from someone else's position), read the
+    /// whole log in one poll, drop everything at-or-before the cursor, and
+    /// drop the consumer. `auto_commit: false` so this throwaway never leaves
+    /// an offset behind.
+    ///
+    /// Re-reading the log prefix is the accepted cost of having no seek API.
+    async fn backfill(&self, cursor: &str) -> anyhow::Result<Vec<ChangeEvent>> {
+        // An unusable cursor is an ERROR, never a silent "replay everything":
+        // the latter looks like a working resume while flooding the client
+        // with the entire log.
+        let from = parse_cursor(cursor)
+            .ok_or_else(|| anyhow!("unusable resume cursor '{cursor}' on '{}'", self.topic))?;
+
+        let mut replay = Broker::consumer(
+            &self.broker,
+            ConsumerConfig {
+                group_id: format!("streamlette-backfill-{}", uuid::Uuid::new_v4()),
+                auto_commit: false,
+                offset_reset: OffsetReset::Earliest,
+            },
+        );
+        replay
+            .subscribe(&[self.topic.as_str()])
+            .with_context(|| format!("subscribing a backfill consumer to '{}'", self.topic))?;
+        // One poll returns `0..tail` for the (single) partition.
+        let records = replay.poll(Duration::from_millis(0))?;
+        drop(replay);
+
+        records
+            .iter()
+            .filter(|record| record.offset > from)
+            .map(|record| self.to_change_event(record))
+            .collect()
+    }
+
+    fn cursor_is_valid(&self, cursor: &str) -> bool {
+        parse_cursor(cursor).is_some()
     }
 }
 
@@ -112,33 +215,10 @@ impl ChangeSource for MerkqlTopicSource {
             consumer.poll(Duration::from_millis(0))?
         };
 
+        // Same mapping `backfill` uses — see `to_change_event`.
         records
-            .into_iter()
-            .map(|record| {
-                let envelope: Envelope =
-                    serde_json::from_str(&record.value).with_context(|| {
-                        format!(
-                            "decoding envelope at {}:{} on '{}'",
-                            record.partition, record.offset, self.topic
-                        )
-                    })?;
-                Ok(ChangeEvent {
-                    entity: self.topic.clone(),
-                    id: envelope.id,
-                    created_at: envelope.created_at.timestamp_millis(),
-                    deleted: envelope.deleted,
-                    authorized_tokens: envelope.authorized_tokens,
-                    cursor: Some(format!("{}:{}", record.partition, record.offset)),
-                    // The Envelope's `payload` field, NEVER the whole
-                    // Envelope: this is serialized verbatim into the SSE
-                    // frame, and the `WireEvent` split only strips the
-                    // top-level `authorized_tokens` — it cannot police
-                    // tokens nested inside a payload.
-                    payload: self
-                        .include_payload
-                        .then(|| serde_json::Value::Object(envelope.payload)),
-                })
-            })
+            .iter()
+            .map(|record| self.to_change_event(record))
             .collect()
     }
 }
@@ -286,6 +366,156 @@ mod tests {
         let events = source.poll().await.unwrap();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].payload, None);
+    }
+
+    /// The whole point of the second consumer: the source's OWN consumer has
+    /// already been drained to the live tail by the pump, and merkql has no
+    /// seek API, so backfill cannot reuse it.
+    #[tokio::test]
+    async fn backfill_returns_events_strictly_after_the_cursor() {
+        let broker = broker();
+        let source = MerkqlTopicSource::new(broker.clone(), "hen", false).unwrap();
+        for id in ["hen-1", "hen-2", "hen-3", "hen-4"] {
+            produce(&broker, "hen", id);
+        }
+
+        // Drain to the tail exactly as the pump would, so the source's own
+        // consumer is at 4 and can never replay 0..4 again.
+        assert_eq!(source.poll().await.unwrap().len(), 4);
+
+        let replayed = source.backfill("0:1").await.unwrap();
+        let ids: Vec<_> = replayed.iter().map(|e| e.id.clone()).collect();
+        assert_eq!(
+            ids,
+            vec!["hen-3", "hen-4"],
+            "backfill must return what follows the cursor, exclusive of it"
+        );
+        let cursors: Vec<_> = replayed.iter().map(|e| e.cursor.clone()).collect();
+        assert_eq!(
+            cursors,
+            vec![Some("0:2".to_string()), Some("0:3".to_string())],
+            "replayed cursors must be the real log offsets — they are what the \
+             handler dedupes against"
+        );
+    }
+
+    /// A cursor at the tail replays nothing; a cursor pointing before the
+    /// start replays everything. Both are boundary cases a `>` vs `>=` slip
+    /// would get wrong.
+    #[tokio::test]
+    async fn backfill_boundaries_are_exclusive_of_the_cursor() {
+        let broker = broker();
+        let source = MerkqlTopicSource::new(broker.clone(), "hen", false).unwrap();
+        for id in ["hen-1", "hen-2", "hen-3"] {
+            produce(&broker, "hen", id);
+        }
+
+        assert_eq!(
+            source.backfill("0:2").await.unwrap().len(),
+            0,
+            "a cursor at the tail has nothing after it"
+        );
+        let all = source.backfill("0:0").await.unwrap();
+        assert_eq!(
+            all.iter().map(|e| e.id.clone()).collect::<Vec<_>>(),
+            vec!["hen-2", "hen-3"]
+        );
+    }
+
+    /// The live and replayed representations of one record must be identical
+    /// — the pump publishes one and the resume path the other, and the
+    /// handler dedupes across them. A divergence would be invisible until a
+    /// client saw the same change twice with different shapes.
+    #[tokio::test]
+    async fn backfill_maps_records_exactly_as_poll_does() {
+        let broker = broker();
+        let source = MerkqlTopicSource::new(broker.clone(), "hen", true).unwrap();
+        produce_envelope(
+            &broker,
+            "hen",
+            Envelope::new(
+                "hen-1",
+                stash(serde_json::json!({"eggs": 3})),
+                vec!["farm-team".to_string()],
+            ),
+        );
+        produce_envelope(
+            &broker,
+            "hen",
+            Envelope::new("hen-2", stash(serde_json::json!({"eggs": 4})), vec![]),
+        );
+
+        let live = source.poll().await.unwrap();
+        let replayed = source.backfill("0:0").await.unwrap();
+        assert_eq!(replayed.len(), 1);
+        let a = &live[1];
+        let b = &replayed[0];
+        assert_eq!(a.id, b.id);
+        assert_eq!(a.entity, b.entity);
+        assert_eq!(a.created_at, b.created_at);
+        assert_eq!(a.deleted, b.deleted);
+        assert_eq!(a.authorized_tokens, b.authorized_tokens);
+        assert_eq!(a.cursor, b.cursor);
+        assert_eq!(a.payload, b.payload);
+        assert_eq!(a.wire_json(), b.wire_json());
+    }
+
+    #[tokio::test]
+    async fn backfill_respects_include_payload() {
+        let broker = broker();
+        let source = MerkqlTopicSource::new(broker.clone(), "hen", false).unwrap();
+        produce_envelope(
+            &broker,
+            "hen",
+            Envelope::new("hen-1", stash(serde_json::json!({"eggs": 3})), vec![]),
+        );
+        produce_envelope(
+            &broker,
+            "hen",
+            Envelope::new("hen-2", stash(serde_json::json!({"eggs": 4})), vec![]),
+        );
+
+        let replayed = source.backfill("0:0").await.unwrap();
+        assert_eq!(replayed.len(), 1);
+        assert_eq!(replayed[0].payload, None);
+    }
+
+    /// A cursor the source cannot parse must be an error, never a silent
+    /// "replay everything" (which would look like a working resume while
+    /// flooding the client with the whole log).
+    #[tokio::test]
+    async fn backfill_rejects_a_malformed_cursor() {
+        let broker = broker();
+        let source = MerkqlTopicSource::new(broker.clone(), "hen", false).unwrap();
+        produce(&broker, "hen", "hen-1");
+
+        for bad in ["", "7", "0:", "0:x", "1:0"] {
+            assert!(
+                source.backfill(bad).await.is_err(),
+                "backfill must reject the unusable cursor {bad:?}"
+            );
+        }
+    }
+
+    /// Minimal by design — Task 10 owns the full unusable-cursor policy. This
+    /// only refuses input that could never address this log.
+    #[test]
+    fn cursor_validity_refuses_obviously_malformed_input() {
+        let broker = broker();
+        let source = MerkqlTopicSource::new(broker, "hen", false).unwrap();
+
+        assert!(source.cursor_is_valid("0:0"));
+        assert!(source.cursor_is_valid("0:12345"));
+
+        assert!(!source.cursor_is_valid(""), "empty");
+        assert!(!source.cursor_is_valid("7"), "no separator");
+        assert!(!source.cursor_is_valid("0:"), "no offset");
+        assert!(!source.cursor_is_valid("a:0"), "non-numeric partition");
+        assert!(!source.cursor_is_valid("0:x"), "non-numeric offset");
+        assert!(!source.cursor_is_valid("0:-1"), "negative offset");
+        // A streamlette topic is single-partition by construction, so any
+        // other partition is addressing a log this source does not own.
+        assert!(!source.cursor_is_valid("1:0"), "wrong partition");
     }
 
     /// The payload must be the Envelope's `payload` field, never the whole

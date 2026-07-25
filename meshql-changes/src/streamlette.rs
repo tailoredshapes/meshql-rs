@@ -3,13 +3,14 @@
 //! Distinct from `changes_router`'s deployment-level `/changes` feed, which
 //! stays exactly as it is — this adds a pump model, it does not replace one.
 
-use crate::{change_stream, ChangeEvent, ChangeHub, ChangeSource};
+use crate::sse::{change_frame, change_stream_skipping};
+use crate::{ChangeEvent, ChangeHub, ChangeSource};
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::get;
 use axum::{Extension, Router};
-use meshql_core::{Auth, AuthContext};
+use meshql_core::{tokens_visible_to, Auth, AuthContext};
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -124,6 +125,9 @@ struct StreamletteState {
     hub: ChangeHub,
     auth: Arc<dyn Auth>,
     entity: String,
+    /// `Some` only for a `Seekable` source — the resume path's whole
+    /// precondition, so a `Tail` streamlette cannot accidentally take it.
+    seekable: Option<Arc<dyn SeekableSource>>,
 }
 
 /// Mount one streamlette. The hub is created by the caller
@@ -137,10 +141,28 @@ pub fn streamlette_router(
     hub: ChangeHub,
     auth: Arc<dyn Auth>,
 ) -> Router {
-    let StreamletteConfig { path, entity, .. } = config;
+    let StreamletteConfig {
+        path,
+        entity,
+        source,
+        ..
+    } = config;
+    // Only a Seekable source can be resumed from, so only a Seekable source
+    // is carried into the handler. The pump owns its own clone (see
+    // `build_app_with_streams`); this one exists purely for `backfill`, which
+    // opens its own reader and never touches the pump's position.
+    let seekable = match source {
+        StreamSource::Seekable { source, .. } => Some(source),
+        StreamSource::Tail { .. } => None,
+    };
     Router::new()
         .route(&path, get(streamlette_handler))
-        .with_state(StreamletteState { hub, auth, entity })
+        .with_state(StreamletteState {
+            hub,
+            auth,
+            entity,
+            seekable,
+        })
 }
 
 async fn streamlette_handler(
@@ -151,10 +173,10 @@ async fn streamlette_handler(
     let stash = auth_ctx.map(|e| e.0 .0).unwrap_or_default();
     let tokens = state.auth.get_auth_token(&stash);
 
-    // Read, but never honoured yet — resume/backfill is a later task. NOT a
-    // 400: SSE auto-reconnect would turn an error response into a reconnect
-    // loop. Ignore it and let the `ready` frame tell the client the truth.
-    let _last_event_id = headers
+    // An unusable or unsupported Last-Event-ID is NOT a 400: SSE auto-reconnect
+    // would turn an error response into a reconnect loop. It degrades to
+    // live-only and the `ready` frame tells the client the truth.
+    let last_event_id = headers
         .get("last-event-id")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
@@ -162,9 +184,66 @@ async fn streamlette_handler(
     // A streamlette is one entity's surface: never leak a sibling's events.
     let entities: HashSet<String> = std::iter::once(state.entity).collect();
 
+    // ── The handover. Order is the whole correctness argument. ──
+    //
+    // 1. Subscribe FIRST, before a single byte of history is read. Anything
+    //    committed while the backfill runs then lands in this receiver's
+    //    buffer instead of falling down the gap between "history ends" and
+    //    "live begins".
+    let rx = state.hub.subscribe();
+
+    // 2. Read history — only when there is a seekable source AND a cursor it
+    //    accepts.
+    let resume_from = last_event_id.filter(|cursor| {
+        state
+            .seekable
+            .as_ref()
+            .is_some_and(|s| s.cursor_is_valid(cursor))
+    });
+
+    // 3. Render the history frames, remembering every cursor delivered.
+    let mut prefix: Vec<Result<Event, Infallible>> = Vec::new();
+    let mut already_delivered: HashSet<String> = HashSet::new();
+    let mut resumed = None;
+
+    if let (Some(source), Some(cursor)) = (&state.seekable, &resume_from) {
+        match source.backfill(cursor).await {
+            Ok(history) => {
+                for event in history {
+                    // Recorded before filtering, so the skip set drains on
+                    // exactly what the backfill covered — not on the subset
+                    // this caller happens to be allowed to see.
+                    if let Some(c) = &event.cursor {
+                        already_delivered.insert(c.clone());
+                    }
+                    if !entities.contains(&event.entity) {
+                        continue;
+                    }
+                    // Replayed history is subject to the SAME token rule as
+                    // live events. A resume must not become a way to read
+                    // history you were never allowed to see.
+                    if !tokens_visible_to(&event.authorized_tokens, &tokens) {
+                        continue;
+                    }
+                    prefix.push(Ok(change_frame(&event)));
+                }
+                resumed = Some(cursor.clone());
+            }
+            // A failed backfill degrades to live-only rather than killing the
+            // connection — and says so, so the client refetches.
+            Err(e) => eprintln!("[streamlette] backfill from '{cursor}': {e}"),
+        }
+    }
+
+    // The `ready` frame reports the position resume actually STARTED FROM —
+    // what the client sent, never the current log tail — so a client can
+    // detect rejection by comparing it against the id it sent.
+    prefix.insert(0, Ok(ready_frame(resumed.is_some(), resumed.as_deref())));
+
+    // 4. Then the live buffer, minus anything step 3 already delivered.
     let stream = tokio_stream::StreamExt::chain(
-        tokio_stream::once(Ok(ready_frame(false, None))),
-        change_stream(state.hub.subscribe(), tokens, Some(entities)),
+        tokio_stream::iter(prefix),
+        change_stream_skipping(rx, tokens, Some(entities), already_delivered),
     );
 
     Sse::new(stream).keep_alive(
@@ -189,6 +268,14 @@ mod tests {
             authorized_tokens: vec![],
             cursor: None,
             payload: None,
+        }
+    }
+
+    /// A log-backed event: cursor-carrying, so it is dedupable.
+    fn at(id: &str, cursor: &str) -> ChangeEvent {
+        ChangeEvent {
+            cursor: Some(cursor.into()),
+            ..ev(id)
         }
     }
 
@@ -327,7 +414,10 @@ mod tests {
             b.contains("\n\n")
         })
         .await;
+        ready_data(&wire)
+    }
 
+    fn ready_data(wire: &str) -> serde_json::Value {
         let first = wire.split("\n\n").next().expect("a first frame");
         assert!(
             first
@@ -361,13 +451,185 @@ mod tests {
         assert_eq!(data["resume"], false);
     }
 
-    /// Resume is Task 9: a Seekable source is live-only here too, and must
-    /// say so rather than claiming a resume it did not perform.
+    /// No cursor to resume from means no resume, even on a Seekable source.
     #[tokio::test]
-    async fn seekable_source_still_reports_live_only_until_resume_lands() {
-        let data = collect_ready(seekable(), Some("0:1")).await;
+    async fn seekable_source_without_a_cursor_is_live_only() {
+        let data = collect_ready(seekable(), None).await;
         assert_eq!(data["resume"], false);
         assert_eq!(data["cursor"], serde_json::Value::Null);
+    }
+
+    /// A cursor the source rejects degrades to live-only — never a silent
+    /// skip, and never a 400 (an error response would turn SSE auto-reconnect
+    /// into a reconnect loop). Task 10 owns the full policy; this pins the
+    /// floor.
+    #[tokio::test]
+    async fn seekable_source_with_an_unusable_cursor_falls_back_to_live_only() {
+        let data = collect_ready(seekable(), Some("garbage")).await;
+        assert_eq!(data["resume"], false);
+        assert_eq!(data["cursor"], serde_json::Value::Null);
+    }
+
+    /// A source whose `backfill` returns whatever `history` says, and which
+    /// publishes `during_backfill` into the hub *from inside* `backfill`.
+    ///
+    /// That is how the handover race is forced rather than raced: the handler
+    /// has already subscribed by the time `backfill` is awaited, so publishing
+    /// there IS "a write landed mid-backfill" — a fixed sequence, not a timing
+    /// coincidence that might or might not reproduce on a loaded CI box.
+    struct ScriptedSeekable {
+        history: Vec<ChangeEvent>,
+        during_backfill: Vec<ChangeEvent>,
+        hub: ChangeHub,
+    }
+
+    #[async_trait]
+    impl ChangeSource for ScriptedSeekable {
+        fn entity(&self) -> &str {
+            "hen"
+        }
+        async fn poll(&self) -> anyhow::Result<Vec<ChangeEvent>> {
+            Ok(vec![])
+        }
+    }
+
+    #[async_trait]
+    impl SeekableSource for ScriptedSeekable {
+        async fn backfill(&self, _cursor: &str) -> anyhow::Result<Vec<ChangeEvent>> {
+            for event in &self.during_backfill {
+                self.hub.publish(event.clone());
+            }
+            // A real backfill reads a log and yields; yielding here makes the
+            // interleaving a genuine await-point crossing rather than a
+            // straight-line call the compiler could reorder away.
+            tokio::task::yield_now().await;
+            Ok(self.history.clone())
+        }
+        fn cursor_is_valid(&self, cursor: &str) -> bool {
+            cursor.contains(':')
+        }
+    }
+
+    fn scripted(
+        hub: &ChangeHub,
+        history: Vec<ChangeEvent>,
+        during_backfill: Vec<ChangeEvent>,
+    ) -> StreamSource {
+        StreamSource::Seekable {
+            source: Arc::new(ScriptedSeekable {
+                history,
+                during_backfill,
+                hub: hub.clone(),
+            }),
+            poll_interval: Duration::from_millis(50),
+        }
+    }
+
+    /// The `id` of every `event: change` frame on the wire, in order — parsed
+    /// out of the real bytes, so duplicates and drops both show up.
+    fn change_ids(wire: &str) -> Vec<String> {
+        wire.split("\n\n")
+            .filter(|frame| {
+                frame
+                    .lines()
+                    .any(|l| l.trim() == "event:change" || l.trim() == "event: change")
+            })
+            .filter_map(|frame| {
+                let data = frame
+                    .lines()
+                    .find_map(|l| l.trim_end().strip_prefix("data:"))?
+                    .trim_start();
+                let v: serde_json::Value = serde_json::from_str(data).ok()?;
+                Some(v["id"].as_str()?.to_string())
+            })
+            .collect()
+    }
+
+    /// THE handover test.
+    ///
+    /// `0:3` is in history AND is published live while backfill runs — the
+    /// duplicate a naive "history then buffer" emits twice. `0:4` is published
+    /// live during backfill but is NOT in history — the event a naive
+    /// "backfill then subscribe" loses entirely. Exactly-once means both.
+    #[tokio::test]
+    async fn a_write_during_backfill_is_delivered_exactly_once() {
+        let hub = ChangeHub::new(64);
+        let source = scripted(
+            &hub,
+            vec![at("e2", "0:2"), at("e3", "0:3")],
+            vec![at("e3", "0:3"), at("e4", "0:4")],
+        );
+
+        let wire = wire_until(source, Some("0:1"), hub, |b| b.contains("e4")).await;
+
+        assert_eq!(
+            change_ids(&wire),
+            vec!["e2", "e3", "e4"],
+            "a write landing mid-backfill must be delivered exactly once — no \
+             duplicate of the history overlap, no loss of the live-only tail. \
+             Got:\n{wire}"
+        );
+    }
+
+    /// The `ready` cursor is the position resume STARTED FROM — what the
+    /// client sent — never the log tail. A client compares the two to detect
+    /// that its cursor was rejected, which only works if we echo it.
+    #[tokio::test]
+    async fn resume_ready_frame_echoes_the_clients_cursor() {
+        let hub = ChangeHub::new(16);
+        // History runs well past the client's cursor, so echoing the tail
+        // instead would be a visibly different value.
+        let source = scripted(&hub, vec![at("e2", "0:2"), at("e3", "0:3")], vec![]);
+
+        let wire = wire_until(source, Some("0:1"), hub, |b| b.contains("e3")).await;
+        let data = ready_data(&wire);
+        assert_eq!(data["resume"], true, "got:\n{wire}");
+        assert_eq!(data["cursor"], "0:1", "got:\n{wire}");
+    }
+
+    /// Backfilled history goes out BEFORE the live buffer, so a client
+    /// applying frames in order never sees the log out of order.
+    #[tokio::test]
+    async fn history_frames_precede_the_live_buffer() {
+        let hub = ChangeHub::new(16);
+        let source = scripted(&hub, vec![at("e2", "0:2")], vec![at("e3", "0:3")]);
+
+        let wire = wire_until(source, Some("0:1"), hub, |b| b.contains("e3")).await;
+        assert_eq!(change_ids(&wire), vec!["e2", "e3"], "got:\n{wire}");
+        let ready = wire
+            .find("event:ready")
+            .or_else(|| wire.find("event: ready"));
+        let first_change = wire
+            .find("event:change")
+            .or_else(|| wire.find("event: change"));
+        assert!(ready < first_change, "ready must come first:\n{wire}");
+    }
+
+    /// A slow backfill can overrun the bounded broadcast buffer. That must
+    /// degrade exactly like any other lag — the existing terminal `lagged`
+    /// frame and a closed stream — not through a second, bespoke mechanism.
+    #[tokio::test]
+    async fn lag_during_backfill_yields_a_lagged_frame() {
+        let hub = ChangeHub::new(2); // tiny buffer
+        let flood: Vec<ChangeEvent> = (0..10)
+            .map(|i| at(&format!("live{i}"), &format!("0:{}", 100 + i)))
+            .collect();
+        let source = scripted(&hub, vec![at("e2", "0:2")], flood);
+
+        let wire = wire_until(source, Some("0:1"), hub, |b| b.contains("lagged")).await;
+
+        assert!(
+            wire.contains("event:lagged") || wire.contains("event: lagged"),
+            "expected a terminal lagged frame, got:\n{wire}"
+        );
+        // Buffer 2, 10 published => 8 unrecoverable.
+        assert!(
+            wire.contains(r#"{"skipped":8}"#),
+            "the lagged frame must carry the true skipped count, got:\n{wire}"
+        );
+        // The resume still happened and still announced itself honestly.
+        let data = ready_data(&wire);
+        assert_eq!(data["resume"], true, "got:\n{wire}");
     }
 
     #[tokio::test]

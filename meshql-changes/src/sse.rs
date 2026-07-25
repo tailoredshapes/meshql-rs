@@ -28,6 +28,21 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 
+/// One `event: change` frame.
+///
+/// Shared with the streamlette resume path, which renders backfilled history
+/// with this same function: a replayed change and a live one describe the same
+/// log record, so they must be byte-identical on the wire. The SSE `id` IS the
+/// resume cursor — sources that can't seek emit no cursor and therefore no id,
+/// so a browser never sends back a Last-Event-ID the server can't honour.
+pub(crate) fn change_frame(ev: &ChangeEvent) -> Event {
+    let mut event = Event::default().event("change").data(ev.wire_json());
+    if let Some(cursor) = &ev.cursor {
+        event = event.id(cursor);
+    }
+    event
+}
+
 /// The filtered notification stream for one subscriber. On broadcast lag it
 /// emits a terminal `event: lagged` frame and then ends (closing the SSE
 /// connection), so the client knows it must resync rather than guessing.
@@ -36,6 +51,27 @@ pub fn change_stream(
     subscriber_tokens: Vec<String>,
     entities: Option<HashSet<String>>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
+    // An empty skip set is a no-op, so `/changes` keeps its exact behaviour.
+    change_stream_skipping(rx, subscriber_tokens, entities, HashSet::new())
+}
+
+/// `change_stream`, plus a set of cursors already delivered.
+///
+/// The resume path subscribes BEFORE reading history, so anything committed
+/// during the backfill lands in this receiver's buffer — including records the
+/// backfill also returned. `already_delivered` holds those cursors; each is
+/// consumed on its first (and, since a log offset is unique, only) match, so
+/// the set drains rather than growing for the life of the connection.
+///
+/// Only meaningful on the `Seekable` path: `Tail` events carry `cursor: None`
+/// and can never match.
+pub(crate) fn change_stream_skipping(
+    rx: tokio::sync::broadcast::Receiver<ChangeEvent>,
+    subscriber_tokens: Vec<String>,
+    entities: Option<HashSet<String>>,
+    already_delivered: HashSet<String>,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    let mut already_delivered = already_delivered;
     // `map_while` lets us emit one final frame for the lag and THEN end,
     // which `take_while` cannot do.
     //
@@ -66,17 +102,18 @@ pub fn change_stream(
                             return Some(None);
                         }
                     }
+                    // The handover skip. Checked BEFORE the token filter so
+                    // the set drains on exactly the events that were
+                    // backfilled, whatever the caller can see.
+                    if let Some(cursor) = &ev.cursor {
+                        if already_delivered.remove(cursor) {
+                            return Some(None);
+                        }
+                    }
                     if !tokens_visible_to(&ev.authorized_tokens, &subscriber_tokens) {
                         return Some(None);
                     }
-                    let mut event = Event::default().event("change").data(ev.wire_json());
-                    // The SSE id IS the resume cursor. Sources that can't seek
-                    // emit no cursor and therefore no id, so a browser never
-                    // sends back a Last-Event-ID the server can't honour.
-                    if let Some(cursor) = &ev.cursor {
-                        event = event.id(cursor);
-                    }
-                    Some(Some(Ok(event)))
+                    Some(Some(Ok(change_frame(&ev))))
                 }
             }
         })
