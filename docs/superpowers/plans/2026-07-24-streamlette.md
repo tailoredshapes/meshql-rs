@@ -4,7 +4,7 @@
 
 **Goal:** Add `streamlette` — a per-meshlette SSE subscription surface alongside restlette and graphlette — so clients get real-time change delivery instead of polling.
 
-**Architecture:** Mostly repackaging existing `meshql-changes` machinery from one deployment-level `/changes` feed into a per-entity surface declared on `ServerConfig`. Two sources feed a per-meshlette `ChangeHub`: `Tail` (existing `SearcherTail`, every backend, no resume) and `MerkqlTopic` (merkql log, supports `Last-Event-ID` resume and payload delivery). Ships in five independently-green steps.
+**Architecture:** Mostly repackaging existing `meshql-changes` machinery from one deployment-level `/changes` feed into a per-entity surface, mounted via a new `meshql-server` entry point (`ServerConfig` is deliberately untouched — see Task 6). Two sources feed a per-meshlette `ChangeHub`: `Tail` (existing `SearcherTail`, every backend, no resume) and `MerkqlTopic` (merkql log, supports `Last-Event-ID` resume and payload delivery). Ships in five independently-green steps.
 
 **Tech Stack:** Rust, axum SSE (`axum::response::sse`), `tokio::sync::broadcast`, `merkql` consumer API, `serde_json`.
 
@@ -27,8 +27,7 @@ Note: `run_merkql_sink` referenced in the spec's prose **does not exist on `main
 | `meshql-changes/src/sse.rs` | `change_stream` lag frame; `ready` frame helper (used by the streamlette handler, NOT by `change_stream`) | 1, 3 |
 | `meshql-changes/src/event.rs` | `ChangeEvent`/`WireEvent` + `cursor`/`payload` | 2 |
 | `meshql-changes/src/streamlette.rs` | **new** — `StreamletteConfig`, `StreamSource`, per-streamlette pump, handler, router | 3 |
-| `meshql-core/src/config.rs` | `ServerConfig.streamlettes` + `Default` | 3 |
-| `meshql-server/src/lib.rs` | mount streamlettes in `build_app*` | 3 |
+| `meshql-server/src/lib.rs` | `build_app_with_streams` entry point (`ServerConfig` untouched — see Task 6) | 3 |
 | `meshql-merkql/src/stream.rs` | **new** — `MerkqlTopicSource` (`ChangeSource` impl), cursor, backfill, resume | 4 |
 | `meshql-iron` skill docs × 5 repos | `references/streaming.md`, three `SKILL.md` edits | 5 |
 
@@ -81,50 +80,57 @@ Expected: FAIL — the current `take_while` drops the `Lagged` item, so the fina
 
 In `meshql-changes/src/sse.rs`, replace the `.take_while(...)` line and the `filter_map` closure's `expect`:
 
+Use **`map_while`**, not `scan` — `tokio_stream::StreamExt` has no `scan` (the trait provides `all any chain chunks_timeout collect filter filter_map fold fuse map map_while merge next peekable skip skip_while take take_while then throttle timeout timeout_repeating try_next`), and `futures` is only a dev-dependency here so `futures::StreamExt::scan` isn't reachable from `src/` — nor would it typecheck, since it expects a closure returning a `Future`.
+
 ```rust
 pub fn change_stream(
     rx: tokio::sync::broadcast::Receiver<ChangeEvent>,
     subscriber_tokens: Vec<String>,
     entities: Option<HashSet<String>>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
-    // `scan` lets us emit one final frame for the lag and THEN end, which
-    // `take_while` cannot do. `done` guards against a broadcast stream that
-    // yields further items after a Lagged.
+    // `map_while` lets us emit one final frame for the lag and THEN end,
+    // which `take_while` cannot do. `done` guards against a broadcast
+    // stream that yields further items after a Lagged.
     let mut done = false;
-    BroadcastStream::new(rx).scan((), move |_, item| {
-        if done {
-            return None;
-        }
-        match item {
-            Err(BroadcastStreamRecvError::Lagged(skipped)) => {
-                done = true;
-                // Terminal frame: the client MUST resync (refetch), because
-                // `skipped` events were dropped and are unrecoverable here.
-                Some(Some(Ok(Event::default()
-                    .event("lagged")
-                    .data(format!(r#"{{"skipped":{skipped}}}"#)))))
+    BroadcastStream::new(rx)
+        .map_while(move |item| {
+            if done {
+                return None;
             }
-            Ok(ev) => {
-                if let Some(wanted) = &entities {
-                    if !wanted.contains(&ev.entity) {
+            match item {
+                Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+                    done = true;
+                    // Terminal frame: the client MUST resync (refetch) —
+                    // `skipped` events were dropped and are unrecoverable.
+                    Some(Some(Ok(Event::default()
+                        .event("lagged")
+                        .data(format!(r#"{{"skipped":{skipped}}}"#)))))
+                }
+                Ok(ev) => {
+                    if let Some(wanted) = &entities {
+                        if !wanted.contains(&ev.entity) {
+                            return Some(None);
+                        }
+                    }
+                    if !tokens_visible_to(&ev.authorized_tokens, &subscriber_tokens) {
                         return Some(None);
                     }
+                    // `id:` stays created_at for now; Task 2 replaces it
+                    // with the resume cursor once that field exists.
+                    Some(Some(Ok(Event::default()
+                        .event("change")
+                        .id(ev.created_at.to_string())
+                        .data(ev.wire_json()))))
                 }
-                if !tokens_visible_to(&ev.authorized_tokens, &subscriber_tokens) {
-                    return Some(None);
-                }
-                Some(Some(Ok(Event::default()
-                    .event("change")
-                    .id(ev.created_at.to_string())
-                    .data(ev.wire_json()))))
             }
-        }
-    })
-    .filter_map(|x| x)
+        })
+        .filter_map(|x| x)
 }
 ```
 
-Note `scan` yields `Option<Option<_>>`: outer `None` ends the stream, inner `None` skips a filtered event. The trailing `.filter_map(|x| x)` flattens it.
+`map_while` yields `Option<Option<_>>`: outer `None` ends the stream, inner `None` skips a filtered event. The trailing `.filter_map(|x| x)` flattens it.
+
+**Carry forward to Task 2: the SSE `id:` must become the cursor.** It stays `created_at` here only because `ChangeEvent.cursor` doesn't exist yet. Forgetting to change it in Task 2 is a silent production failure — the browser would send a millisecond timestamp back as `Last-Event-ID`, Task 10's `cursor_is_valid` would reject every real reconnect as malformed, and Task 9's resume path would never execute, all while the suite stays green (Tasks 9 and 10 construct cursors directly rather than round-tripping a browser).
 
 - [ ] **Step 4: Run the whole crate's tests**
 
@@ -230,9 +236,21 @@ struct WireEvent<'a> {
 
 Update `wire_json` to pass `cursor: self.cursor.as_deref()` and `payload: self.payload.as_ref()`.
 
+**Also wire the cursor into the SSE `id:` field now** (deferred from Task 1, where the field didn't exist yet). In `meshql-changes/src/sse.rs`'s `change_stream`, replace the unconditional `.id(ev.created_at.to_string())` with:
+
+```rust
+                    let mut event = Event::default().event("change").data(ev.wire_json());
+                    if let Some(cursor) = &ev.cursor {
+                        event = event.id(cursor);
+                    }
+                    Some(Some(Ok(event)))
+```
+
+Add a test asserting a cursor-bearing event's SSE `id:` equals its cursor, and that an event with `cursor: None` emits no `id:` at all. Without this, resume is dead in production while every test passes — see Task 1's note.
+
 - [ ] **Step 4: Fix every construction site**
 
-`ChangeEvent` is constructed with struct literals in `src/tail.rs`, test helpers in `src/hub.rs` and `src/sse.rs`, `src/testing.rs`, and `tests/sse_integration.rs`. Add `cursor: None, payload: None` to each. Let the compiler find them:
+`ChangeEvent` struct literals live in `src/tail.rs` (4), `src/hub.rs`, `src/sse.rs`, and `src/event.rs`'s own `event()` test helper. (`src/testing.rs` and `tests/sse_integration.rs` contain none.) Add `cursor: None, payload: None` to each. Rather than trusting that list, let the compiler enumerate them:
 
 Run: `cargo build -p meshql-changes --all-targets 2>&1 | grep "missing field"`
 
@@ -457,28 +475,23 @@ git commit -m "feat(changes): per-streamlette pump task"
 ```rust
     #[tokio::test]
     async fn ready_frame_declares_live_only_for_a_tail_source() {
-        let frames = collect_ready(StreamSource::Tail {
-            source: Arc::new(FakeSource { entity: "hen".into(), batches: Mutex::new(vec![]) }),
-            poll_interval: Duration::from_millis(50),
-        }, None).await;
-        assert!(frames.contains("ready"));
-        assert!(frames.contains(r#""resume":false"#));
-        assert!(frames.contains(r#""cursor":null"#));
+        let data = collect_ready(tail_source(), None).await;
+        assert_eq!(data["resume"], false);
+        assert_eq!(data["cursor"], serde_json::Value::Null);
     }
 
     #[tokio::test]
     async fn tail_source_ignores_last_event_id_rather_than_erroring() {
         // A 400 would make the browser reconnect in a loop; ignoring plus an
         // honest `ready` frame lets the client detect the rejection.
-        let frames = collect_ready(StreamSource::Tail {
-            source: Arc::new(FakeSource { entity: "hen".into(), batches: Mutex::new(vec![]) }),
-            poll_interval: Duration::from_millis(50),
-        }, Some("0:99")).await;
-        assert!(frames.contains(r#""resume":false"#));
+        let data = collect_ready(tail_source(), Some("0:99")).await;
+        assert_eq!(data["resume"], false);
     }
 ```
 
-Write `collect_ready` as a helper that builds the handler's stream and returns the first frame's debug string.
+**Do not assert against `format!("{event:?}")`.** `axum::response::sse::Event` derives `Debug` over a `BytesMut`, and the `bytes` crate's `Debug` impl escapes `"` as `\"` — so `contains(r#""resume":false"#)` can never match even a correct implementation. (Task 1's `contains("lagged")`/`contains("skipped")` are fine precisely because they contain no quotes, which is also why the pre-existing tests in this file only ever match bare words like `"yep"`.)
+
+Write `collect_ready` to pull the first frame's `data:` line out of the rendered SSE bytes and parse it as JSON, returning `serde_json::Value`. Asserting on parsed JSON is both immune to the escaping problem and a stronger assertion than substring matching.
 
 - [ ] **Step 2: Run and watch it fail**
 
@@ -505,8 +518,16 @@ fn ready_frame(resume: bool, cursor: Option<&str>) -> Event {
     // browser's Last-Event-ID tracking.
 }
 
-pub fn streamlette_router(config: StreamletteConfig, auth: Arc<dyn Auth>) -> Router { /* ... */ }
+/// The hub is created by the caller (`build_app_with_streams`), which also
+/// spawns the pump feeding it — hence three arguments, not two.
+pub fn streamlette_router(
+    config: StreamletteConfig,
+    hub: ChangeHub,
+    auth: Arc<dyn Auth>,
+) -> Router { /* ... */ }
 ```
+
+Add `use meshql_core::{Auth, AuthContext};` to the module's imports — `streamlette.rs` doesn't have them yet.
 
 The handler: read `Last-Event-ID` from headers; if the source isn't `Seekable` or the cursor is invalid, emit `ready_frame(false, None)` then `change_stream`. Resume is Task 9.
 
@@ -526,9 +547,11 @@ git commit -m "feat(changes): streamlette handler with ready frame"
 ### Task 6: Mount streamlettes from `ServerConfig`
 
 **Files:**
-- Modify: `meshql-core/src/config.rs` (~line 177)
-- Modify: `meshql-server/src/lib.rs` (`build_app`, `build_app_ext`, `build_app_with_auth`)
-- Modify: ~20 construction sites across 19 files
+- Modify: `meshql-server/Cargo.toml` (add `meshql-changes`)
+- Modify: `meshql-server/src/lib.rs` (add `build_app_with_streams`; existing fns untouched)
+- Create: `meshql-server/tests/streamlette_integration.rs`
+
+`meshql-core/src/config.rs` is deliberately NOT modified, and no `ServerConfig` construction site changes — see below.
 
 **The spec's `ServerConfig.streamlettes` is not buildable — this task deviates deliberately, and the deviation is an improvement.**
 
@@ -561,35 +584,55 @@ pub async fn build_app_with_streams(
     let mut extra = extra;
     for sl in streamlettes {
         let hub = ChangeHub::new(sl.hub_capacity);
-        let source = match &sl.source { /* Tail | Seekable */ };
-        tokio::spawn(meshql_changes::streamlette::run_pump(
-            source, hub.clone(), sl.source.poll_interval(),
+        let poll_interval = sl.source.poll_interval();
+        // Upcast Arc<dyn SeekableSource> -> Arc<dyn ChangeSource> for the pump.
+        let source: Arc<dyn ChangeSource> = match &sl.source {
+            StreamSource::Tail { source, .. } => Arc::clone(source),
+            StreamSource::Seekable { source, .. } => Arc::clone(source) as Arc<dyn ChangeSource>,
+        };
+        tokio::spawn(meshql_changes::streamlette::run_pump(source, hub.clone(), poll_interval));
+        extra = extra.merge(meshql_changes::streamlette::streamlette_router(
+            sl, hub, Arc::clone(&auth),
         ));
-        extra = extra.merge(meshql_changes::streamlette::streamlette_router(sl, hub, auth.clone()));
     }
-    build_app_ext(config, extra).await
+    // MUST delegate to build_app_with_auth, NOT build_app_ext:
+    // `build_app_ext(config, extra)` is literally
+    // `build_app_with_auth(config, Arc::new(NoAuth), extra)`
+    // (meshql-server/src/lib.rs:26-28), so using it here would give the
+    // streamlettes the caller's Auth while every restlette and graphlette
+    // silently got NoAuth. `changes_router`'s own doc comment
+    // (meshql-changes/src/sse.rs:69-71) states the requirement: pass the
+    // SAME Arc<dyn Auth> so the stream and the lettes agree on identity.
+    build_app_with_auth(config, auth, extra).await
 }
 ```
 
 - [ ] **Step 2: Update the spec to match**
 
-Edit `docs/superpowers/specs/2026-07-24-streamlette-design.md`'s Configuration section: remove `streamlettes` from the `ServerConfig` snippet, describe the `build_app_with_streams` entry point, and delete the "Breaking-change churn" paragraph (no longer applicable). Note the cycle as the reason. A plan that silently diverges from its spec leaves the next reader trusting the wrong document.
+Edit `docs/superpowers/specs/2026-07-24-streamlette-design.md`:
 
-- [ ] **Step 2: Write an integration test**
+1. **Configuration section** — remove `streamlettes` from the `ServerConfig` snippet, describe the `build_app_with_streams` entry point, and delete the "Breaking-change churn" paragraph (no longer applicable). Note the cycle as the reason.
+2. **Testing section** — the spec requires `meshql-changes/src/testing.rs`'s `ChangeSource` cert suite to run against `MerkqlTopicSource`. **That requirement is being dropped, deliberately, and the spec must say so rather than leave it live with no task.** The existing certs encode `SearcherTail` semantics that a raw log source cannot satisfy: `test_ignores_identical_rewrite` is false by construction for a log (an append is recorded whether or not the payload changed — that is the point of a log), and the delete-detection certs assume tombstone-aware `find_all`. Replace with the source-specific tests in Tasks 7-10.
 
-Create `meshql-changes/tests/streamlette_integration.rs`: boot a server with one `Tail`-sourced streamlette, connect, assert the `ready` frame arrives, write via the repository, assert a `change` frame follows.
+A plan that silently diverges from its spec leaves the next reader trusting the wrong document.
 
-- [ ] **Step 3: Run**
+- [ ] **Step 3: Write an integration test**
 
-Run: `cargo test -p meshql-changes --test streamlette_integration`
+Create it at **`meshql-server/tests/streamlette_integration.rs`**, not in `meshql-changes` — it calls `build_app_with_streams`, which lives in `meshql-server`. (Putting it in `meshql-changes` would need a `meshql-server` dev-dependency, forming a dev-dep cycle; cargo permits that, but there's no reason to introduce one.)
+
+Boot a server with one `Tail`-sourced streamlette, connect, assert the `ready` frame arrives, write via the repository, assert a `change` frame follows.
+
+- [ ] **Step 4: Run**
+
+Run: `cargo test -p meshql-server --test streamlette_integration`
 Expected: PASS.
 
-- [ ] **Step 4: Full workspace build**
+- [ ] **Step 5: Full workspace build**
 
 Run: `cargo build --workspace --all-targets`
-Expected: clean — confirms no construction site was missed.
+Expected: clean. `ServerConfig` is unchanged, so nothing outside the new code should need edits — a failure here means the deviation wasn't applied correctly.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 cargo fmt && cargo clippy --workspace --all-targets
@@ -605,7 +648,7 @@ git commit -m "feat(server): mount per-meshlette streamlettes"
 
 **Files:**
 - Create: `meshql-merkql/src/stream.rs`
-- Modify: `meshql-merkql/Cargo.toml` (add `meshql-changes`), `meshql-merkql/src/lib.rs`
+- Modify: `meshql-merkql/Cargo.toml` (add `meshql-changes` and `anyhow = "1"` — the crate currently has neither, and `ChangeSource::poll` returns `anyhow::Result`), `meshql-merkql/src/lib.rs`
 
 Three constraints from the spec, each of which produces a *silent* failure if skipped. Implement all three in this task, with a test each.
 
@@ -727,10 +770,27 @@ git commit -m "feat(merkql): MerkqlTopicSource with single-partition, pre-creati
 `a_write_during_backfill_is_delivered_exactly_once` is the important one — inject a write mid-backfill and assert the client sees it once, not zero or twice.
 
 - [ ] **Step 2:** Run, watch fail.
-- [ ] **Step 3: Implement** — v1 seek is subscribe-from-`Earliest` and skip records at-or-before the cursor (merkql has no seek API; **do not modify `/tank/repos/tailoredshapes/merkql/`**, it's a separate repo pinned at `v0.2.0`). Handler: subscribe to hub → read history → emit history → emit buffer, deduping by `cursor`.
-- [ ] **Step 4:** Run, PASS.
-- [ ] **Step 5: Verify** — break the dedupe, confirm `a_write_during_backfill_is_delivered_exactly_once` goes red, restore.
-- [ ] **Step 6:** Commit — `feat(merkql): Last-Event-ID resume with backfill handover`
+
+- [ ] **Step 3: Implement `SeekableSource::backfill`**
+
+**Use a second, throwaway consumer — not the source's own.** The source's `Consumer` is already positioned at the live tail (the pump has been draining it), so it cannot also replay history. `backfill` creates a *fresh* consumer with a *fresh* `group_id`, subscribed from `OffsetReset::Earliest`, and drains it, discarding records at-or-before the cursor. Drop it when done.
+
+merkql has no seek API, so skipping is the only option — **do not modify `/tank/repos/tailoredshapes/merkql/`**, it's a separate repo pinned at `v0.2.0`. Re-reading the log prefix is the accepted cost, documented in the spec.
+
+- [ ] **Step 4: Implement the handover in the streamlette handler**
+
+Order matters, and getting it wrong loses or duplicates events:
+
+1. `hub.subscribe()` **first** — before any history read, so nothing committed during backfill is missed.
+2. `source.backfill(cursor)` — read history.
+3. Emit history frames.
+4. Emit buffered live frames, **skipping any whose `cursor` already appeared in step 3.**
+
+Dedupe applies only on the `Seekable` path; `Tail` events carry `cursor: None` and never reach here.
+
+- [ ] **Step 5:** Run, PASS.
+- [ ] **Step 6: Verify it bites** — break the dedupe (drop the step-4 skip), confirm `a_write_during_backfill_is_delivered_exactly_once` goes red, restore.
+- [ ] **Step 7:** Commit — `feat(merkql): Last-Event-ID resume with backfill handover`
 
 ### Task 10: Unusable-cursor policy
 
@@ -741,7 +801,8 @@ git commit -m "feat(merkql): MerkqlTopicSource with single-partition, pre-creati
 - [ ] **Step 2:** Run, watch fail.
 - [ ] **Step 3:** Implement `cursor_is_valid`; handler degrades to `ready_frame(false, None)`.
 - [ ] **Step 4:** Run, PASS.
-- [ ] **Step 5:** Commit — `feat(merkql): unusable resume cursors degrade to live-only, never a silent skip`
+- [ ] **Step 5: Verify it bites** — make `cursor_is_valid` return `true` unconditionally and confirm the four tests go red, then restore. This is the fourth silent-failure guard (alongside the lag frame, dedupe, and `group_id` freshness), and the only one the spec's break-it list omits; a cursor past the tail silently yields an empty stream, which is indistinguishable from "nothing happened."
+- [ ] **Step 6:** Commit — `feat(merkql): unusable resume cursors degrade to live-only, never a silent skip`
 
 ### Task 11: Manifest conformance
 
@@ -792,6 +853,7 @@ Run: `grep -n "streaming.md" /tank/repos/tailoredshapes/meshql-rs/.claude/skills
 ```bash
 cd /tank/repos/tailoredshapes
 for r in meshql meshobj cms teamchat; do
+  mkdir -p $r/.claude/skills/meshql-iron/references
   cp meshql-rs/.claude/skills/meshql-iron/SKILL.md $r/.claude/skills/meshql-iron/SKILL.md
   cp meshql-rs/.claude/skills/meshql-iron/references/streaming.md $r/.claude/skills/meshql-iron/references/streaming.md
 done
