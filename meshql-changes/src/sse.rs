@@ -35,8 +35,14 @@ pub fn change_stream(
     entities: Option<HashSet<String>>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     // `map_while` lets us emit one final frame for the lag and THEN end,
-    // which `take_while` cannot do. `done` guards against a broadcast
-    // stream that yields further items after a Lagged.
+    // which `take_while` cannot do.
+    //
+    // `done` is not defensive — it is what actually terminates the stream,
+    // so do not remove it. `BroadcastStream` always resumes delivery after
+    // a Lagged (tokio guarantees the receiver's position is advanced to the
+    // oldest buffered value, so the next recv succeeds), which means the
+    // Lagged arm alone can never end anything. `done` makes the following
+    // poll return None. Disabling it makes the stream run forever.
     let mut done = false;
     BroadcastStream::new(rx)
         .map_while(move |item| {
@@ -181,11 +187,24 @@ mod tests {
         let stream = change_stream(rx, vec!["*".into()], None);
         tokio::pin!(stream);
 
-        let mut frames = Vec::new();
-        while let Some(item) = stream.next().await {
-            frames.push(format!("{:?}", item.unwrap()));
-            assert!(frames.len() < 12, "stream must end, not hang");
-        }
+        // The drain is wrapped in a timeout because a regression here is a
+        // *hang*, not runaway emission — removing the `done` guard makes the
+        // stream poll forever. libtest has no per-test timeout, so without
+        // this a broken implementation blocks CI indefinitely instead of
+        // going red.
+        let frames = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut frames = Vec::new();
+            while let Some(item) = stream.next().await {
+                frames.push(format!("{:?}", item.unwrap()));
+                assert!(
+                    frames.len() < 12,
+                    "stream emitted far more frames than published"
+                );
+            }
+            frames
+        })
+        .await
+        .expect("stream must end, not hang");
 
         // The stream still closes (last frame is terminal)...
         let last = frames.last().expect("at least one frame");
@@ -194,9 +213,11 @@ mod tests {
             last.contains("lagged"),
             "final frame must be the lagged event, got: {last}"
         );
+        // Assert the real count, not just the field's presence: buffer 2 with
+        // 10 published means 8 dropped, and a hardcoded 0 would otherwise pass.
         assert!(
-            last.contains("skipped"),
-            "lagged frame must carry the skipped count"
+            last.contains(r#"skipped\":8"#) || last.contains(r#"skipped":8"#),
+            "lagged frame must carry the true skipped count (8), got: {last}"
         );
     }
 }
