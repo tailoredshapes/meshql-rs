@@ -22,5 +22,5 @@ pub use event::ChangeEvent;
 pub use hub::{run_tails, ChangeHub};
 pub use source::ChangeSource;
 pub use sse::{change_stream, changes_router};
-pub use streamlette::{SeekableSource, StreamSource, StreamletteConfig};
+pub use streamlette::{run_pump, SeekableSource, StreamSource, StreamletteConfig};
 pub use tail::SearcherTail;

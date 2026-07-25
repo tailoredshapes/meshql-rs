@@ -3,7 +3,7 @@
 //! Distinct from `changes_router`'s deployment-level `/changes` feed, which
 //! stays exactly as it is — this adds a pump model, it does not replace one.
 
-use crate::{ChangeEvent, ChangeSource};
+use crate::{ChangeEvent, ChangeHub, ChangeSource};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -62,10 +62,51 @@ pub struct StreamletteConfig {
     pub hub_capacity: usize,
 }
 
+/// Drive one source into one hub. One task per streamlette, so a slow
+/// source never blocks a fast one — the reason this is not `run_tails`,
+/// which shares a single round-robin task and one interval across every
+/// source it owns. A log-backed source is cheap enough to poll
+/// aggressively (an in-memory offset compare); a `SearcherTail` is not
+/// (a full `find_all` plus payload-hash diff). Sharing a loop between
+/// them makes the per-source interval inert.
+///
+/// Loops forever by design — the caller owns the `tokio::spawn` handle.
+pub async fn run_pump(source: Arc<dyn ChangeSource>, hub: ChangeHub, interval: Duration) {
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        ticker.tick().await;
+        match source.poll().await {
+            Ok(events) => {
+                for event in events {
+                    hub.publish(event);
+                }
+            }
+            // A transient source error must not kill the pump — the next
+            // tick retries. Subscribers see a gap, which the lagged/refetch
+            // path already covers.
+            Err(e) => eprintln!("[streamlette {}] poll: {e}", source.entity()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ChangeHub;
     use async_trait::async_trait;
+
+    fn ev(id: &str) -> ChangeEvent {
+        ChangeEvent {
+            entity: "hen".into(),
+            id: id.into(),
+            created_at: 1,
+            deleted: false,
+            authorized_tokens: vec![],
+            cursor: None,
+            payload: None,
+        }
+    }
 
     struct StubSource;
 
@@ -139,5 +180,74 @@ mod tests {
         let seekable: Arc<dyn SeekableSource> = Arc::new(StubSeekable);
         let base: Arc<dyn ChangeSource> = seekable;
         assert_eq!(base.entity(), "hen");
+    }
+
+    #[tokio::test]
+    async fn pump_publishes_polled_events_to_the_hub() {
+        use std::sync::Mutex;
+
+        struct BatchSource {
+            batches: Mutex<Vec<Vec<ChangeEvent>>>,
+        }
+        #[async_trait]
+        impl ChangeSource for BatchSource {
+            fn entity(&self) -> &str {
+                "hen"
+            }
+            async fn poll(&self) -> anyhow::Result<Vec<ChangeEvent>> {
+                Ok(self.batches.lock().unwrap().pop().unwrap_or_default())
+            }
+        }
+
+        let hub = ChangeHub::new(16);
+        let mut rx = hub.subscribe();
+        let source = Arc::new(BatchSource {
+            batches: Mutex::new(vec![vec![ev("e1")]]),
+        });
+
+        tokio::spawn(run_pump(source, hub.clone(), Duration::from_millis(5)));
+
+        let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("pump must publish within 2s")
+            .unwrap();
+        assert_eq!(got.id, "e1");
+    }
+
+    /// A transient storage blip must not silently stop a stream forever.
+    #[tokio::test]
+    async fn pump_survives_a_source_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct FlakySource {
+            polls: AtomicUsize,
+        }
+        #[async_trait]
+        impl ChangeSource for FlakySource {
+            fn entity(&self) -> &str {
+                "hen"
+            }
+            async fn poll(&self) -> anyhow::Result<Vec<ChangeEvent>> {
+                match self.polls.fetch_add(1, Ordering::SeqCst) {
+                    0 => Err(anyhow::anyhow!("transient poll failure")),
+                    1 => Ok(vec![ev("after-error")]),
+                    _ => Ok(vec![]),
+                }
+            }
+        }
+
+        let hub = ChangeHub::new(16);
+        let mut rx = hub.subscribe();
+        let source = Arc::new(FlakySource {
+            polls: AtomicUsize::new(0),
+        });
+
+        tokio::spawn(run_pump(source, hub.clone(), Duration::from_millis(5)));
+
+        let got = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("pump must keep polling after an error")
+            .unwrap();
+        assert_eq!(got.id, "after-error");
     }
 }
