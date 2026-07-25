@@ -2835,10 +2835,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "futures",
+ "meshql-changes",
  "meshql-core",
  "meshql-graphlette",
  "meshql-restlette",
+ "meshql-sqlite",
+ "reqwest",
  "serde_json",
+ "sqlx",
  "tokio",
  "tower-http 0.5.2",
 ]

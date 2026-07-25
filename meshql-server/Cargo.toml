@@ -10,8 +10,21 @@ repository = "https://github.com/tailoredshapes/meshql-rs"
 meshql-core = { version = "0.1.0", path = "../meshql-core" }
 meshql-graphlette = { version = "0.1.0", path = "../meshql-graphlette" }
 meshql-restlette = { version = "0.1.0", path = "../meshql-restlette" }
+# Streamlettes are passed to `build_app_with_streams`, never stored on
+# `ServerConfig`: `StreamletteConfig` lives here, in a crate that already
+# depends on meshql-core, so a `ServerConfig.streamlettes` field would make
+# meshql-core → meshql-changes → meshql-core. This edge is the acyclic half.
+meshql-changes = { version = "0.1.0", path = "../meshql-changes" }
 axum = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
 tower-http = { workspace = true }
 anyhow = "1"
+
+[dev-dependencies]
+# Only dev edges — meshql-sqlite dev-depends on meshql-server too, and Cargo
+# permits a cycle whose every edge is a dev-dependency.
+meshql-sqlite = { version = "0.1.0", path = "../meshql-sqlite" }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+futures = "0.3"

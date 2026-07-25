@@ -28,16 +28,22 @@ This project closes that gap: **a third surface type, `streamlette`, declared pe
 
 ## Configuration
 
-A third vec on `ServerConfig` (`meshql-core/src/config.rs:177`, currently exactly `port`/`graphlettes`/`restlettes`):
+**Streamlettes are passed to `meshql-server`, not stored on `ServerConfig`.** An earlier draft of this section put a third vec on `ServerConfig` (`meshql-core/src/config.rs`, exactly `port`/`graphlettes`/`restlettes`). **That is not buildable.** `StreamletteConfig` lives in `meshql-changes`, which depends on `meshql-core` — so a `meshql-core::ServerConfig` naming it would be a dependency cycle (`meshql-core → meshql-changes → meshql-core`).
+
+The resolution is an entry point on `meshql-server`, which depends on `meshql-core`/`meshql-graphlette`/`meshql-restlette` and *not* on `meshql-changes`, while `meshql-changes` does not depend on `meshql-server`. Adding `meshql-server → meshql-changes` therefore creates no cycle:
 
 ```rust
-pub struct ServerConfig {
-    pub port: u16,
-    pub graphlettes: Vec<GraphletteConfig>,
-    pub restlettes: Vec<RestletteConfig>,
-    pub streamlettes: Vec<StreamletteConfig>,   // new
-}
+pub async fn build_app_with_streams(
+    config: ServerConfig,          // unchanged — meshql-core is untouched
+    extra: Router,
+    streamlettes: Vec<StreamletteConfig>,
+    auth: Arc<dyn Auth>,
+) -> anyhow::Result<Router>
+```
 
+It is a *new* function, so every existing caller of `build_app`/`build_app_ext`/`build_app_with_auth` keeps compiling. It creates one `ChangeHub` and spawns one `run_pump` task per streamlette, merges each `streamlette_router` into `extra`, then delegates to **`build_app_with_auth`** — never to `build_app_ext`, which hardcodes `NoAuth` and would hand the streamlettes the caller's real `Auth` while every restlette and graphlette silently ran unauthenticated. That split-auth hole has its own regression test (`meshql-server/tests/streamlette_integration.rs`).
+
+```rust
 pub struct StreamletteConfig {
     pub path: String,      // "/message_posted/stream"
     pub entity: String,    // the ChangeEvent.entity this stream carries
@@ -71,11 +77,13 @@ Two deliberate shapes here, both from review findings:
 - **`include_payload` lives on `MerkqlTopic`, not on `StreamletteConfig`** — this makes the invalid combination unrepresentable rather than merely discouraged. See "Payload."
 - **No `searcher` field on `StreamletteConfig`.** An earlier draft had one "for backfill on resume"; backfill comes from the log instead (see "Resume"), so it would be dead weight.
 
-**Breaking-change churn.** Adding a field to `ServerConfig` breaks every literal construction — **20 construction sites across 19 files in-repo** (examples, `meshql-mcp`, per-backend `farm_cert.rs`/`perf_server.rs`), plus the out-of-repo `cms` and `teamchat` products, which pin `v0.1.0` and so won't break until they bump. Give `ServerConfig` a `Default`/builder so a deployment with no streams need not write `streamlettes: vec![]`, and prefer whatever keeps existing call sites compiling.
+`StreamletteConfig` also carries `hub_capacity`, resolving the open question under "Payload" about where broadcast capacity lives: it is a config field, not a `StreamSource` field, because both variants have subscribers and both can lag.
+
+There is **no breaking-change churn**. Because `ServerConfig` is untouched, none of its ~20 in-repo construction sites change, and neither do the out-of-repo `cms` and `teamchat` products (which pin `v0.1.0`). A deployment with no streams calls the existing builders and never mentions streamlettes at all.
 
 ## Two sources, one contract
 
-Both variants implement the existing `ChangeSource` trait and feed a **per-meshlette `ChangeHub`**; everything downstream of the hub is identical, which is what keeps behavior certifiable across backends — and lets both reuse `meshql-changes/src/testing.rs`'s existing poll-driven `ChangeSource` cert suite.
+Both variants implement the existing `ChangeSource` trait and feed a **per-meshlette `ChangeHub`**; everything downstream of the hub is identical, which is what keeps the *stream's* behavior — filtering, `ready`, lag, entity scoping — identical across backends. It does **not** make the two sources interchangeable at the cert level: see "Testing" for why the shared `ChangeSource` cert suite stays a `Tail`-only suite.
 
 - **`MerkqlTopic`** — a `merkql::consumer::Consumer` subscribed to the entity's topic. **This polls.** `Consumer::poll(&mut self, _timeout)` is synchronous, takes `&mut self`, and *ignores its timeout argument entirely*, returning immediately (`merkql/src/consumer.rs:116`) — there is no blocking wait and no subscribe-with-callback. Do **not** write a zero-interval busy loop.
 
@@ -199,7 +207,11 @@ A new reference doc covering: discover the `sse` surface and its `resume` flag f
 
 - **Unit:** the `lagged` frame is emitted (not swallowed); the `ready` frame declares the honoured mode; token filtering excludes invisible events; `include_payload` toggles payload presence; `WireEvent` never serializes `authorized_tokens`.
 - **Cursor/resume:** backfill returns exactly the events after a cursor; the handover emits no duplicates and drops nothing when a write lands *during* backfill; lag during backfill degrades to `lagged` + close; a fresh `group_id` is used per connection (assert two sequential connections both see history, which fails if a committed offset is reused); a `Tail` stream emits no cursor and ignores `Last-Event-ID` while reporting `resume: false` in `ready`.
-- **Certification across sources:** the same assertions run against both `MerkqlTopic` and `Tail` via the existing `ChangeSource` cert pattern in `meshql-changes/src/testing.rs`.
+- **Certification across sources: DROPPED, deliberately.** An earlier draft required `meshql-changes/src/testing.rs`'s `ChangeSource` cert suite to run against the merkql source as well as `Tail`. It cannot: those certs encode `SearcherTail` semantics that a raw append-only log does not have, and forcing them would mean asserting the log is something it isn't.
+  - `test_ignores_identical_rewrite` is **false by construction** for a log — an append is recorded whether or not the payload changed, so there is nothing to dedupe against. `SearcherTail` can skip it only because it diffs against kept state by payload hash.
+  - `test_detects_delete` and `test_update_then_delete_between_polls` assume a tombstone-aware `find_all`, i.e. deletes observed as *disappearances* from a latest-version-per-id view. A log observes deletes as records, not absences.
+
+  The replacement is source-specific tests in Tasks 7–10, covering the log's own semantics (cursor exactness, backfill, resume degradation) rather than a shared suite that would have to be weakened until it certified nothing. The `Tail` source keeps running the existing cert suite, unchanged.
 - **Manifest conformance:** `resume: true` implies a seekable source.
 - **Break-it verification:** per the practice this project has settled into, deliberately break the lag frame, the dedupe, and the `group_id` freshness, and confirm the certs go red before shipping. Both prior fixes this week (`e823ce0`, `5d5cbdb`) shipped only after this check, and in both cases the pre-existing suite stayed green — which is exactly why the check exists.
 - **End-to-end:** a real server with a streamlette, a real SSE client, a write, and an assertion the event arrives without polling.
@@ -210,7 +222,7 @@ This design is at the upper edge of a single plan — a config break, a public-s
 
 1. **Lag frame on the existing `/changes`.** Fix `change_stream`'s silent `take_while`; update `lagged_subscriber_stream_closes`. Valuable on its own — it fixes a live bug in a shipped route.
 2. **`ChangeEvent`/`WireEvent` gain `cursor` + `payload`** (both `None` everywhere so far). Isolates the breaking change from any behavior change.
-3. **`ServerConfig.streamlettes` + `Tail` source + `ready` frame.** A working per-entity stream on every backend, no resume, no payload.
+3. **`build_app_with_streams` + `Tail` source + `ready` frame.** A working per-entity stream on every backend, no resume, no payload. (Not `ServerConfig.streamlettes` — see "Configuration" for the cycle.)
 4. **`MerkqlTopic` + resume + payload**, with the single-partition assertion, topic pre-creation, fresh `group_id`, and unusable-cursor policy.
 5. **`meshql-iron` `streaming.md` + the three `SKILL.md` edits, synced across all five repos.**
 
@@ -241,12 +253,17 @@ A second review confirmed all of the above landed and found five more, also fixe
 
 Also settled from that review: `ready` is emitted by the streamlette handler rather than `change_stream`, so `/changes`'s wire contract is unchanged for existing consumers including meshobj's TS client; `ready.cursor` is defined as the position resume actually started from (never the log tail), so a client can detect its cursor was rejected; and both source variants name the field `poll_interval`.
 
+Implementation found two more, corrected in place above rather than left as live requirements:
+
+- **`ServerConfig.streamlettes` was not buildable** — `StreamletteConfig` lives in `meshql-changes`, which depends on `meshql-core`, so the field would have closed a dependency cycle. Streamlettes are a `build_app_with_streams` parameter on `meshql-server` instead; `meshql-core/src/config.rs` is untouched, which also erases the breaking-change churn the draft budgeted for.
+- **The shared `ChangeSource` cert suite cannot certify a log-backed source** — `test_ignores_identical_rewrite` is false by construction for an append-only log, and the delete certs assume a tombstone-aware `find_all`. Requirement dropped, with source-specific tests in its place.
+
 ## Summary of what this design intentionally leaves open
 
 - **A real seek API in `merkql`** — v1 skips from `Earliest`; the cursor format is chosen so a seek drops in behind it unchanged.
 - **Multi-partition topics for streamlettes** — v1 asserts single-partition. Support means a per-partition cursor vector, and should wait until a deployment actually needs the throughput.
 - **Mid-connection privilege changes** — tokens captured at connect; documented, not solved.
 - **`SearcherTail`'s token-staleness window** — pre-existing, documented, not fixed here; it is why `Tail` cannot carry payloads.
-- **Whether broadcast capacity becomes a `StreamSource` field** — an implementation call.
+- ~~**Whether broadcast capacity becomes a `StreamSource` field**~~ — settled: it is `StreamletteConfig.hub_capacity`, since both variants have subscribers and both can lag.
 - **Java/TS parity** — separate project, genuinely different because of merkql's Rust-only constraint.
 - **Converting `teamchat` off polling** — follow-on, and the real test of whether the guidance suffices.
