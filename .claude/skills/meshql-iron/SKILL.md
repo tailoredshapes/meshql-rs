@@ -1,6 +1,6 @@
 ---
 name: meshql-iron
-description: Build a frontend or API client against a meshql deployment. Use when writing UI code, a client library, or any consumer that reads from and writes to a meshql-backed service (REST restlettes + GraphQL graphlettes). Covers manifest discovery, the event-mesh/domain-mesh convention, and "honesty" freshness timestamps.
+description: Build a frontend or API client against a meshql deployment. Use when writing UI code, a client library, or any consumer that reads from, writes to, or subscribes to a meshql-backed service (REST restlettes, GraphQL graphlettes, SSE streamlettes) — including real-time or live-updating UIs, and anything that would otherwise poll. Covers manifest discovery, the event-mesh/domain-mesh convention, "honesty" freshness timestamps, and SSE streaming with reconnect and resume.
 ---
 
 # meshql-iron: building a frontend against meshql
