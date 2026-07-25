@@ -55,3 +55,11 @@ Feature: Repository Contract
     And I list all envelopes
     Then listing should return exactly 1 result for "Latest"
     And the listed version should have value "new"
+
+  Scenario: Listing excludes a removed envelope that has an earlier version
+    When I create two dated versions of envelope "Deleted History" with old value "old" and new value "new"
+    And I remove the envelope named "Deleted History"
+    And I list all envelopes
+    Then the remove should return true
+    And reading "Deleted History" should return None
+    And the envelope list should not contain "Deleted History"

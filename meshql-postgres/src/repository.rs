@@ -162,10 +162,17 @@ impl Repository for PostgresRepository {
     }
 
     async fn list(&self, tokens: &[String]) -> Result<Vec<Envelope>> {
+        // `remove` appends a tombstone version, so the latest row per id has to
+        // be resolved *before* deleted rows are dropped — filtering first would
+        // discard the tombstone and resurface the previous, non-deleted version.
         let sql = format!(
-            "SELECT DISTINCT ON (id) id, created_at_ms, deleted, authorized_tokens, payload
-             FROM {} WHERE deleted = FALSE
-             ORDER BY id, created_at_ms DESC",
+            "SELECT id, created_at_ms, deleted, authorized_tokens, payload
+             FROM (
+                 SELECT DISTINCT ON (id) id, created_at_ms, deleted, authorized_tokens, payload
+                 FROM {}
+                 ORDER BY id, created_at_ms DESC
+             ) latest
+             WHERE deleted = FALSE",
             self.table
         );
         let rows = sqlx::query(&sql)

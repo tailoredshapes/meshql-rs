@@ -58,3 +58,9 @@ async fn should_only_list_latest_version() {
     let repo = create_repo().await;
     cert::test_list_shows_only_latest_version(&repo).await;
 }
+
+#[tokio::test]
+async fn should_not_list_deleted_envelope_with_prior_version() {
+    let repo = create_repo().await;
+    cert::test_list_excludes_deleted_envelope_with_prior_version(&repo).await;
+}

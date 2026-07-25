@@ -179,6 +179,55 @@ pub async fn test_list_shows_only_latest_version(repo: &dyn Repository) {
     assert_eq!(for_id[0].payload.get("version").unwrap(), &json!("new"));
 }
 
+/// `remove` appends a tombstone version rather than mutating rows, so a backend
+/// that drops deleted rows *before* resolving the latest version per id will
+/// throw away the tombstone and resurface the previous version. One version is
+/// not enough to catch that — there has to be an older one left behind to
+/// resurface.
+pub async fn test_list_excludes_deleted_envelope_with_prior_version(repo: &dyn Repository) {
+    let mut payload_v1 = Stash::new();
+    payload_v1.insert("version".to_string(), json!("old"));
+    let env_v1 = Envelope {
+        id: "deleted-with-history".to_string(),
+        payload: payload_v1,
+        created_at: chrono::Utc::now() - chrono::Duration::seconds(10),
+        deleted: false,
+        authorized_tokens: star(),
+    };
+    repo.create(env_v1, &star()).await.unwrap();
+
+    let mut payload_v2 = Stash::new();
+    payload_v2.insert("version".to_string(), json!("new"));
+    let env_v2 = Envelope {
+        id: "deleted-with-history".to_string(),
+        payload: payload_v2,
+        created_at: chrono::Utc::now() - chrono::Duration::seconds(5),
+        deleted: false,
+        authorized_tokens: star(),
+    };
+    repo.create(env_v2, &star()).await.unwrap();
+
+    let removed = repo.remove("deleted-with-history", &star()).await.unwrap();
+    assert!(removed, "remove should report that it deleted the envelope");
+
+    let read_back = repo
+        .read("deleted-with-history", &star(), None)
+        .await
+        .unwrap();
+    assert!(read_back.is_none(), "read should not return a removed id");
+
+    let all = repo.list(&star()).await.unwrap();
+    let resurrected: Vec<_> = all
+        .iter()
+        .filter(|e| e.id == "deleted-with-history")
+        .map(|e| e.payload.get("version").cloned())
+        .collect();
+    assert!(
+        resurrected.is_empty(),
+        "list resurrected a removed envelope with versions {resurrected:?}"
+    );
+}
+
 // ---- Searcher Certification Tests ----
 
 pub async fn seed_searcher_data(repo: &dyn Repository) {

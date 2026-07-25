@@ -239,6 +239,53 @@ async fn create_two_versions(
     world.envelopes_by_name.insert(name, result_v2);
 }
 
+/// Like the step above, but both versions are dated into the past so a later
+/// `remove` writes a tombstone that is unambiguously the newest version. That
+/// separation is what makes a backend which filters `deleted` before resolving
+/// the latest version resurface the older one.
+#[when(
+    regex = r#"^I create two dated versions of envelope "([^"]+)" with old value "([^"]+)" and new value "([^"]+)"$"#
+)]
+async fn create_two_dated_versions(
+    world: &mut CertWorld,
+    name: String,
+    old_value: String,
+    new_value: String,
+) {
+    let id = format!("dated-{}", uuid::Uuid::new_v4().simple());
+
+    let mut payload_v1 = Stash::new();
+    payload_v1.insert("version".to_string(), json!(old_value));
+    let env_v1 = Envelope {
+        id: id.clone(),
+        payload: payload_v1,
+        created_at: Utc::now() - chrono::Duration::seconds(10),
+        deleted: false,
+        authorized_tokens: CertWorld::star(),
+    };
+    world
+        .repo()
+        .create(env_v1, &CertWorld::star())
+        .await
+        .unwrap();
+
+    let mut payload_v2 = Stash::new();
+    payload_v2.insert("version".to_string(), json!(new_value));
+    let env_v2 = Envelope {
+        id: id.clone(),
+        payload: payload_v2,
+        created_at: Utc::now() - chrono::Duration::seconds(5),
+        deleted: false,
+        authorized_tokens: CertWorld::star(),
+    };
+    let result_v2 = world
+        .repo()
+        .create(env_v2, &CertWorld::star())
+        .await
+        .unwrap();
+    world.envelopes_by_name.insert(name, result_v2);
+}
+
 // ---- Then assertions ----
 
 #[then("the envelopes should have generated IDs")]
@@ -278,6 +325,21 @@ async fn assert_list_contains(world: &mut CertWorld, name: String) {
     let env = world.envelopes_by_name.get(&name).expect("not in map");
     let found = world.last_envelopes.iter().any(|e| e.id == env.id);
     assert!(found, "envelope '{name}' not found in list");
+}
+
+#[then(regex = r#"^the envelope list should not contain "([^"]+)"$"#)]
+async fn assert_list_not_contains(world: &mut CertWorld, name: String) {
+    let env = world.envelopes_by_name.get(&name).expect("not in map");
+    let found: Vec<_> = world
+        .last_envelopes
+        .iter()
+        .filter(|e| e.id == env.id)
+        .map(|e| e.payload.get("version").cloned())
+        .collect();
+    assert!(
+        found.is_empty(),
+        "envelope '{name}' should be absent from the list, got versions {found:?}"
+    );
 }
 
 #[then("the read should succeed")]
