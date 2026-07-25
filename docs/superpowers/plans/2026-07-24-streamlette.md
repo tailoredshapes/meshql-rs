@@ -160,7 +160,7 @@ Isolates the breaking struct change from any behavior change. Both fields stay `
 
 **Files:**
 - Modify: `meshql-changes/src/event.rs`
-- Modify: `meshql-changes/src/tail.rs` (construction site), `meshql-changes/src/hub.rs` + `src/sse.rs` (test constructors), `meshql-changes/src/testing.rs`, `meshql-changes/tests/sse_integration.rs`
+- Modify: `meshql-changes/src/{event,tail,hub,sse}.rs` (the only files with `ChangeEvent` struct literals — `src/testing.rs` and `tests/sse_integration.rs` have none)
 
 - [ ] **Step 1: Write failing tests for the new wire fields**
 
@@ -250,7 +250,7 @@ Add a test asserting a cursor-bearing event's SSE `id:` equals its cursor, and t
 
 - [ ] **Step 4: Fix every construction site**
 
-`ChangeEvent` struct literals live in `src/tail.rs` (4), `src/hub.rs`, `src/sse.rs`, and `src/event.rs`'s own `event()` test helper. (`src/testing.rs` and `tests/sse_integration.rs` contain none.) Add `cursor: None, payload: None` to each. Rather than trusting that list, let the compiler enumerate them:
+`ChangeEvent` struct literals live in `src/tail.rs` (3), `src/hub.rs`, `src/sse.rs`, and `src/event.rs`'s own `event()` test helper. (`src/testing.rs` and `tests/sse_integration.rs` contain none.) Add `cursor: None, payload: None` to each. Rather than trusting that list, let the compiler enumerate them:
 
 Run: `cargo build -p meshql-changes --all-targets 2>&1 | grep "missing field"`
 
@@ -527,7 +527,7 @@ pub fn streamlette_router(
 ) -> Router { /* ... */ }
 ```
 
-Add `use meshql_core::{Auth, AuthContext};` to the module's imports — `streamlette.rs` doesn't have them yet.
+Add `use meshql_core::{Auth, AuthContext};` plus `axum::Router` and `axum::response::sse::Event` to the module's imports — `streamlette.rs` has none of them yet.
 
 The handler: read `Last-Event-ID` from headers; if the source isn't `Seekable` or the cursor is invalid, emit `ready_frame(false, None)` then `change_stream`. Resume is Task 9.
 
@@ -680,13 +680,28 @@ Three constraints from the spec, each of which produces a *silent* failure if sk
     async fn each_source_uses_a_fresh_group_id() {
         // Consumer::subscribe prefers a COMMITTED offset over offset_reset
         // unconditionally, so a reused group_id starts from the wrong place.
+        //
+        // The first source MUST be dropped (or explicitly commit) before the
+        // second subscribes. merkql only persists a group offset in
+        // `commit_sync()` or in `close()` when `auto_commit` is on
+        // (consumer.rs:143,152-167) — never during `poll`. With both sources
+        // alive, nothing has committed, so even a hardcoded group_id would
+        // fall through to Earliest and this test would pass against the bug.
         let broker = /* broker with 3 records on "hen" */;
         let a = MerkqlTopicSource::new(broker.clone(), "hen", false).unwrap();
-        let b = MerkqlTopicSource::new(broker.clone(), "hen", false).unwrap();
         assert_eq!(a.poll().await.unwrap().len(), 3);
-        assert_eq!(b.poll().await.unwrap().len(), 3, "a second source must also see full history");
+        drop(a); // -> Drop -> close -> commit, persisting the offset to disk
+
+        let b = MerkqlTopicSource::new(broker.clone(), "hen", false).unwrap();
+        assert_eq!(
+            b.poll().await.unwrap().len(),
+            3,
+            "a second source must see full history — a reused group_id would resume at 3 and see 0"
+        );
     }
 ```
+
+Build the consumer via `Broker::consumer(&broker, ConsumerConfig { .. })` — `Consumer::new` is `pub(crate)` and not reachable from `meshql-merkql`. Set `auto_commit: true` so the `drop` above actually commits.
 
 - [ ] **Step 2: Run and watch them fail**
 
@@ -730,6 +745,8 @@ Expected: PASS (3/3).
 - [ ] **Step 5: Verify each constraint bites**
 
 Break each of the three (skip `create_topic`; drop the partition assert; use a constant `group_id`), confirm the matching test goes red, restore. All three failures are silent in production — this is the only proof the guards work.
+
+**If the constant-`group_id` break does not go red, the test is wrong, not the guard.** It only bites once an offset has actually been committed, which merkql does on `commit_sync()`/`close()` and never during `poll` — hence the `drop(a)` in the test above. A version without that drop passes against the bug.
 
 - [ ] **Step 6: Commit**
 
