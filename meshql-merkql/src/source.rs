@@ -21,8 +21,6 @@ use std::time::Duration;
 pub struct MerkqlTopicSource {
     topic: String,
     /// Whether `poll` should attach the Envelope's `payload` to each event.
-    /// Stored now, honoured when payload emission lands — do not remove.
-    #[allow(dead_code)]
     include_payload: bool,
     /// `Consumer::poll` is synchronous and needs `&mut self`, but
     /// `ChangeSource::poll` takes `&self` from an async context. A
@@ -130,9 +128,15 @@ impl ChangeSource for MerkqlTopicSource {
                     created_at: envelope.created_at.timestamp_millis(),
                     deleted: envelope.deleted,
                     authorized_tokens: envelope.authorized_tokens,
-                    // Cursor and payload emission land in a later task.
-                    cursor: None,
-                    payload: None,
+                    cursor: Some(format!("{}:{}", record.partition, record.offset)),
+                    // The Envelope's `payload` field, NEVER the whole
+                    // Envelope: this is serialized verbatim into the SSE
+                    // frame, and the `WireEvent` split only strips the
+                    // top-level `authorized_tokens` — it cannot police
+                    // tokens nested inside a payload.
+                    payload: self
+                        .include_payload
+                        .then(|| serde_json::Value::Object(envelope.payload)),
                 })
             })
             .collect()
@@ -154,11 +158,26 @@ mod tests {
     }
 
     fn produce(broker: &BrokerRef, topic: &str, id: &str) {
-        let envelope = Envelope::new(id, serde_json::Map::new(), vec![]);
+        produce_envelope(
+            broker,
+            topic,
+            Envelope::new(id, serde_json::Map::new(), vec![]),
+        );
+    }
+
+    fn produce_envelope(broker: &BrokerRef, topic: &str, envelope: Envelope) {
+        let key = envelope.id.clone();
         let value = serde_json::to_string(&envelope).unwrap();
         Broker::producer(broker)
-            .send(&ProducerRecord::new(topic, Some(id.to_string()), value))
+            .send(&ProducerRecord::new(topic, Some(key), value))
             .unwrap();
+    }
+
+    fn stash(json: serde_json::Value) -> meshql_core::Stash {
+        match json {
+            serde_json::Value::Object(map) => map,
+            other => panic!("a Stash must be a JSON object, got {other}"),
+        }
     }
 
     #[tokio::test]
@@ -215,5 +234,98 @@ mod tests {
             3,
             "a second source must see full history — a reused group_id would resume at 3 and see 0"
         );
+    }
+
+    #[tokio::test]
+    async fn cursor_carries_the_records_real_partition_and_offset() {
+        let broker = broker();
+        let source = MerkqlTopicSource::new(broker.clone(), "hen", false).unwrap();
+        for id in ["hen-1", "hen-2", "hen-3"] {
+            produce(&broker, "hen", id);
+        }
+
+        let events = source.poll().await.unwrap();
+        let cursors: Vec<_> = events.iter().map(|e| e.cursor.clone()).collect();
+        // The real log positions, not a constant or a loop index that would
+        // coincide with them only on a fresh single-partition topic.
+        assert_eq!(
+            cursors,
+            vec![
+                Some("0:0".to_string()),
+                Some("0:1".to_string()),
+                Some("0:2".to_string())
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn attaches_the_payload_when_include_payload_is_set() {
+        let broker = broker();
+        let source = MerkqlTopicSource::new(broker.clone(), "hen", true).unwrap();
+        produce_envelope(
+            &broker,
+            "hen",
+            Envelope::new("hen-1", stash(serde_json::json!({"eggs": 3})), vec![]),
+        );
+
+        let events = source.poll().await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload, Some(serde_json::json!({"eggs": 3})));
+    }
+
+    #[tokio::test]
+    async fn omits_the_payload_when_include_payload_is_unset() {
+        let broker = broker();
+        let source = MerkqlTopicSource::new(broker.clone(), "hen", false).unwrap();
+        produce_envelope(
+            &broker,
+            "hen",
+            Envelope::new("hen-1", stash(serde_json::json!({"eggs": 3})), vec![]),
+        );
+
+        let events = source.poll().await.unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload, None);
+    }
+
+    /// The payload must be the Envelope's `payload` field, never the whole
+    /// Envelope. `ChangeEvent.payload` is serialized verbatim into the SSE
+    /// frame, and the `WireEvent` split only strips the TOP-LEVEL
+    /// `authorized_tokens` — it cannot police tokens nested inside a payload.
+    /// Asserted against `wire_json` rather than the struct precisely so that
+    /// nesting is caught.
+    #[tokio::test]
+    async fn payload_never_carries_authorized_tokens_onto_the_wire() {
+        let broker = broker();
+        let source = MerkqlTopicSource::new(broker.clone(), "hen", true).unwrap();
+        produce_envelope(
+            &broker,
+            "hen",
+            Envelope::new(
+                "hen-1",
+                stash(serde_json::json!({"eggs": 3})),
+                vec!["SECRET-TEAM-TOKEN".to_string()],
+            ),
+        );
+
+        let events = source.poll().await.unwrap();
+        assert_eq!(events.len(), 1);
+        // The tokens must still reach the filter — they are dropped from the
+        // wire, not from the event.
+        assert_eq!(events[0].authorized_tokens, vec!["SECRET-TEAM-TOKEN"]);
+
+        let wire = events[0].wire_json();
+        assert!(
+            !wire.contains("SECRET-TEAM-TOKEN"),
+            "token leaked onto the wire: {wire}"
+        );
+        assert!(
+            !wire.contains("authorized_tokens"),
+            "authorized_tokens leaked onto the wire: {wire}"
+        );
+        // And the payload really is carried — otherwise this test would pass
+        // trivially against a source that emits no payload at all.
+        let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(v["payload"], serde_json::json!({"eggs": 3}));
     }
 }
