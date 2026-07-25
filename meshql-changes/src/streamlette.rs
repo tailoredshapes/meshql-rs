@@ -461,13 +461,76 @@ mod tests {
 
     /// A cursor the source rejects degrades to live-only — never a silent
     /// skip, and never a 400 (an error response would turn SSE auto-reconnect
-    /// into a reconnect loop). Task 10 owns the full policy; this pins the
-    /// floor.
+    /// into a reconnect loop).
     #[tokio::test]
     async fn seekable_source_with_an_unusable_cursor_falls_back_to_live_only() {
         let data = collect_ready(seekable(), Some("garbage")).await;
         assert_eq!(data["resume"], false);
         assert_eq!(data["cursor"], serde_json::Value::Null);
+    }
+
+    /// A source that rejects every cursor, and blows up if asked to backfill
+    /// one anyway. `backfill` must be unreachable once `cursor_is_valid` says
+    /// no — reaching it is how a rejected cursor turns into a silent skip.
+    struct RejectsEveryCursor;
+
+    #[async_trait]
+    impl ChangeSource for RejectsEveryCursor {
+        fn entity(&self) -> &str {
+            "hen"
+        }
+        async fn poll(&self) -> anyhow::Result<Vec<ChangeEvent>> {
+            Ok(vec![])
+        }
+    }
+
+    #[async_trait]
+    impl SeekableSource for RejectsEveryCursor {
+        async fn backfill(&self, cursor: &str) -> anyhow::Result<Vec<ChangeEvent>> {
+            panic!("backfill must not be called for the rejected cursor {cursor:?}");
+        }
+        fn cursor_is_valid(&self, _cursor: &str) -> bool {
+            false
+        }
+    }
+
+    /// The whole unusable-cursor policy at the handler: an unusable cursor
+    /// yields `resume: false` AND a working live stream.
+    ///
+    /// The live half is the half that is easy to get wrong. A connection that
+    /// honestly reports `resume: false` and then delivers nothing is the same
+    /// silent failure by another route — the client falls back to
+    /// fetch-on-connect and then waits forever for updates that never arrive.
+    #[tokio::test]
+    async fn an_unusable_cursor_degrades_to_a_live_stream_not_a_dead_one() {
+        let hub = ChangeHub::new(16);
+        let publisher = hub.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                publisher.publish(at("live-1", "0:7"));
+            }
+        });
+
+        let source = StreamSource::Seekable {
+            source: Arc::new(RejectsEveryCursor),
+            poll_interval: Duration::from_millis(50),
+        };
+
+        // A well-formed cursor the SOURCE rejects (beyond-tail and
+        // below-retention both look like this on the wire) — so the fallback
+        // cannot be attributed to the handler failing to parse it.
+        let wire = wire_until(source, Some("0:9999"), hub, |b| b.contains("live-1")).await;
+
+        let data = ready_data(&wire);
+        assert_eq!(data["resume"], false, "got:\n{wire}");
+        assert_eq!(data["cursor"], serde_json::Value::Null, "got:\n{wire}");
+        assert_eq!(
+            change_ids(&wire),
+            vec!["live-1"],
+            "the connection must keep streaming live events after degrading, \
+             got:\n{wire}"
+        );
     }
 
     /// A source whose `backfill` returns whatever `history` says, and which

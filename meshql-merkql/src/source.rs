@@ -132,12 +132,16 @@ impl MerkqlTopicSource {
     }
 }
 
-/// `"{partition}:{offset}"`, the format `to_change_event` emits.
+/// The shape half of the cursor policy: `"{partition}:{offset}"`, the format
+/// `to_change_event` emits. Pure — it knows nothing about the log's contents.
 ///
-/// Deliberately minimal — Task 10 owns the full unusable-cursor policy. This
-/// rejects only what could never address THIS log: anything unparseable, and
-/// any partition but 0 (a streamlette topic is single-partition by
-/// construction; `MerkqlTopicSource::new` refuses anything else).
+/// Covers the two shape-level failures:
+///   1. anything that is not `{u32}:{u64}`, and
+///   2. any partition but 0 — a streamlette topic is single-partition by
+///      construction (`MerkqlTopicSource::new` refuses anything else), so a
+///      non-zero partition is addressing a log this source does not own.
+///
+/// The range-level failures need the log itself; see `cursor_is_valid`.
 fn parse_cursor(cursor: &str) -> Option<u64> {
     let (partition, offset) = cursor.split_once(':')?;
     if partition.parse::<u32>().ok()? != 0 {
@@ -165,10 +169,16 @@ impl SeekableSource for MerkqlTopicSource {
     ///
     /// Re-reading the log prefix is the accepted cost of having no seek API.
     async fn backfill(&self, cursor: &str) -> anyhow::Result<Vec<ChangeEvent>> {
-        // An unusable cursor is an ERROR, never a silent "replay everything":
-        // the latter looks like a working resume while flooding the client
-        // with the entire log.
+        // An unusable cursor is an ERROR here, never a silent replay. The
+        // handler gates on `cursor_is_valid` before ever calling this, so the
+        // same predicate is applied rather than a weaker parse-only check:
+        // were they to diverge, the gap would be precisely the set of cursors
+        // that reach a backfill nobody validated — a whole-log flood
+        // (unparsed), an empty replay (beyond tail), or a short one (below
+        // the retention floor). All three read to the client as a healthy
+        // resume.
         let from = parse_cursor(cursor)
+            .filter(|_| self.cursor_is_valid(cursor))
             .ok_or_else(|| anyhow!("unusable resume cursor '{cursor}' on '{}'", self.topic))?;
 
         let mut replay = Broker::consumer(
@@ -193,8 +203,71 @@ impl SeekableSource for MerkqlTopicSource {
             .collect()
     }
 
+    /// The full unusable-cursor policy. Four ways a `Last-Event-ID` can be
+    /// unusable, all of which otherwise degrade SILENTLY:
+    ///
+    /// 1. **Malformed** and 2. **wrong partition** — `parse_cursor`.
+    /// 3. **Beyond the tail.** `backfill` skips records at-or-before the
+    ///    cursor, so a cursor past the tail skips *everything*: the client
+    ///    gets `resume: true`, an empty history, and no way to tell that
+    ///    apart from "you are caught up".
+    /// 4. **Below the retention floor.** `Partition::read_range` CLAMPS to
+    ///    `min_valid_offset` rather than reporting the shortfall, so a
+    ///    backfill from below it silently omits the reclaimed records.
+    ///
+    /// Returning `false` degrades the connection to `resume: false`, and the
+    /// client falls back to fetch-on-connect — always correct, if less
+    /// efficient.
     fn cursor_is_valid(&self, cursor: &str) -> bool {
-        parse_cursor(cursor).is_some()
+        let Some(from) = parse_cursor(cursor) else {
+            return false;
+        };
+        // No readable bounds means no way to prove the cursor addresses live
+        // data, and an unprovable cursor is an unusable one. Not expected —
+        // `new` pre-creates the topic — but silently trusting the cursor here
+        // is exactly the failure this predicate exists to prevent.
+        let Some((floor, tail)) = self.log_bounds() else {
+            return false;
+        };
+
+        // Case 3. `tail` is merkql's `next_offset` — the offset that WILL be
+        // assigned — so the last real record sits at `tail - 1` and a cursor
+        // must be strictly below `tail`. On an empty log `tail == 0` and no
+        // cursor qualifies, which is right: a cursor into a log that has
+        // never held a record came from somewhere else.
+        if from >= tail {
+            return false;
+        }
+
+        // Case 4. The cursor names a record already delivered; what resume
+        // needs is everything AFTER it. So the test is on `from + 1`, not on
+        // `from`: a cursor sitting exactly one below the floor is still
+        // perfectly usable, because every record it asks for survives.
+        // `saturating_add` can never actually saturate here (case 3 just
+        // bounded `from` below `tail`), but the policy must not depend on
+        // that ordering holding forever.
+        if from.saturating_add(1) < floor {
+            return false;
+        }
+
+        true
+    }
+}
+
+impl MerkqlTopicSource {
+    /// `(min_valid_offset, next_offset)` for the topic's only partition — the
+    /// retention floor and the tail.
+    ///
+    /// Partition 0 specifically, and unconditionally: `new` refuses a topic
+    /// with any other partition count, and `parse_cursor` has already refused
+    /// any cursor naming another partition.
+    fn log_bounds(&self) -> Option<(u64, u64)> {
+        let partition = self.broker.topic(&self.topic)?.partition(0)?;
+        // A poisoned lock is a `None`, not a panic: this runs on the request
+        // path, and taking the connection down is strictly worse than
+        // degrading it to live-only.
+        let partition = partition.read().ok()?;
+        Some((partition.min_valid_offset(), partition.next_offset()))
     }
 }
 
@@ -235,6 +308,20 @@ mod tests {
     fn broker() -> BrokerRef {
         let dir: &'static TempDir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
         Broker::open(BrokerConfig::new(dir.path())).unwrap()
+    }
+
+    /// A broker that reclaims all but the last `max_records` per partition.
+    /// merkql's default is `None` (retention off), so the retention floor is
+    /// pinned at 0 unless a test asks for this.
+    fn broker_retaining(max_records: u64) -> BrokerRef {
+        let dir: &'static TempDir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        Broker::open(BrokerConfig {
+            default_retention: merkql::topic::RetentionConfig {
+                max_records: Some(max_records),
+            },
+            ..BrokerConfig::new(dir.path())
+        })
+        .unwrap()
     }
 
     fn produce(broker: &BrokerRef, topic: &str, id: &str) {
@@ -497,25 +584,159 @@ mod tests {
         }
     }
 
-    /// Minimal by design — Task 10 owns the full unusable-cursor policy. This
-    /// only refuses input that could never address this log.
-    #[test]
-    fn cursor_validity_refuses_obviously_malformed_input() {
-        let broker = broker();
-        let source = MerkqlTopicSource::new(broker, "hen", false).unwrap();
+    // ── The unusable-cursor policy ──────────────────────────────────────
+    //
+    // `Last-Event-ID` is untrusted client input. Each case below otherwise
+    // produces "resume looked fine, events missing" — a silently short or
+    // empty stream, indistinguishable from "nothing happened".
 
-        assert!(source.cursor_is_valid("0:0"));
-        assert!(source.cursor_is_valid("0:12345"));
+    /// Case 1: not `{u32}:{u64}`.
+    #[tokio::test]
+    async fn cursor_validity_refuses_malformed_input() {
+        let broker = broker();
+        let source = MerkqlTopicSource::new(broker.clone(), "hen", false).unwrap();
+        for id in ["hen-1", "hen-2", "hen-3"] {
+            produce(&broker, "hen", id);
+        }
+
+        // The control: a well-formed, in-range cursor IS accepted, so the
+        // rejections below cannot be passing for the wrong reason.
+        assert!(source.cursor_is_valid("0:1"), "a real log position");
 
         assert!(!source.cursor_is_valid(""), "empty");
+        assert!(!source.cursor_is_valid("garbage"), "not a cursor at all");
         assert!(!source.cursor_is_valid("7"), "no separator");
+        assert!(!source.cursor_is_valid("0-1"), "wrong separator");
         assert!(!source.cursor_is_valid("0:"), "no offset");
+        assert!(!source.cursor_is_valid(":1"), "no partition");
         assert!(!source.cursor_is_valid("a:0"), "non-numeric partition");
         assert!(!source.cursor_is_valid("0:x"), "non-numeric offset");
         assert!(!source.cursor_is_valid("0:-1"), "negative offset");
-        // A streamlette topic is single-partition by construction, so any
-        // other partition is addressing a log this source does not own.
-        assert!(!source.cursor_is_valid("1:0"), "wrong partition");
+        assert!(!source.cursor_is_valid("-1:1"), "negative partition");
+        assert!(
+            !source.cursor_is_valid("0:1:2"),
+            "a trailing segment is not a u64 offset"
+        );
+    }
+
+    /// Case 2: a partition this source cannot own. A streamlette topic is
+    /// asserted single-partition at construction, so anything but 0 is
+    /// addressing a different log.
+    #[tokio::test]
+    async fn cursor_validity_refuses_a_foreign_partition() {
+        let broker = broker();
+        let source = MerkqlTopicSource::new(broker.clone(), "hen", false).unwrap();
+        for id in ["hen-1", "hen-2", "hen-3"] {
+            produce(&broker, "hen", id);
+        }
+
+        // Same offset, only the partition differs — so the rejection is
+        // attributable to the partition and nothing else.
+        assert!(source.cursor_is_valid("0:1"));
+        assert!(!source.cursor_is_valid("1:1"), "partition 1");
+        assert!(!source.cursor_is_valid("42:1"), "partition 42");
+    }
+
+    /// Case 3: an offset past the log tail — the dangerous one.
+    ///
+    /// `backfill` skips records at-or-before the cursor, so a cursor past the
+    /// tail skips EVERYTHING and returns an empty history. Accepting it hands
+    /// the client `resume: true` plus no events, and it silently believes it
+    /// is caught up when it may have missed the entire log.
+    #[tokio::test]
+    async fn cursor_validity_refuses_an_offset_beyond_the_log_tail() {
+        let broker = broker();
+        let source = MerkqlTopicSource::new(broker.clone(), "hen", false).unwrap();
+        for id in ["hen-1", "hen-2", "hen-3"] {
+            produce(&broker, "hen", id);
+        }
+        // Offsets 0, 1, 2 exist; 3 is `next_offset`.
+
+        assert!(
+            source.cursor_is_valid("0:2"),
+            "the tail record itself is resumable — it just has nothing after it"
+        );
+        assert!(!source.cursor_is_valid("0:3"), "one past the tail");
+        assert!(!source.cursor_is_valid("0:9999"), "far past the tail");
+        assert!(
+            !source.cursor_is_valid(&format!("0:{}", u64::MAX)),
+            "u64::MAX must not overflow the floor check into acceptance"
+        );
+
+        // Why it matters: the beyond-tail cursor is exactly the one whose
+        // backfill is silently empty rather than obviously wrong.
+        assert!(
+            source.backfill("0:9999").await.is_err(),
+            "a beyond-tail backfill must be an error, never an empty replay \
+             that reads as 'you are caught up'"
+        );
+    }
+
+    /// An empty log has no resumable position at all: a client claiming to
+    /// have seen `0:0` on a log that has never held a record is holding a
+    /// cursor from some other log (or a wiped one).
+    #[tokio::test]
+    async fn cursor_validity_refuses_any_offset_on_an_empty_log() {
+        let broker = broker();
+        let source = MerkqlTopicSource::new(broker, "hen", false).unwrap();
+
+        assert!(!source.cursor_is_valid("0:0"), "empty log has no offset 0");
+        assert!(!source.cursor_is_valid("0:1"));
+    }
+
+    /// Case 4: an offset below the retention floor.
+    ///
+    /// merkql reclaims records below `min_valid_offset`, and `read_range`
+    /// silently CLAMPS to that floor. So a backfill from below it returns the
+    /// survivors and says nothing about the records in between — they are gone
+    /// forever, and resuming would skip them invisibly.
+    #[tokio::test]
+    async fn cursor_validity_refuses_an_offset_below_the_retention_floor() {
+        // Retention is off by default (`max_records: None`), so this case is
+        // latent rather than active in today's deployments — it is configured
+        // on here to make it reachable.
+        let broker = broker_retaining(3);
+        let source = MerkqlTopicSource::new(broker.clone(), "hen", false).unwrap();
+        for i in 0..6 {
+            produce(&broker, "hen", &format!("hen-{i}"));
+        }
+
+        // Pin merkql's actual reclaim arithmetic. Without this the assertions
+        // below would still pass if retention silently stopped applying —
+        // every cursor would just be in range, and the test would assert
+        // nothing.
+        let part = broker.topic("hen").unwrap().partition(0).unwrap();
+        let (floor, tail) = {
+            let p = part.read().unwrap();
+            (p.min_valid_offset(), p.next_offset())
+        };
+        assert_eq!(
+            (floor, tail),
+            (3, 6),
+            "retention must really have reclaimed 0..3"
+        );
+
+        assert!(
+            !source.cursor_is_valid("0:0"),
+            "records 1 and 2 are reclaimed — resuming from 0 would skip them"
+        );
+        assert!(
+            !source.cursor_is_valid("0:1"),
+            "record 2 is reclaimed — resuming from 1 would skip it"
+        );
+        assert!(
+            source.cursor_is_valid("0:2"),
+            "one below the floor is still fine: everything AFTER the cursor \
+             (3, 4, 5) survives"
+        );
+        assert!(source.cursor_is_valid("0:5"), "the tail");
+
+        // And the silent-skip it prevents: a below-floor backfill returns the
+        // survivors with no signal that anything was dropped.
+        assert!(
+            source.backfill("0:0").await.is_err(),
+            "a below-floor backfill must be an error, never a short replay"
+        );
     }
 
     /// The payload must be the Envelope's `payload` field, never the whole
