@@ -19,6 +19,7 @@ async fn create_searcher() -> (SqliteRepository, SqliteSearcher) {
     cert::seed_searcher_data(&repo).await;
     cert::seed_searcher_auth_data(&repo).await;
     cert::seed_searcher_ordering_data(&repo).await;
+    cert::seed_searcher_result_shape_data(&repo).await;
     (repo, searcher)
 }
 
@@ -134,4 +135,10 @@ async fn ordering_breaks_millisecond_ties_by_id() {
 async fn ordering_as_of_uses_version_resolved_at_cutoff() {
     let (_repo, searcher) = create_searcher().await;
     cert::test_searcher_ordering_as_of_uses_version_resolved_at_cutoff(&searcher).await;
+}
+
+#[tokio::test]
+async fn result_carries_id_and_created_at() {
+    let (_repo, searcher) = create_searcher().await;
+    cert::test_searcher_result_carries_id_and_created_at(&searcher).await;
 }

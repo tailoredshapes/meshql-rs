@@ -53,10 +53,12 @@ pub fn flat_json_to_envelope(json: &Value) -> Option<Envelope> {
     })
 }
 
-/// Convert an Envelope to a result Stash (payload fields + id merged in).
+/// Convert an Envelope to a result Stash (payload fields + id and createdAt
+/// merged in).
 pub fn envelope_to_stash(env: &Envelope) -> Stash {
     let mut stash = env.payload.clone();
     stash.insert("id".to_string(), json!(env.id));
+    stash.insert("createdAt".to_string(), json!(env.created_at.to_rfc3339()));
     stash
 }
 

@@ -20,6 +20,7 @@ async fn main() {
 
     run_auth_cert(&config).await;
     run_ordering_cert(&config).await;
+    run_result_shape_cert(&config).await;
 
     CertWorld::cucumber()
         .max_concurrent_scenarios(1)
@@ -88,6 +89,52 @@ async fn run_ordering_cert(config: &KsqlConfig) {
     cert::test_searcher_ordering_uses_resolved_version_position(&searcher).await;
     cert::test_searcher_ordering_breaks_millisecond_ties_by_id(&searcher).await;
     eprintln!("ksql searcher ordering cert: 4 tests passed");
+}
+
+/// Shared searcher result-shape certification (meshql-core/src/testing.rs), run
+/// against a fresh topic. Certifies that every result stash carries the envelope
+/// fields a GraphQL schema resolves off it — `id` and an RFC3339 `createdAt` for
+/// the resolved version — rather than the payload alone.
+async fn run_result_shape_cert(config: &KsqlConfig) {
+    let client = Arc::new(ConfluentClient::new(config));
+    let topic = format!("cert_{}", uuid::Uuid::new_v4().simple());
+    let repo = KsqlRepository::new(client.clone(), &topic, config);
+    repo.initialize()
+        .await
+        .expect("failed to initialize ksqlDB DDL");
+    let searcher = KsqlSearcher::new(client, &topic);
+
+    cert::seed_searcher_result_shape_data(&repo).await;
+    await_result_shape_seed_materialized(&searcher).await;
+
+    cert::test_searcher_result_carries_id_and_created_at(&searcher).await;
+    eprintln!("ksql searcher result shape cert: 1 test passed");
+}
+
+/// Poll until both result-shape records are queryable and the multi-version one
+/// has been superseded by its second version.
+async fn await_result_shape_seed_materialized(searcher: &KsqlSearcher) {
+    let star = vec!["*".to_string()];
+    let args = Stash::new();
+
+    for _ in 0..150 {
+        let now = Utc::now().timestamp_millis();
+        let shaped = searcher
+            .find_all(r#"{"payload.type": "resultShape"}"#, &args, &star, now)
+            .await
+            .unwrap_or_default();
+        let latest = searcher
+            .find(r#"{"payload.name": "multi-v2"}"#, &args, &star, now)
+            .await
+            .ok()
+            .flatten();
+
+        if shaped.len() == 2 && latest.is_some() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    panic!("result-shape seed data did not materialize in the ksqlDB table within 30s");
 }
 
 /// Poll until every ordering-seed envelope — the twelve `ord-NN`, the resolved

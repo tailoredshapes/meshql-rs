@@ -889,8 +889,7 @@ const ORDER_MULTI: &str = "aaa-multi";
 const ORDER_STEP_MS: i64 = 10_000;
 /// 2024-01-01T00:00:00Z. The seeded timeline is absolute rather than relative
 /// to "now" so a cert can address a specific point in it by arithmetic, without
-/// depending on the adapter echoing `createdAt` back in its results (merksql
-/// does not) or on how fast the seeding loop ran.
+/// depending on how fast the seeding loop ran.
 const ORDER_BASE_MS: i64 = 1_704_067_200_000;
 
 fn order_at(offset_ms: i64) -> DateTime<Utc> {
@@ -1154,4 +1153,158 @@ pub async fn test_searcher_empty_query(searcher: &dyn Searcher) {
         .await
         .unwrap();
     assert!(!results.is_empty());
+}
+
+// ---- Searcher Result Shape Certification Tests ----
+//
+// A Searcher returns a flat `Stash` per result: the resolved envelope's payload
+// with two envelope-level fields merged in — `id` and `createdAt`, the RFC3339
+// rendering of `created_at`. A GraphQL schema that declares a `createdAt` field
+// resolves it straight off that key (see
+// meshql-graphlette/tests/created_at_cert.rs), so an adapter that omits it does
+// not error — the field silently comes back null.
+//
+// The rest of the searcher cert suite only ever reads `id` and payload fields,
+// so an adapter dropping `createdAt` passes all of it. These certs close that
+// gap and hold every backend to the same result shape, down to the rendering:
+// two adapters holding the same envelope must hand a client the same string.
+
+const SHAPE_TYPE: &str = "resultShape";
+const SHAPE_SINGLE: &str = "shape-single";
+const SHAPE_MULTI: &str = "shape-multi";
+/// 2024-06-01T12:34:56.789Z, and an hour later for the second version.
+/// Deliberately off a second boundary: `created_at` is millisecond-precision on
+/// every backend, so an adapter that rounds it away should fail here rather
+/// than pass on a coarser value that happens to look right.
+const SHAPE_V1_MS: i64 = 1_717_245_296_789;
+const SHAPE_V2_MS: i64 = 1_717_248_896_789;
+
+fn shape_at(ms: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp_millis(ms).expect("valid seed timestamp")
+}
+
+fn shape_query() -> String {
+    format!(r#"{{"payload.type": "{SHAPE_TYPE}"}}"#)
+}
+
+fn shape_envelope(id: &str, name: &str, created_at: DateTime<Utc>) -> Envelope {
+    let mut payload = Stash::new();
+    payload.insert("name".to_string(), json!(name));
+    payload.insert("type".to_string(), json!(SHAPE_TYPE));
+    Envelope {
+        id: id.to_string(),
+        payload,
+        created_at,
+        deleted: false,
+        authorized_tokens: star(),
+    }
+}
+
+pub async fn seed_searcher_result_shape_data(repo: &dyn Repository) {
+    repo.create(
+        shape_envelope(SHAPE_SINGLE, "single", shape_at(SHAPE_V1_MS)),
+        &star(),
+    )
+    .await
+    .unwrap();
+
+    // A two-version record: `createdAt` must be the *resolved* version's, so an
+    // adapter cannot satisfy the cert by echoing whichever version it happened
+    // to read first.
+    repo.create(
+        shape_envelope(SHAPE_MULTI, "multi-v1", shape_at(SHAPE_V1_MS)),
+        &star(),
+    )
+    .await
+    .unwrap();
+    repo.create(
+        shape_envelope(SHAPE_MULTI, "multi-v2", shape_at(SHAPE_V2_MS)),
+        &star(),
+    )
+    .await
+    .unwrap();
+}
+
+fn shape_result_for<'a>(results: &'a [Stash], id: &str) -> &'a Stash {
+    results
+        .iter()
+        .find(|s| s.get("id").and_then(|v| v.as_str()) == Some(id))
+        .unwrap_or_else(|| {
+            panic!("no result carried the id {id:?} — every result must carry its envelope id; got {results:?}")
+        })
+}
+
+fn assert_result_shape(stash: &Stash, expected_ms: i64, whence: &str) {
+    let created_at = stash
+        .get("createdAt")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "{whence}: every result must carry `createdAt` — a GraphQL schema \
+                 declaring the field resolves it off this key, and gets null \
+                 without it; stash: {stash:?}"
+            )
+        });
+
+    let parsed = DateTime::parse_from_rfc3339(created_at).unwrap_or_else(|e| {
+        panic!("{whence}: `createdAt` must be RFC3339, got {created_at:?}: {e}")
+    });
+    assert_eq!(
+        parsed.timestamp_millis(),
+        expected_ms,
+        "{whence}: `createdAt` must be the resolved envelope's own created_at, to the millisecond"
+    );
+    assert_eq!(
+        created_at,
+        shape_at(expected_ms).to_rfc3339(),
+        "{whence}: every adapter must render `createdAt` identically, so a client \
+         comparing the strings agrees across backends"
+    );
+}
+
+pub async fn test_searcher_result_carries_id_and_created_at(searcher: &dyn Searcher) {
+    let now = Utc::now().timestamp_millis();
+
+    let all = searcher
+        .find_all(&shape_query(), &Stash::new(), &star(), now)
+        .await
+        .unwrap();
+    assert_eq!(
+        all.len(),
+        2,
+        "the result-shape seed holds two records: one single-version, one with two versions"
+    );
+    assert_result_shape(
+        shape_result_for(&all, SHAPE_SINGLE),
+        SHAPE_V1_MS,
+        "find_all",
+    );
+    assert_result_shape(
+        shape_result_for(&all, SHAPE_MULTI),
+        SHAPE_V2_MS,
+        "find_all, multi-version record",
+    );
+
+    // `find` is a separate read path on several adapters, so certify it too.
+    let mut args = Stash::new();
+    args.insert("id".to_string(), json!(SHAPE_SINGLE));
+    let one = searcher
+        .find(r#"{"id": "{{id}}"}"#, &args, &star(), now)
+        .await
+        .unwrap()
+        .expect("find must locate the single-version result-shape record");
+    assert_eq!(
+        one.get("id").and_then(|v| v.as_str()),
+        Some(SHAPE_SINGLE),
+        "find: every result must carry its envelope id"
+    );
+    assert_result_shape(&one, SHAPE_V1_MS, "find");
+
+    // The merged fields are additions, not a replacement: the payload is still
+    // there alongside them.
+    assert_eq!(
+        one.get("name"),
+        Some(&json!("single")),
+        "find: `id` and `createdAt` are merged into the payload, not substituted for it"
+    );
 }
