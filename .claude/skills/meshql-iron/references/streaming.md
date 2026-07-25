@@ -161,6 +161,16 @@ The reason is worth understanding rather than treating as a quirk. A poll-diff t
 - **Subscriber tokens are captured once, at connect.** A long-lived stream will not observe a mid-connection privilege change: someone removed from a channel keeps receiving its notifications until they reconnect. If your product needs hard revocation, it must force a disconnect — the stream will not do it for you.
 - **Tail sources carry stale tokens** (above). On a notification-only stream the exposure is limited to "a record you can no longer see changed," which is far less dangerous than a payload leak, but it is not nothing.
 
+## The silent healthy connection — check this first when a stream delivers nothing
+
+If your deployment computes caller tokens at a trusted edge (middleware that resolves an identity header into credentials), **make sure that middleware runs on `/{entity}/stream` too, not only on `/api` and `/graph`.**
+
+Miss it and the failure is invisible in every direction a developer normally looks. The stream gets an empty stash, so it resolves *no* tokens; every envelope carrying at least one token is therefore filtered out. The result is HTTP 200, a well-formed `ready` frame, heartbeats arriving on schedule forever, and **zero events** — no error, no warning, nothing in a log. It is indistinguishable from a quiet channel, and it will survive any amount of staring at the client.
+
+This is not hypothetical: it is the first thing the first real consumer of streamlettes hit, and it cost a debugging cycle before anyone suspected routing. If a stream connects cleanly and delivers nothing, check the edge's path matching before you check anything else.
+
+The tell: the same caller can read the entity over its graphlette but receives nothing over its stream. That asymmetry means identity is reaching one surface and not the other.
+
 ## When not to stream
 
 A page that reads once does not need a subscription. Streaming earns its keep when a view is long-lived and other people write to it — a chat channel, a live dashboard, a queue someone else is working. It earns nothing on a form, a detail page, a report, or anything the user reloads by navigating.
