@@ -8,7 +8,13 @@ pub struct ChangeEvent {
     pub id: String,
     pub created_at: i64,
     pub deleted: bool,
+    /// Filtering input only — NEVER serialized. See `wire_json`.
     pub authorized_tokens: Vec<String>,
+    /// Resume cursor, `"{partition}:{offset}"`. `Some` only for sources that
+    /// can seek (merkql); `None` for tail-based sources, which don't resume.
+    pub cursor: Option<String>,
+    /// The changed payload, when the streamlette is configured to carry it.
+    pub payload: Option<serde_json::Value>,
 }
 
 #[derive(serde::Serialize)]
@@ -17,6 +23,10 @@ struct WireEvent<'a> {
     id: &'a str,
     created_at: i64,
     deleted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cursor: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload: Option<&'a serde_json::Value>,
 }
 
 impl ChangeEvent {
@@ -28,6 +38,8 @@ impl ChangeEvent {
             id: &self.id,
             created_at: self.created_at,
             deleted: self.deleted,
+            cursor: self.cursor.as_deref(),
+            payload: self.payload.as_ref(),
         })
         .expect("WireEvent is always serializable")
     }
@@ -44,6 +56,8 @@ mod tests {
             created_at: 1751892345123,
             deleted: false,
             authorized_tokens: vec!["secret-team".into()],
+            cursor: None,
+            payload: None,
         }
     }
 
@@ -59,6 +73,38 @@ mod tests {
     #[test]
     fn wire_json_never_leaks_tokens() {
         let wire = event().wire_json();
+        assert!(!wire.contains("secret-team"));
+        assert!(!wire.contains("authorized_tokens"));
+    }
+
+    #[test]
+    fn wire_json_includes_cursor_and_payload_when_present() {
+        let mut e = event();
+        e.cursor = Some("0:42".into());
+        e.payload = Some(serde_json::json!({"eggs": 3}));
+        let v: serde_json::Value = serde_json::from_str(&e.wire_json()).unwrap();
+        assert_eq!(v["cursor"], "0:42");
+        assert_eq!(v["payload"]["eggs"], 3);
+    }
+
+    #[test]
+    fn wire_json_omits_cursor_and_payload_when_absent() {
+        let v: serde_json::Value = serde_json::from_str(&event().wire_json()).unwrap();
+        assert!(
+            v.get("cursor").is_none(),
+            "absent cursor must be omitted, not null"
+        );
+        assert!(
+            v.get("payload").is_none(),
+            "absent payload must be omitted, not null"
+        );
+    }
+
+    #[test]
+    fn wire_json_never_leaks_tokens_even_with_payload() {
+        let mut e = event();
+        e.payload = Some(serde_json::json!({"note": "fine"}));
+        let wire = e.wire_json();
         assert!(!wire.contains("secret-team"));
         assert!(!wire.contains("authorized_tokens"));
     }

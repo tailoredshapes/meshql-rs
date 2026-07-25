@@ -66,6 +66,8 @@ mod tests {
             created_at: 1,
             deleted: false,
             authorized_tokens: vec![],
+            cursor: None,
+            payload: None,
         }
     }
 

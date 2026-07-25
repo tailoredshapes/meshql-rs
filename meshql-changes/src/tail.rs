@@ -141,6 +141,8 @@ impl ChangeSource for SearcherTail {
                         created_at: env.created_at.timestamp_millis(),
                         deleted: false,
                         authorized_tokens: env.authorized_tokens,
+                        cursor: None,
+                        payload: None,
                     });
                 }
                 None => {
@@ -151,6 +153,8 @@ impl ChangeSource for SearcherTail {
                         created_at: now_ms,
                         deleted: true,
                         authorized_tokens: last_known_tokens.unwrap_or_default(),
+                        cursor: None,
+                        payload: None,
                     });
                 }
             }
@@ -170,6 +174,8 @@ impl ChangeSource for SearcherTail {
                 created_at: now_ms,
                 deleted: true,
                 authorized_tokens: known.tokens.clone(),
+                cursor: None,
+                payload: None,
             });
         }
 

@@ -1,6 +1,8 @@
 //! The SSE surface: GET /changes streams thin change notifications.
 //!
-//! - `event: change`, `id:` = the notification's created_at millis,
+//! - `event: change`, `id:` = the event's resume cursor when it has one
+//!   (omitted entirely for sources that can't seek, so a client never sends
+//!   back a Last-Event-ID the server can't honour),
 //!   `data:` = ChangeEvent::wire_json() (tokens stripped by construction).
 //! - Per-subscriber filtering with the same token rule as the lettes
 //!   (meshql_core::tokens_visible_to); tokens are captured once at connect.
@@ -67,12 +69,14 @@ pub fn change_stream(
                     if !tokens_visible_to(&ev.authorized_tokens, &subscriber_tokens) {
                         return Some(None);
                     }
-                    // `id:` stays created_at for now; a later task replaces it
-                    // with a resume cursor once that field exists.
-                    Some(Some(Ok(Event::default()
-                        .event("change")
-                        .id(ev.created_at.to_string())
-                        .data(ev.wire_json()))))
+                    let mut event = Event::default().event("change").data(ev.wire_json());
+                    // The SSE id IS the resume cursor. Sources that can't seek
+                    // emit no cursor and therefore no id, so a browser never
+                    // sends back a Last-Event-ID the server can't honour.
+                    if let Some(cursor) = &ev.cursor {
+                        event = event.id(cursor);
+                    }
+                    Some(Some(Ok(event)))
                 }
             }
         })
@@ -142,7 +146,24 @@ mod tests {
             created_at: 42,
             deleted: false,
             authorized_tokens: tokens.iter().map(|s| s.to_string()).collect(),
+            cursor: None,
+            payload: None,
         }
+    }
+
+    /// The REAL SSE wire text for one event — rendered by driving an actual
+    /// `Sse` response to completion. Asserting on `Debug` output would not
+    /// prove the `id:` line is (or isn't) on the wire; this does. Dropping
+    /// the hub closes the broadcast channel, so the body terminates.
+    async fn wire_frames(event: ChangeEvent) -> String {
+        use axum::response::IntoResponse;
+        let hub = ChangeHub::new(16);
+        let stream = change_stream(hub.subscribe(), vec!["*".into()], None);
+        hub.publish(event);
+        drop(hub);
+        let body = Sse::new(stream).into_response().into_body();
+        let bytes = axum::body::to_bytes(body, 64 * 1024).await.unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
     }
 
     #[tokio::test]
@@ -175,6 +196,35 @@ mod tests {
 
         let first = stream.next().await.unwrap().unwrap();
         assert!(format!("{first:?}").contains("yep"));
+    }
+
+    #[tokio::test]
+    async fn sse_id_is_the_resume_cursor_when_present() {
+        let mut e = ev("hen", "abc", &[]);
+        e.cursor = Some("0:7".into());
+        let wire = wire_frames(e).await;
+
+        assert!(
+            wire.lines().any(|l| l == "id:0:7" || l == "id: 0:7"),
+            "the SSE id must BE the cursor, got frames:\n{wire}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_has_no_id_when_the_event_has_no_cursor() {
+        // A tail-based source can't seek. Emitting any id would invite the
+        // browser to send back a Last-Event-ID the server cannot honour.
+        let wire = wire_frames(ev("hen", "abc", &[])).await;
+
+        assert!(
+            !wire.lines().any(|l| l.starts_with("id:")),
+            "a cursor-less event must emit NO id line, got frames:\n{wire}"
+        );
+        // Sanity: the frame itself was actually emitted.
+        assert!(
+            wire.contains("event:change") || wire.contains("event: change"),
+            "expected a change frame, got:\n{wire}"
+        );
     }
 
     #[tokio::test]
