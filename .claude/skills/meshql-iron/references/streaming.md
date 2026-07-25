@@ -66,6 +66,8 @@ An unusable `Last-Event-ID` is never a `4xx` — an error response would put `Ev
 
 Vanilla `EventSource`, no framework, no build step.
 
+> **Read "Three things the first browser consumer hit" below before you write this.** If your deployment resolves caller identity from a request header — the meshql trusted-edge model this skill assumes everywhere else — then **`EventSource` cannot authenticate at all**, because the API has no way to send one. You get a connection that looks perfectly healthy and delivers nothing, forever. The sample below is correct about the protocol and wrong about the platform; the fix (a `fetch` with a streamed `ReadableStream` body) is about twenty extra lines and is what a real browser client ended up shipping.
+
 ```js
 // stream.js — one entity's live view, kept honest.
 export function subscribe(base, surface, { refetch, onChange }) {
@@ -149,6 +151,65 @@ function onChange(change) {
   render(change);
 }
 ```
+
+## Three things the first browser consumer hit that the above does not cover
+
+Written after converting teamchat's frontend, which was this guidance's first
+real use. Step 3's `EventSource` sample is correct about the *protocol* and
+wrong about the *platform* in two ways that only appear in a browser.
+
+**1. `EventSource` cannot send a request header, so it cannot authenticate
+against a trusted edge.** The API has no header parameter; `withCredentials`
+sends cookies and nothing else. If your deployment resolves identity from a
+header — which is the meshql trusted-edge model this skill assumes everywhere
+else — then `new EventSource('/thing/stream')` arrives *anonymous*. It resolves
+no tokens, every envelope carrying at least one is filtered out, and you get a
+200, a well-formed `ready` frame, heartbeats forever, and zero events.
+
+That is **the same silent healthy connection** described below, reached from
+the client instead of the router, and it is exactly as invisible. Check it in
+the same breath: if a stream delivers nothing, confirm both that the edge runs
+on `/stream` *and* that the client can actually get its identity onto the
+request.
+
+The fix is a `fetch` with a streamed `ReadableStream` body, which carries
+headers. Still vanilla, still no build step. It costs the two things
+`EventSource` does for free — reconnect with backoff, and `Last-Event-ID`
+resend — and both are perhaps twenty lines. It also **dissolves rule 1**: the
+cursor becomes an ordinary variable, so "abandon the cursor after a refetch" is
+`cursor = null` rather than a fight with an API that has no way to clear it.
+The rule does not change; obeying it stops being awkward.
+
+If you need `EventSource` specifically, the edge needs a second identity source
+that survives a header-less request — a cookie, or a short-lived token in the
+query string. That is a server change and no amount of client code substitutes
+for it.
+
+**2. Streamlettes are per-entity, and a browser has about six connections.**
+`fetch` and `EventSource` share one per-origin pool that every current browser
+caps at six over HTTP/1.1, and browsers speak HTTP/2 only over TLS. A service
+with nine streamed entities therefore cannot have a client that watches all
+nine: the streams take the whole pool, extras queue forever, and — the part
+that actually breaks the app — **the graphlette reads the notifications exist
+to trigger are starved**. Notifications arrive with no connection left to act
+on them.
+
+So a browser client needs a *connection budget*, spent on the entities the
+current view actually shows and reconciled on navigation. This is cheap when
+the streams are notification-only, because the response to any of them is the
+same idempotent refetch — a dropped stream costs staleness until something else
+nudges, not a permanently wrong view. Plan for it at design time: "which meshes
+get a stream" is a server question with a different answer from "which streams
+can one page hold".
+
+**3. Coalesce. A burst of ten notifications must be one read.** The sample above
+buffers changes *during* a refetch, which is right, but says nothing about
+changes arriving *between* refetches — and for a notification-only client,
+`onChange` and `refetch` are the same action. Ten messages in a busy channel
+then means ten full reads. Debounce the nudge, join an in-flight read rather
+than starting a second, and re-run once if a notification landed while a read
+was in flight (otherwise the write that arrived mid-read stays invisible until
+something unrelated happens).
 
 ## Payloads, and why only some streams have them
 
