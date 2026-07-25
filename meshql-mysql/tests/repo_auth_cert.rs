@@ -1,17 +1,17 @@
+mod common;
+
+use common::{fresh_table, shared_mysql};
 use meshql_core::testing as cert;
 use meshql_mysql::MysqlRepository;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::mysql::Mysql;
 
 async fn create_repo() -> (MysqlRepository, impl std::any::Any) {
-    let container = Mysql::default().start().await.unwrap();
-    let port = container.get_host_port_ipv4(3306).await.unwrap();
-    // testcontainers-modules mysql defaults: root with empty password, db = "test"
-    let url = format!("mysql://root:@127.0.0.1:{port}/test");
-    let table = format!("env_{}", uuid::Uuid::new_v4().simple());
-    let repo = MysqlRepository::new_with_table(&url, &table).await.unwrap();
+    let node = shared_mysql().await;
+    let table = fresh_table();
+    let repo = MysqlRepository::new_with_table(&node.url, &table)
+        .await
+        .unwrap();
     cert::seed_repository_auth_data(&repo).await;
-    (repo, container)
+    (repo, node)
 }
 
 #[tokio::test]

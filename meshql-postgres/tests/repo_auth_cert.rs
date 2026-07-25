@@ -1,18 +1,17 @@
+mod common;
+
+use common::{fresh_table, shared_postgres};
 use meshql_core::testing as cert;
 use meshql_postgres::PostgresRepository;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::postgres::Postgres;
 
 async fn create_repo() -> (PostgresRepository, impl std::any::Any) {
-    let container = Postgres::default().start().await.unwrap();
-    let port = container.get_host_port_ipv4(5432).await.unwrap();
-    let url = format!("postgres://postgres:postgres@127.0.0.1:{port}/postgres");
-    let table = format!("env_{}", uuid::Uuid::new_v4().simple());
-    let repo = PostgresRepository::new_with_table(&url, &table)
+    let node = shared_postgres().await;
+    let table = fresh_table();
+    let repo = PostgresRepository::new_with_table(&node.url, &table)
         .await
         .unwrap();
     cert::seed_repository_auth_data(&repo).await;
-    (repo, container)
+    (repo, node)
 }
 
 #[tokio::test]

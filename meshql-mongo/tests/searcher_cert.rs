@@ -1,18 +1,18 @@
+mod common;
+
+use common::{fresh_collection, shared_mongo};
 use meshql_core::testing as cert;
 use meshql_core::NoAuth;
 use meshql_mongo::{MongoRepository, MongoSearcher};
 use std::sync::Arc;
-use testcontainers::runners::AsyncRunner;
-use testcontainers_modules::mongo::Mongo;
 
 async fn create_searcher() -> (MongoSearcher, impl std::any::Any) {
-    let container = Mongo::default().start().await.unwrap();
-    let port = container.get_host_port_ipv4(27017).await.unwrap();
-    let uri = format!("mongodb://127.0.0.1:{port}");
-    let collection_name = format!("test_{}", uuid::Uuid::new_v4().simple());
+    let node = shared_mongo().await;
+    let uri = node.uri.as_str();
+    let collection_name = fresh_collection();
 
     // Seed data via repository
-    let repo = MongoRepository::new(&uri, "test_db", &collection_name, Arc::new(NoAuth))
+    let repo = MongoRepository::new(uri, "test_db", &collection_name, Arc::new(NoAuth))
         .await
         .unwrap();
     cert::seed_searcher_data(&repo).await;
@@ -20,10 +20,10 @@ async fn create_searcher() -> (MongoSearcher, impl std::any::Any) {
     cert::seed_searcher_ordering_data(&repo).await;
     cert::seed_searcher_result_shape_data(&repo).await;
 
-    let searcher = MongoSearcher::new(&uri, "test_db", &collection_name, Arc::new(NoAuth))
+    let searcher = MongoSearcher::new(uri, "test_db", &collection_name, Arc::new(NoAuth))
         .await
         .unwrap();
-    (searcher, container)
+    (searcher, node)
 }
 
 #[tokio::test]
