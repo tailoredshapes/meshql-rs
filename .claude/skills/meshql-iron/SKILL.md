@@ -20,11 +20,12 @@ Don't hand-write requests against guessed shapes. Fetch `GET /manifest` first �
 - **Discovering what a deployment exposes** (entities, queries, write schemas) → read `references/manifest-discovery.md`
 - **Deciding whether to write to entity X directly, or to some other event entity that feeds it** → read `references/event-vs-domain-mesh.md`
 - **Showing a "pending"/"saved" state, or deciding whether a read reflects a write you just made** → read `references/honesty.md`
+- **Keeping a long-lived view current without polling** (a streamlette's SSE surface at `/{entity}/stream`, its `ready`/`change`/`lagged` frames, reconnects and resume) → read `references/streaming.md`
 - **Seeing it all put together** → read `references/worked-example.md`, a real vanilla-JS walkthrough against `examples/farm`
 
 ## Non-goals — don't reach for these
 
-- No SSE/`/changes` stream consumption. Treat push notifications as a future, separate module if a deployment ever needs them; nothing here depends on them.
+- Don't consume the deployment-level `/changes` feed from a UI. Streaming itself is in scope — a per-entity **streamlette** (`/{entity}/stream`) is the surface a frontend subscribes to, and `references/streaming.md` covers it. `/changes` is a different, deployment-wide pump with its own contract; reach for the entity's own stream instead.
 - No generated or compiled client package. Read the manifest and write plain `fetch` calls — there's no codegen step and nothing to `npm install`.
-- No reactive store, no subscribe/notify machinery. A cache here is just a `fetch` you haven't repeated yet, not a framework.
+- No reactive store. Subscribing is fine — a streamlette is a real subscription, and `references/streaming.md` shows how to consume one — but the response to a notification is a `fetch`, not a framework. Don't build an observable/derived-state layer that reconstructs entity state from change frames; a cache here is still just a `fetch` you haven't repeated yet.
 - Don't force an event/domain split onto an entity that's plain CRUD. Only apply `event-vs-domain-mesh.md` when the deployment actually uses that pattern — see its detection heuristic before assuming it does.
