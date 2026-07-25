@@ -47,6 +47,7 @@ pub struct StreamletteConfig {
 pub enum StreamSource {
     /// merkql is itself the log: consume the topic. Supports resume, and may
     /// carry payloads (see "Payload" for why that pairing is not accidental).
+    /// The topic MUST be single-partition — see "Resume".
     MerkqlTopic {
         broker: BrokerRef,
         topic: String,
@@ -58,29 +59,35 @@ pub enum StreamSource {
     Tail {
         searcher: Arc<dyn Searcher>,
         repository: Arc<dyn Repository>,
-        interval: Duration,
+        poll_interval: Duration,
     },
 }
 ```
+
+Both variants name the field `poll_interval`: both genuinely poll (see "Two sources"), and two differently-named interval fields would imply a distinction that doesn't exist.
 
 Two deliberate shapes here, both from review findings:
 
 - **`include_payload` lives on `MerkqlTopic`, not on `StreamletteConfig`** — this makes the invalid combination unrepresentable rather than merely discouraged. See "Payload."
 - **No `searcher` field on `StreamletteConfig`.** An earlier draft had one "for backfill on resume"; backfill comes from the log instead (see "Resume"), so it would be dead weight.
 
-**Breaking-change churn.** Adding a field to `ServerConfig` breaks every literal construction — **21 sites across 19 files in-repo** (examples, `meshql-mcp`, per-backend `farm_cert.rs`/`perf_server.rs`), plus the out-of-repo `cms` and `teamchat` products, which pin `v0.1.0` and so won't break until they bump. Give `ServerConfig` a `Default`/builder so a deployment with no streams need not write `streamlettes: vec![]`, and prefer whatever keeps existing call sites compiling.
+**Breaking-change churn.** Adding a field to `ServerConfig` breaks every literal construction — **20 construction sites across 19 files in-repo** (examples, `meshql-mcp`, per-backend `farm_cert.rs`/`perf_server.rs`), plus the out-of-repo `cms` and `teamchat` products, which pin `v0.1.0` and so won't break until they bump. Give `ServerConfig` a `Default`/builder so a deployment with no streams need not write `streamlettes: vec![]`, and prefer whatever keeps existing call sites compiling.
 
 ## Two sources, one contract
 
 Both variants implement the existing `ChangeSource` trait and feed a **per-meshlette `ChangeHub`**; everything downstream of the hub is identical, which is what keeps behavior certifiable across backends — and lets both reuse `meshql-changes/src/testing.rs`'s existing poll-driven `ChangeSource` cert suite.
 
-- **`MerkqlTopic`** — a `merkql::consumer::Consumer` subscribed to the entity's topic. **This polls.** `Consumer::poll(&mut self, _timeout)` is synchronous, takes `&mut self`, and *ignores its timeout argument entirely*, returning immediately (`merkql/src/consumer.rs:116`) — there is no blocking wait and no subscribe-with-callback. So this source owns a dedicated task with its own `poll_interval`, holding the `Consumer` (a `Mutex` or task-ownership handles the `&mut self`). Do **not** write a zero-interval busy loop.
+- **`MerkqlTopic`** — a `merkql::consumer::Consumer` subscribed to the entity's topic. **This polls.** `Consumer::poll(&mut self, _timeout)` is synchronous, takes `&mut self`, and *ignores its timeout argument entirely*, returning immediately (`merkql/src/consumer.rs:116`) — there is no blocking wait and no subscribe-with-callback. Do **not** write a zero-interval busy loop.
 
   What makes it the low-latency path is not the absence of polling but the cost per poll: an in-memory offset comparison, versus `SearcherTail`'s full `find_all` plus payload-hash diff. It can therefore be polled far more aggressively.
 
-- **`Tail`** — wraps the existing, already-certified `SearcherTail`. Higher latency (bounded by `interval`), works on every backend.
+  **The topic must be pre-created at startup.** `Consumer::subscribe` *silently skips* topics the broker can't find (`merkql/src/consumer.rs:80-81`), and `positions` is only ever populated inside `subscribe` — so a consumer that subscribes before the entity's first write never delivers anything, **permanently, even after the topic later appears**. merkql creates topics lazily on produce, and a streamlette's pump starts at boot, which is exactly when a fresh deployment has no topic yet. That is a silent dead stream on day one of every new entity. Call `create_topic` (idempotent) at streamlette construction; do not rely on lazy creation. Cover it with a test that boots a streamlette *before* any write and asserts the first subsequent write is delivered.
 
-Per invariant 6 ("pick your scale"), having both is the design working, not a compromise — same contract, different deployment weight.
+- **`Tail`** — wraps the existing, already-certified `SearcherTail`. Higher latency, works on every backend.
+
+**One pump task per streamlette, not the shared `run_tails` round-robin.** `meshql_changes::run_tails(hub, sources, interval)` (`hub.rs:41`) is a single task owning *one* interval across all its sources. That model cannot deliver what this design needs: a slow `SearcherTail::find_all` would block the aggressive merkql poll behind it, so per-source intervals would be inert fields. Each streamlette therefore spawns its own pump over its own source at its own `poll_interval`. `run_tails` stays exactly as it is for the deployment-level `/changes` feed — this adds a pump model, it doesn't replace one.
+
+Per invariant 6 ("pick your scale"), having both sources is the design working, not a compromise — same contract, different deployment weight.
 
 ## `ChangeEvent` gains two optional fields
 
@@ -98,13 +105,15 @@ pub struct ChangeEvent {
 }
 ```
 
-`WireEvent` gains `cursor` and `payload` and **must continue to omit `authorized_tokens`** — the existing split exists precisely so tokens can't leak, and two tests already assert that. Keep them passing.
+`WireEvent` gains `cursor` and `payload` and **must continue to omit `authorized_tokens`** — the existing split exists precisely so tokens can't leak, and a test already asserts that (`wire_json_never_leaks_tokens`), and `meshql-changes/tests/sse_integration.rs` asserts the wire shape. Keep them passing.
 
 `change_stream` currently sets SSE's `id:` to `ev.created_at.to_string()` (`sse.rs:49`); it becomes `ev.cursor`, omitted when `None`.
 
 ## Resume
 
 **Cursor = merkql's `{partition}:{offset}`.** `merkql::record::Record` carries both (`merkql/src/record.rs`), so it is exactly expressible, and it is *exact* — which is why dedupe uses it rather than the canonical `(created_at, id)` order key.
+
+**A streamlette-backed topic MUST be single-partition, asserted loudly at construction.** A single `Last-Event-ID` cannot address a multi-partition topic: merkql topics can have N partitions (`create_topic(name, num_partitions)`, producer routes by key hash, `merkql/src/topic.rs:147-158`), and `Consumer::poll` interleaves partition batches in `HashMap` iteration order. With N>1, "skip records at-or-before the cursor" is meaningful only *within the cursor's own partition* — history in other partitions is silently dropped or duplicated, and the claim below that "the log has everything, in exact order" stops being true. merkql's `default_partitions: 1` means the happy path works and this bug hides indefinitely. So: fail construction with a clear error if `num_partitions != 1`, rather than degrade. Multi-partition support means a per-partition cursor vector and is deliberately out of scope (see "Summary of what this design leaves open").
 
 **An earlier draft was wrong about this, and the correction matters.** That draft claimed resume depends on the canonical-ordering work (`5d5cbdb`) and would dedupe by its order key. It can't: `created_at` is millisecond-precision and `5d5cbdb` explicitly acknowledges ties are real, so two versions of one record committed in the same millisecond yield byte-identical `ChangeEvent`s — indistinguishable for dedupe. The log offset has no such ambiguity. `5d5cbdb` is therefore *not* a dependency of this design; it was listed as one in error.
 
@@ -115,7 +124,18 @@ pub struct ChangeEvent {
 - **A fresh `group_id` per connection is mandatory.** `Consumer::subscribe` prefers a *committed* offset over `offset_reset` unconditionally (`merkql/src/consumer.rs:88-104`), so `OffsetReset::Earliest` applies only when no committed offset exists. Reusing a `group_id` yields a stream that looks healthy but starts from the wrong position — silent, and exactly the kind of bug that survives a happy-path test. `meshql-merkql` already uses fresh-UUID group ids; follow it.
 - Re-reading the log prefix on every resume is the accepted cost at these volumes. **A real seek in `merkql` is the obvious efficiency follow-up** and drops in behind the same cursor format unchanged.
 
-**`Tail` sources emit no cursor and do not support resume.** A client sending `Last-Event-ID` to one is a client bug (the manifest told it resume was unavailable), but SSE's auto-reconnect makes a `400` actively harmful — the browser would reconnect in a loop. So: **ignore the header, and always emit a first `event: ready` frame declaring the mode actually honoured** (`{"resume": true|false, "cursor": "..."|null}`). No silent failure, no error path, and it gives fetch-on-connect a natural trigger.
+**An unusable cursor degrades to `resume: false` — never to a silent skip.** `Last-Event-ID` is untrusted client input, and every failure mode here otherwise produces "resume looked fine, events missing," which is the exact failure class layer 1 exists to eliminate. Malformed cursor; a partition that isn't 0; an offset beyond the log tail (which would skip everything and yield a silently empty stream); an offset below the retention floor (`Partition::advance_retention`/`read_range` honour retention, `merkql/src/partition.rs:630-680` — opt-in via `RetentionConfig.max_records`, default `None`, so latent today rather than active). In all cases: don't resume, report `resume: false` in the `ready` frame, and let the client fall back to fetch-on-connect. Test each case.
+
+**`Tail` sources emit no cursor and do not support resume.** A client sending `Last-Event-ID` to one is a client bug (the manifest told it resume was unavailable), but SSE's auto-reconnect makes a `400` actively harmful — the browser would reconnect in a loop. So: **ignore the header, and always emit a first `event: ready` frame declaring the mode actually honoured.**
+
+```
+event: ready
+data: {"resume": true, "cursor": "0:1841"}
+```
+
+`resume` is whether `Last-Event-ID` was honoured. `cursor` is **the position resume actually started from** — the client's own cursor when honoured, and `null` whenever `resume` is `false` (live-only source, no header sent, or an unusable cursor per above). It is deliberately *not* the current log tail: a client comparing it against what it sent can detect that its cursor was rejected. The `ready` frame carries no SSE `id:`, so it cannot clobber the browser's `Last-Event-ID` tracking.
+
+**`ready` lives in the streamlette handler, not in `change_stream`.** Both the streamlette and the deployment-level `/changes` route call `change_stream`; emitting `ready` inside it would silently change `/changes`'s wire contract for existing consumers, including meshobj's TS client. Keep `change_stream` a pure event stream and prepend `ready` in the streamlette handler.
 
 ## Gap handling
 
@@ -138,9 +158,16 @@ Three layers, because SSE gaps have three distinct causes.
 - **Event meshes → `true`.** An immutable fact *is* its content. Being told `message_posted/abc happened` and then refetching it is waste, and on a busy channel it turns one message into N refetches from N subscribers.
 - **Projections → `false`.** A projection may already have been superseded by the time a client renders it; notification-only forces a read through the graphlette, which returns current state.
 
-**Why `Tail` can never carry payloads.** `SearcherTail`'s own documentation (`meshql-changes/src/tail.rs:11-14`) records that a token-only ACL change with an identical payload is *undetectable* to it, and that **stale tokens are retained** until the next payload change or delete. So on a `Tail` stream the claim "a subscriber allowed the event is by construction allowed its payload" is not airtight — the event's tokens may be stale. Rather than document a footgun, the type makes it unrepresentable. The staleness window still deserves a note in the streaming reference doc, since it affects notification-only `Tail` streams too, just far less dangerously.
+**Why `Tail` can never carry payloads.** `SearcherTail`'s own documentation (`meshql-changes/src/tail.rs:10-18`) records that a token-only ACL change with an identical payload is *undetectable* to it, and that **stale tokens are retained** until the next payload change or delete. So on a `Tail` stream the claim "a subscriber allowed the event is by construction allowed its payload" is not airtight — the event's tokens may be stale. Rather than document a footgun, the type makes it unrepresentable. The staleness window still deserves a note in the streaming reference doc, since it affects notification-only `Tail` streams too, just far less dangerously.
 
 **No new authorization surface.** `change_stream` already filters each event by `tokens_visible_to(&ev.authorized_tokens, &subscriber_tokens)`, and envelope-level visibility is precisely what gates a read — so on a `MerkqlTopic` stream, a subscriber allowed the event is allowed its payload.
+
+**Payloads change what at-least-once delivery costs, and the client rule must change with it.** `ChangeSource`'s contract (`meshql-changes/src/source.rs`) justifies at-least-once on the grounds that "consumers tolerate duplicates because the client response is an idempotent refetch." With `include_payload: true` that stops holding: the client's response is to *append* the payload, so a duplicate renders a duplicate message. Server-side dedupe by cursor covers the backfill→live handover, but not reconnect — after `lagged` → close → refetch → reconnect, the browser resends its last-seen `Last-Event-ID`, the server replays events the refetch already returned, and a payload-consuming client shows each twice. For teamchat this is *the* visible failure mode.
+
+Two rules, both belonging in the streaming reference doc:
+
+1. **After a full refetch, the client must abandon its cursor.** Browser `EventSource` auto-reconnects *and* auto-resends `Last-Event-ID`, and there is no API to clear it — so the client must explicitly `close()` the `EventSource` and construct a **new** one, which starts with no `Last-Event-ID`. Letting it auto-reconnect after a refetch is precisely the bug.
+2. **Payload-consuming clients dedupe locally by `cursor`** as belt-and-braces, since at-least-once remains the delivery contract.
 
 **Broadcast pressure.** Payloads flow through the bounded `tokio::sync::broadcast` inside `ChangeHub`, so a payload-carrying stream lags materially sooner than a notification-only one at the same capacity. `ChangeHub::new(capacity)` is already parameterized; a payload-carrying streamlette should be configured with a larger capacity, and the plan should decide whether that's a `StreamSource` field or left to the deployment.
 
@@ -177,6 +204,18 @@ A new reference doc covering: discover the `sse` surface and its `resume` flag f
 - **Break-it verification:** per the practice this project has settled into, deliberately break the lag frame, the dedupe, and the `group_id` freshness, and confirm the certs go red before shipping. Both prior fixes this week (`e823ce0`, `5d5cbdb`) shipped only after this check, and in both cases the pre-existing suite stayed green — which is exactly why the check exists.
 - **End-to-end:** a real server with a streamlette, a real SSE client, a write, and an assertion the event arrives without polling.
 
+## Implementation sequencing
+
+This design is at the upper edge of a single plan — a config break, a public-struct break, two sources, resume, three-layer gap handling, manifest plus conformance, and a five-repo doc sync. Sequence it so every step ships green and independently valuable, rather than landing as one change:
+
+1. **Lag frame on the existing `/changes`.** Fix `change_stream`'s silent `take_while`; update `lagged_subscriber_stream_closes`. Valuable on its own — it fixes a live bug in a shipped route.
+2. **`ChangeEvent`/`WireEvent` gain `cursor` + `payload`** (both `None` everywhere so far). Isolates the breaking change from any behavior change.
+3. **`ServerConfig.streamlettes` + `Tail` source + `ready` frame.** A working per-entity stream on every backend, no resume, no payload.
+4. **`MerkqlTopic` + resume + payload**, with the single-partition assertion, topic pre-creation, fresh `group_id`, and unusable-cursor policy.
+5. **`meshql-iron` `streaming.md` + the three `SKILL.md` edits, synced across all five repos.**
+
+Steps 1–3 de-risk the rest and are worth having even if 4 slips.
+
 ## Revision history
 
 First draft was reviewed and had substantive problems, all fixed above and recorded because several were the kind that would have produced a wrong build:
@@ -192,9 +231,20 @@ First draft was reviewed and had substantive problems, all fixed above and recor
 - **"Rejects/ignores `Last-Event-ID`" was two behaviors** — now: ignore, and declare the honoured mode in a `ready` frame.
 - **Lag during backfill was unaddressed** — now degrades to `lagged` + close.
 
+A second review confirmed all of the above landed and found five more, also fixed:
+
+- **A single `Last-Event-ID` cannot address a multi-partition topic** — with N>1 partitions, history in partitions other than the cursor's is silently dropped or duplicated, and merkql's `default_partitions: 1` hides it indefinitely. Now a hard single-partition assertion at construction.
+- **`Consumer::subscribe` silently skips topics that don't exist yet**, and `positions` is only populated in `subscribe` — so a streamlette booting before the entity's first write is a *permanently* dead stream, even after the topic appears. Now requires idempotent `create_topic` at construction, with a test that boots before any write.
+- **`run_tails` is one round-robin task with one interval**, so the per-source `poll_interval` fields would have been inert, and a slow `SearcherTail` would block the aggressive merkql poll. Now one pump task per streamlette; `run_tails` is untouched for `/changes`.
+- **Payloads invalidate `ChangeSource`'s "duplicates are harmless" rationale** (it assumes the client response is an idempotent refetch; a payload consumer appends). Now two explicit client rules: abandon the cursor after a refetch by closing and reconstructing the `EventSource`, and dedupe locally by cursor.
+- **No policy for an unusable cursor** (malformed, wrong partition, past the tail, below retention) — each produced a silently empty stream. Now all degrade to `resume: false`.
+
+Also settled from that review: `ready` is emitted by the streamlette handler rather than `change_stream`, so `/changes`'s wire contract is unchanged for existing consumers including meshobj's TS client; `ready.cursor` is defined as the position resume actually started from (never the log tail), so a client can detect its cursor was rejected; and both source variants name the field `poll_interval`.
+
 ## Summary of what this design intentionally leaves open
 
 - **A real seek API in `merkql`** — v1 skips from `Earliest`; the cursor format is chosen so a seek drops in behind it unchanged.
+- **Multi-partition topics for streamlettes** — v1 asserts single-partition. Support means a per-partition cursor vector, and should wait until a deployment actually needs the throughput.
 - **Mid-connection privilege changes** — tokens captured at connect; documented, not solved.
 - **`SearcherTail`'s token-staleness window** — pre-existing, documented, not fixed here; it is why `Tail` cannot carry payloads.
 - **Whether broadcast capacity becomes a `StreamSource` field** — an implementation call.
