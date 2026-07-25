@@ -22,3 +22,6 @@ meshql-sqlite = { version = "0.1.0", path = "../meshql-sqlite" }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 futures = "0.3"
+# Drives a real `Router` in-process (ServiceExt::oneshot) so streamlette tests
+# exercise routing + extractors, not just a hand-called handler fn.
+tower = { version = "0.5", features = ["util"] }

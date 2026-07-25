@@ -2615,6 +2615,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tokio-stream",
+ "tower 0.5.3",
 ]
 
 [[package]]
