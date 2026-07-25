@@ -45,36 +45,45 @@ It is a *new* function, so every existing caller of `build_app`/`build_app_ext`/
 
 ```rust
 pub struct StreamletteConfig {
-    pub path: String,      // "/message_posted/stream"
-    pub entity: String,    // the ChangeEvent.entity this stream carries
+    pub path: String,       // "/message_posted/stream"
+    pub entity: String,     // the ChangeEvent.entity this stream carries
     pub source: StreamSource,
+    pub hub_capacity: usize,
+}
+
+/// A source that can replay history from a cursor. Implemented in
+/// `meshql-merkql`, NOT here — see below.
+pub trait SeekableSource: ChangeSource {
+    async fn backfill(&self, cursor: &str) -> anyhow::Result<Vec<ChangeEvent>>;
+    fn cursor_is_valid(&self, cursor: &str) -> bool;
 }
 
 pub enum StreamSource {
-    /// merkql is itself the log: consume the topic. Supports resume, and may
-    /// carry payloads (see "Payload" for why that pairing is not accidental).
-    /// The topic MUST be single-partition — see "Resume".
-    MerkqlTopic {
-        broker: BrokerRef,
-        topic: String,
-        poll_interval: Duration,
-        include_payload: bool,
-    },
     /// Poll-diff an existing store (Mongo, Postgres, …) via the existing
-    /// SearcherTail. No resume, no payload.
+    /// SearcherTail. Every backend. No resume, no payload.
     Tail {
-        searcher: Arc<dyn Searcher>,
-        repository: Arc<dyn Repository>,
+        source: Arc<dyn ChangeSource>,
+        poll_interval: Duration,
+    },
+    /// A log-backed source that supports resume and may carry payloads.
+    Seekable {
+        source: Arc<dyn SeekableSource>,
         poll_interval: Duration,
     },
 }
 ```
 
+**The seekable case is a trait, not a named `MerkqlTopic` variant, and that is load-bearing.** An earlier draft of this section named merkql directly here. It can't: `meshql-changes` has no `merkql` dependency and must stay backend-agnostic, so naming `BrokerRef`/`topic` in this enum would force one. merkql-specific code — the concrete `SeekableSource` implementation, the single-partition assertion, topic pre-creation, `include_payload` — lives in **`meshql-merkql`** (see "Two sources" and the merkql section below). `meshql-merkql` depends on `meshql-changes`, which is acyclic since `meshql-changes` depends on no adapter.
+
+Consequently `include_payload` is a field on the merkql source's own constructor rather than on this enum — which preserves the intent recorded below (the unsound `Tail` + payload pairing stays unrepresentable) by a different mechanism than originally sketched.
+
 Both variants name the field `poll_interval`: both genuinely poll (see "Two sources"), and two differently-named interval fields would imply a distinction that doesn't exist.
 
 Two deliberate shapes here, both from review findings:
 
-- **`include_payload` lives on `MerkqlTopic`, not on `StreamletteConfig`** — this makes the invalid combination unrepresentable rather than merely discouraged. See "Payload."
+- **`include_payload` belongs to the merkql source, not to `StreamletteConfig`** — this makes the invalid combination (a `Tail` source carrying payloads) unrepresentable rather than merely discouraged. See "Payload."
+
+> **Naming note for the rest of this document.** Sections below were written when the enum had a literal `MerkqlTopic` variant, and still use that name. Read **`MerkqlTopic` as "the merkql-backed `SeekableSource` implemented in `meshql-merkql`"** — every statement about its behavior (polling cost, resume, `include_payload`, the single-partition and topic-pre-creation guards) holds unchanged; only its location and spelling moved.
 - **No `searcher` field on `StreamletteConfig`.** An earlier draft had one "for backfill on resume"; backfill comes from the log instead (see "Resume"), so it would be dead weight.
 
 `StreamletteConfig` also carries `hub_capacity`, resolving the open question under "Payload" about where broadcast capacity lives: it is a config field, not a `StreamSource` field, because both variants have subscribers and both can lag.
