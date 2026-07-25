@@ -14,6 +14,7 @@ mod event;
 mod hub;
 mod source;
 mod sse;
+pub mod streamlette;
 mod tail;
 pub mod testing;
 
@@ -21,4 +22,5 @@ pub use event::ChangeEvent;
 pub use hub::{run_tails, ChangeHub};
 pub use source::ChangeSource;
 pub use sse::{change_stream, changes_router};
+pub use streamlette::{SeekableSource, StreamSource, StreamletteConfig};
 pub use tail::SearcherTail;
