@@ -36,8 +36,13 @@ manifest route included).
 
 ## The client contract
 
-- `event: change`, `id:` = the notification's `created_at` millis, `data:`
-  = the thin JSON. `?entities=hen,farm` filters the stream.
+- `event: change`, `data:` = the thin JSON. `?entities=hen,farm` filters the
+  stream. `id:` is the resume cursor and is present **only** on sources that
+  can seek; a source that can't resume emits no `id:` at all, so a browser
+  never echoes back a `Last-Event-ID` the server couldn't honour.
+- `event: lagged`, `data: {"skipped":N}` is terminal: the subscriber
+  overran the broadcast buffer, `N` events are unrecoverable, and the
+  stream then closes. Refetch — do not assume you can resume past it.
 - **On (re)connect, treat all cached state as stale.** The hub is
   in-memory: there is no replay, and `Last-Event-ID` is ignored in v1. A
   subscriber that falls behind the broadcast buffer has its stream closed

@@ -14,6 +14,17 @@ pub struct ChangeEvent {
     /// can seek (merkql); `None` for tail-based sources, which don't resume.
     pub cursor: Option<String>,
     /// The changed payload, when the streamlette is configured to carry it.
+    ///
+    /// **This must be the Envelope's `payload`, never the whole Envelope.**
+    /// An Envelope carries `authorized_tokens`; this field is serialized
+    /// verbatim, so handing it a whole Envelope puts tokens on the wire and
+    /// defeats the `WireEvent` split entirely. The split protects the
+    /// top-level field only — it cannot police what a producer nests inside.
+    ///
+    /// Only sound on log-backed (merkql) sources. `SearcherTail` cannot see
+    /// a token-only ACL change and retains stale tokens until the next
+    /// payload change or delete, so a tail-sourced payload may be visible to
+    /// a subscriber who should no longer see it.
     pub payload: Option<serde_json::Value>,
 }
 

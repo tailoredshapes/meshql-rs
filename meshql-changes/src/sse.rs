@@ -155,6 +155,13 @@ mod tests {
     /// `Sse` response to completion. Asserting on `Debug` output would not
     /// prove the `id:` line is (or isn't) on the wire; this does. Dropping
     /// the hub closes the broadcast channel, so the body terminates.
+    /// Render one event as the bytes an SSE client would actually receive.
+    ///
+    /// Deliberately builds a bare `Sse` with NO `.keep_alive()`: a keep-alive
+    /// makes the body infinite, so this helper would never return. Dropping
+    /// the hub drops the only Sender, and tokio's broadcast contract is that
+    /// a receiver drains buffered values and then sees Closed — which is what
+    /// terminates the body here.
     async fn wire_frames(event: ChangeEvent) -> String {
         use axum::response::IntoResponse;
         let hub = ChangeHub::new(16);
