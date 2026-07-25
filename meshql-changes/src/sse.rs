@@ -7,7 +7,8 @@
 //! - Reconnect contract: no replay. The hub is in-memory; on (re)connect a
 //!   client must treat all cached state as stale. Last-Event-ID is ignored
 //!   in v1 (a log-backed source may honor it later).
-//! - Lag: a subscriber that overruns the broadcast buffer gets its stream
+//! - Lag: a subscriber that overruns the broadcast buffer gets a terminal
+//!   `event: lagged` frame (`data: {"skipped":N}`) and then its stream is
 //!   CLOSED (never silent drops), forcing the reconnect-refetch path.
 
 use crate::{ChangeEvent, ChangeHub};
@@ -25,30 +26,51 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::{Stream, StreamExt};
 
-/// The filtered notification stream for one subscriber. Ends (closing the
-/// SSE connection) on broadcast lag.
+/// The filtered notification stream for one subscriber. On broadcast lag it
+/// emits a terminal `event: lagged` frame and then ends (closing the SSE
+/// connection), so the client knows it must resync rather than guessing.
 pub fn change_stream(
     rx: tokio::sync::broadcast::Receiver<ChangeEvent>,
     subscriber_tokens: Vec<String>,
     entities: Option<HashSet<String>>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
+    // `map_while` lets us emit one final frame for the lag and THEN end,
+    // which `take_while` cannot do. `done` guards against a broadcast
+    // stream that yields further items after a Lagged.
+    let mut done = false;
     BroadcastStream::new(rx)
-        .take_while(|item| !matches!(item, Err(BroadcastStreamRecvError::Lagged(_))))
-        .filter_map(move |item| {
-            let ev = item.expect("non-lag items are Ok");
-            if let Some(wanted) = &entities {
-                if !wanted.contains(&ev.entity) {
-                    return None;
-                }
-            }
-            if !tokens_visible_to(&ev.authorized_tokens, &subscriber_tokens) {
+        .map_while(move |item| {
+            if done {
                 return None;
             }
-            Some(Ok(Event::default()
-                .event("change")
-                .id(ev.created_at.to_string())
-                .data(ev.wire_json())))
+            match item {
+                Err(BroadcastStreamRecvError::Lagged(skipped)) => {
+                    done = true;
+                    // Terminal frame: the client MUST resync (refetch) —
+                    // `skipped` events were dropped and are unrecoverable.
+                    Some(Some(Ok(Event::default()
+                        .event("lagged")
+                        .data(format!(r#"{{"skipped":{skipped}}}"#)))))
+                }
+                Ok(ev) => {
+                    if let Some(wanted) = &entities {
+                        if !wanted.contains(&ev.entity) {
+                            return Some(None);
+                        }
+                    }
+                    if !tokens_visible_to(&ev.authorized_tokens, &subscriber_tokens) {
+                        return Some(None);
+                    }
+                    // `id:` stays created_at for now; a later task replaces it
+                    // with a resume cursor once that field exists.
+                    Some(Some(Ok(Event::default()
+                        .event("change")
+                        .id(ev.created_at.to_string())
+                        .data(ev.wire_json()))))
+                }
+            }
         })
+        .filter_map(|x| x)
 }
 
 #[derive(Clone)]
@@ -150,7 +172,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lagged_subscriber_stream_closes() {
+    async fn lagged_subscriber_gets_a_lagged_frame_then_close() {
         let hub = ChangeHub::new(2); // tiny buffer
         let rx = hub.subscribe();
         for i in 0..10 {
@@ -159,14 +181,22 @@ mod tests {
         let stream = change_stream(rx, vec!["*".into()], None);
         tokio::pin!(stream);
 
-        // Drain whatever survives; the stream must END (None), not hang.
-        let mut n = 0;
+        let mut frames = Vec::new();
         while let Some(item) = stream.next().await {
-            assert!(item.is_ok());
-            n += 1;
-            assert!(n < 10, "expected lag closure before all 10");
+            frames.push(format!("{:?}", item.unwrap()));
+            assert!(frames.len() < 12, "stream must end, not hang");
         }
-        // Reaching here = stream closed. Buffer is 2, so at most 2 delivered.
-        assert!(n <= 2);
+
+        // The stream still closes (last frame is terminal)...
+        let last = frames.last().expect("at least one frame");
+        // ...but it announces the lag rather than vanishing silently.
+        assert!(
+            last.contains("lagged"),
+            "final frame must be the lagged event, got: {last}"
+        );
+        assert!(
+            last.contains("skipped"),
+            "lagged frame must carry the skipped count"
+        );
     }
 }
