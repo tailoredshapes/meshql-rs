@@ -59,7 +59,7 @@ Workers consume events from a log (a merkql topic, a Kafka topic). Getting event
 Why this and not an application-level publish after the write:
 
 - **No dual write.** A "write the DB, then publish the event" hook is two writes with no shared transaction. Crash in between and the row exists but the event never fired — the log is now a lie, and every projection built from it is silently wrong. CDC derives the event *from the committed write*, so the event cannot be lost relative to the data: "if the event doesn't fire post-write, it will." At-least-once delivery after commit is the datastore/CDC layer's responsibility, not the mesh's.
-- **Correct order and time.** Events carry the store's commit order and timestamp, so replay and temporal reads reflect what actually happened, not application wall-clock during a request.
+- **Correct order and time.** The bridge appends committed writes in commit order, carrying the store's timestamp, so replay and temporal reads reflect what actually happened rather than application wall-clock during a request. Note what the bridge's job *is*: appending. The authority on order is the topic itself — see "The queue is the ordering authority" below — so nothing here needs to sort, buffer, or reconcile before publishing.
 
 Because folds are deterministic and idempotent, at-least-once delivery is enough: replaying a duplicate event recomputes the same noun. At-least-once + idempotent fold = exactly-once *effect*.
 
@@ -75,11 +75,59 @@ Note also that the checkpoint is generally **not** derivable from the published 
 
 The `meshql-changes` crate's `SearcherTail`/`ChangeHub`/`run_merkql_sink` machinery (used by the `merkql-worker-pipeline` reference) is a *different* tool for a *different* job: mirroring an **already-existing** entity's writes — already backed by Mongo/Postgres/whatever — onto a merkql topic, without migrating that entity off its current store. Reach for it only when you're layering event-sourcing onto an entity that already has a primary store you don't want to move; it is not a prerequisite for using merkql as an event mesh's storage, and its absence from a given dependency snapshot doesn't mean merkql itself is unavailable — check whether `meshql-merkql`'s direct `Repository`/`Searcher` resolves before concluding merkql can't be used.
 
+## The queue is the ordering authority
+
+**Ordering is provided implicitly. You do not have to build it.** Events arrive at N event meshlettes; the queue topics provide the ultimate ordering; workers receive those events in a defined order and are presented with a predictable domain. **Nothing needs to arrive pre-sorted — the append to the topic is what defines the order.**
+
+This is the single most reliably reinvented part of the platform. Do not build machinery to reconstruct a total order before publishing. Two separate builds recently did exactly that:
+
+- one derived a cursor from a storage engine's physical row id (`_id INTEGER PRIMARY KEY`) and pinned itself to SQLite to get it — see `references/storage-adapters.md`, "Don't reach underneath the abstraction";
+- the other funnelled every entity through a **single-partition** topic sorted by `(created_at, table, _id)`, with a parking buffer to hold events that arrived out of that order.
+
+Both solved a problem the queue had already solved, and each paid for it: the first with engine portability, the second with throughput plus a buffer that is now a piece of stateful infrastructure someone has to reason about on restart.
+
+If you find yourself writing a comparator, a re-sequencer, or a hold-back buffer on the produce side, stop: the correct amount of ordering code above the queue is none.
+
+## Ordering versus throughput versus durability is queue configuration — and it belongs to the domain
+
+meshql deliberately does not choose between them for you. It **cannot**: it does not know what matters about your domain, and there is no defensible default.
+
+- **If causal order matters**, configure the queue for it. **Partitioning by aggregate id** keeps causally-related events — a note and the likes on it; an asset and its lifecycle transitions — in one partition, and therefore ordered, without serialising the whole deployment through a single partition. That is usually the right answer, and it is a configuration decision, not a component you write.
+- **If throughput or durability matter more**, configure for those instead — more partitions, different acks/replication, different retention — and accept the weaker cross-aggregate ordering that comes with it.
+
+Whatever you choose, **write down in the architecture document what you prioritised and what you gave up.** It is a domain decision, so it belongs where the domain is described — next to the event storm artifact — not implied by a partition count in a deploy manifest that nobody reads as a design statement. A reader six months later must be able to tell the difference between "we chose per-aggregate order over throughput" and "nobody thought about it."
+
+## A refused command is a domain object, not an error response
+
+Events are events. If a user tries to put an aggregate into an illegal state, **then that is what they did**, and it is recorded in that event meshlette forever. You do not get to un-happen it, and a check that refuses the write at the door throws away the fact that someone tried.
+
+It is the **worker's** responsibility to find those state errors and respond accordingly — by emitting a **rejection** into its own projection. A rejection carries:
+
+- a link to the aggregate it concerns,
+- the source event id, the actor, and the timestamp,
+- what was attempted, and why the domain refused it.
+
+Because it is an ordinary projection entity, it is queryable by clients through the ordinary graphlette — so a UI can show *"your assignment was refused because the asset is disposed"* instead of leaving the user with a write that appeared to succeed. Think of it as a sophisticated, client-accessible dead-letter queue rather than a log line.
+
+It recurses cleanly: triaging a rejection is itself an event (`*_acknowledged`) folded into the same projection, so the queue gets worked without anything being mutated in place. **Correction is a new event, all the way down.**
+
+### The consequence for admission checks
+
+A gate in front of the event meshlettes refuses only what is refusable **without domain state**:
+
+- **authorization** — may this caller write this kind of event at all (`CasbinAuth::authorize_action`, tokens);
+- **schema validity** — does the payload match the entity's JSON Schema;
+- **create-only** — an event mesh takes `POST` and nothing else.
+
+Anything that needs the aggregate's *current state* — is this asset already disposed, is this channel archived, does this holder still exist — is the **worker's** job, and it produces a rejection object, not a 4xx. A `ValidatorFn` runs before the fold and has no view of the projection; if you find yourself wanting to read a projection from a validator, you have found the boundary.
+
+Note that `teamchat` currently does stateful checks at admission: its `write_gate` (`teamchat-server/src/gate.rs`) reads channel affiliation and returns 403. That is a defensible choice for chat, where immediate feedback while someone is typing matters more than it does in an asset register, and where a refusal has little downstream meaning worth querying later. But it is a **deliberate divergence** from the pattern above, and it should be named as one in that product's architecture document rather than copied into the next build because it was the shape that happened to be lying around.
+
 ## The worker
 
 A worker is an independent process (not part of `meshql-server`; see the compose-your-own-binary model). It owns one projector and one noun repository, and its loop is:
 
-1. **Consume** business events from the log, in commit order.
+1. **Consume** business events from the log, in the order the log defines (see "The queue is the ordering authority").
 2. **Fold** them into domain state (`Projector::apply`).
 3. **Write** the noun via its repository — a normal `create`, a new immutable Envelope version each time the noun advances.
 
@@ -112,3 +160,6 @@ This is only sound because nothing bypasses the event log — which is exactly w
 - Treating a noun as the source of truth — if the log and the noun disagree, the log wins and the noun gets rebuilt.
 - A worker fold that isn't deterministic/idempotent (depends on wall-clock, random, or read-back state) — it breaks replay and makes at-least-once delivery unsafe.
 - **A worker that commits a consumed offset without durably checkpointing its fold state alongside it.** The two are one decision (see above). Committing the offset alone means a restart resumes at a position with an empty projector, which silently produces a wrong noun rather than an obvious failure.
+- **Machinery to reconstruct a total order before publishing** — a re-sequencer, a parking/hold-back buffer, a single-partition funnel, a physical-row-id cursor. The topic append defines the order; this is code written against a problem that was already solved.
+- **A partition/retention/acks choice made silently.** Ordering vs throughput vs durability is a domain decision — record in the architecture document what you prioritised and what you gave up.
+- **A stateful domain check performed at admission and reported as a 4xx**, discarding the fact that the user tried. Admission refuses only what's refusable without domain state; everything else is a rejection object in a projection, queryable by the client.

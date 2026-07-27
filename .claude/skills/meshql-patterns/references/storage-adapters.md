@@ -36,6 +36,21 @@ These are the contract, enforced by the certification suite:
 4. **Token filtering on every read.** A record is visible iff its `authorized_tokens` is empty, contains `"*"`, the caller holds `"*"`, or the sets intersect (see `envelope_visible_to` in `meshql-core/src/auth.rs`). `create` stamps the caller's tokens onto the envelope.
 5. **Template rendering.** Searchers render the Handlebars template with `args` into a JSON object, then translate keys: `id` → envelope id column/field; anything else → payload path (e.g. Postgres: `(payload::jsonb)->>'breed' = $n`, see `meshql-postgres/src/query.rs`). Always parameterize — never splice rendered values into SQL.
 6. **Searcher returns payloads, not envelopes.** `find`/`find_all` return the payload Stash with `id` merged in, ready for GraphQL resolution. Also merge in `createdAt` (RFC3339 string, from the Envelope's `created_at`) right next to `id` — this is what lets a `.graphql` type opt into the "honesty" as-of field (`createdAt: String`) with zero resolver code, since `meshql-graphlette`'s scalar field resolver is a generic `stash.get(&field_name)` lookup. Never merge in `deleted` — search results already exclude deleted/superseded versions, so there's nothing to expose.
+7. **Canonical result ordering.** A result set comes back in insertion order: sort by the *resolved* version's `created_at` (millisecond), tiebroken by envelope `id`, byte-ordered — `meshql_core::envelope_order`, certified by the ordering cases in `meshql-core/src/testing.rs`. Because the key is the resolved version's timestamp rather than the id's first appearance, a `limit` truncates a meaningful prefix instead of an arbitrary subset. Adapters that *do* have a monotonic physical sequence (merkql log offset, SQLite `rowid`) use it only to decide *which version* of an id resolves inside a millisecond — never as the primary sort key, because Postgres/MySQL/Mongo/ksql have no equivalent and cross-adapter equivalence is worth more than sub-millisecond fidelity.
+
+## Don't reach underneath the abstraction
+
+The certification suite is not a smoke test; it is the **contract**. Choosing a storage backend is about what you already operate, what your team knows, and what you like — not about capability. There is no practical difference in behaviour between the implementations, and that is precisely what certification exists to guarantee. The property worth protecting: **you should be able to swap the database engine and replay the queue into the new store without any end user noticing a difference.**
+
+So: **never depend on a storage-engine property the certification does not guarantee.**
+
+A recent design picked SQLite specifically so a worker could tail `_id INTEGER PRIMARY KEY` as a CDC cursor — the reasoning being that SQLite serialises writers, so `_id` order is commit order. It works, and it is reaching *underneath* the abstraction. Nothing in `Repository`/`Searcher` exposes a physical row id; nothing in certification promises one exists, or that it is dense, or that it is monotonic with commit order; Postgres, Mongo and ksql have no equivalent to offer. The moment that cursor exists, swap-and-replay is gone and the product is welded to one engine — for a property that was never part of the deal.
+
+The replacements, in order of what you were actually trying to do:
+
+- **Need a stable order over results?** Use the certified canonical order (semantics 7 above: `created_at`, then `id`). Every adapter guarantees it.
+- **Need a durable consumption position?** That's the queue's offset, not a row id — and it is checkpointed with the fold state as one artifact (see `references/domain-design.md`).
+- **Need events on a log at all?** That's the CDC bridge or merkql-as-primary-store, not a hand-rolled tail (same file).
 
 ## Adding a new adapter
 
