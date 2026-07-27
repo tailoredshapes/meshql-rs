@@ -44,6 +44,18 @@ pub struct CertWorld {
     pub ids: HashMap<String, HashMap<String, String>>,
     pub first_stamp_ms: Option<i64>,
     pub farm_response: Option<serde_json::Value>,
+
+    // End-to-end authorization cert state (see `crate::authz`)
+    /// widget name → the id the restlette handed back on create
+    pub authz_ids: HashMap<String, String>,
+    /// names from the last list/vector read, whichever surface it came from
+    pub authz_names: Vec<String>,
+    /// named instants, for the temporal scenarios
+    pub authz_stamps: HashMap<String, i64>,
+    /// HTTP status of the last mutating request
+    pub authz_status: Option<u16>,
+    /// body of the last GraphQL singleton read
+    pub authz_response: Option<serde_json::Value>,
 }
 
 impl Default for CertWorld {
@@ -71,6 +83,11 @@ impl CertWorld {
             ids: HashMap::new(),
             first_stamp_ms: None,
             farm_response: None,
+            authz_ids: HashMap::new(),
+            authz_names: Vec::new(),
+            authz_stamps: HashMap::new(),
+            authz_status: None,
+            authz_response: None,
         };
         world.init_templates();
         world
@@ -103,6 +120,37 @@ impl CertWorld {
 
     pub fn star() -> Vec<String> {
         vec!["*".to_string()]
+    }
+
+    /// Whether a backing repository has been supplied. The authorization cert
+    /// needs one so it can inspect what the write path actually persisted.
+    pub fn has_repo(&self) -> bool {
+        self.repo_inner.is_some()
+    }
+
+    /// Base URL of the server under certification.
+    pub fn server_addr(&self) -> &str {
+        self.server_addr
+            .as_deref()
+            .expect("server_addr not initialized")
+    }
+
+    /// A previously captured instant, in epoch milliseconds.
+    pub fn authz_stamp(&self, key: &str) -> i64 {
+        *self
+            .authz_stamps
+            .get(key)
+            .unwrap_or_else(|| panic!("no instant was captured as '{key}'"))
+    }
+
+    /// Clear per-scenario authorization state. Call from the runner's
+    /// before-hook alongside handing the world a fresh server.
+    pub fn reset_authz(&mut self) {
+        self.authz_ids.clear();
+        self.authz_names.clear();
+        self.authz_stamps.clear();
+        self.authz_status = None;
+        self.authz_response = None;
     }
 
     pub fn repo(&self) -> &dyn Repository {

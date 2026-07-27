@@ -41,3 +41,7 @@ harness = true
 [[test]]
 name = "farm_cert"
 harness = false
+
+[[test]]
+name = "authz_cert"
+harness = false
