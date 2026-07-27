@@ -112,15 +112,21 @@ impl Searcher for MerksqlSearcher {
         &self,
         template: &str,
         args: &Stash,
-        _creds: &[String],
+        creds: &[String],
         at: i64,
     ) -> Result<Option<Stash>> {
         let query = self.render_template(template, args)?;
         let records = self.scan_latest(at)?;
 
+        // Visibility is part of the match, not a post-filter: the first
+        // *visible* match is the answer. Taking the first match and then
+        // testing it would turn a record the caller cannot see into a null
+        // instead of returning the record it can.
         let result = records
             .into_iter()
-            .find(|(_, raw_json)| matcher::matches(raw_json, &query))
+            .find(|(env, raw_json)| {
+                matcher::matches(raw_json, &query) && meshql_core::envelope_visible_to(env, creds)
+            })
             .map(|(env, _)| convert::envelope_to_stash(&env));
 
         Ok(result)
@@ -130,7 +136,7 @@ impl Searcher for MerksqlSearcher {
         &self,
         template: &str,
         args: &Stash,
-        _creds: &[String],
+        creds: &[String],
         at: i64,
     ) -> Result<Vec<Stash>> {
         let query = self.render_template(template, args)?;
@@ -141,9 +147,15 @@ impl Searcher for MerksqlSearcher {
 
         let records = self.scan_latest(at)?;
 
+        // The limit is applied *after* visibility filtering, so an invisible
+        // record can never consume a slot and shadow a visible match — the
+        // same rule the SQL adapters follow when they refuse to push LIMIT
+        // down for a non-wildcard caller.
         let mut results: Vec<Stash> = records
             .into_iter()
-            .filter(|(_, raw_json)| matcher::matches(raw_json, &query))
+            .filter(|(env, raw_json)| {
+                matcher::matches(raw_json, &query) && meshql_core::envelope_visible_to(env, creds)
+            })
             .map(|(env, _)| convert::envelope_to_stash(&env))
             .collect();
 
