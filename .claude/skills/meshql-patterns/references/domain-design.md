@@ -88,14 +88,61 @@ Both solved a problem the queue had already solved, and each paid for it: the fi
 
 If you find yourself writing a comparator, a re-sequencer, or a hold-back buffer on the produce side, stop: the correct amount of ordering code above the queue is none.
 
+**Note what was actually wrong in the second case, because the next section recommends single-partition topics.** The fault was not the partition count. It was funnelling *every entity* through *one shared* topic and then writing a comparator and a parking buffer to undo the resulting interleaving. One partition per topic with **one topic per event meshlette** — the next section's recommendation — is the opposite arrangement: no shared funnel, no cross-entity interleaving to undo, and therefore no re-sequencing code. The rule that survives is "write no ordering code above the queue," not "avoid single-partition topics."
+
 ## Ordering versus throughput versus durability is queue configuration — and it belongs to the domain
 
 meshql deliberately does not choose between them for you. It **cannot**: it does not know what matters about your domain, and there is no defensible default.
 
-- **If causal order matters**, configure the queue for it. **Partitioning by aggregate id** keeps causally-related events — a note and the likes on it; an asset and its lifecycle transitions — in one partition, and therefore ordered, without serialising the whole deployment through a single partition. That is usually the right answer, and it is a configuration decision, not a component you write.
-- **If throughput or durability matter more**, configure for those instead — more partitions, different acks/replication, different retention — and accept the weaker cross-aggregate ordering that comes with it.
+The general principle holds everywhere: ordering, throughput and durability trade against each other, and which one wins is a fact about your domain, not about the framework. **What differs is which lever the adapter actually gives you.** On merkql — the adapter this skill recommends for event sourcing — the lever is **topic granularity, not partition keys.** Read the next subsection before configuring anything.
 
-Whatever you choose, **write down in the architecture document what you prioritised and what you gave up.** It is a domain decision, so it belongs where the domain is described — next to the event storm artifact — not implied by a partition count in a deploy manifest that nobody reads as a design statement. A reader six months later must be able to tell the difference between "we chose per-aggregate order over throughput" and "nobody thought about it."
+### On merkql, the lever is topic granularity — partitioning by aggregate id is not expressible
+
+The obvious move — key each record by its aggregate id so causally-related events land on one partition — **cannot be expressed on merkql.** The producer key is hardcoded to the Envelope id in `meshql-merkql/src/repository.rs:83`:
+
+```rust
+let record = ProducerRecord::new(&self.topic, Some(envelope.id.clone()), value);
+```
+
+No parameter, no config field, no selector. Every write path in the adapter goes through this one function.
+
+**The consequence is worse than the feature simply being absent.** merkql routes by hashing the key (`merkql/src/topic.rs:148-158`):
+
+```rust
+fn route(&self, key: &Option<String>) -> u32 {
+    match key {
+        Some(k) => {
+            let hash = Hash::digest(k.as_bytes());
+            let val = u32::from_be_bytes([hash.0[0], hash.0[1], hash.0[2], hash.0[3]]);
+            val % self.config.num_partitions
+        }
+```
+
+Envelope ids are unique *per record*, not per aggregate. Partition **count** *is* configurable — `Broker::create_topic(name, num_partitions)` (`merkql/src/broker.rs:243`), `TopicConfig.num_partitions` (`merkql/src/topic.rs:33`) — while the **key** is not. So a builder who follows the standard advice (raise the partition count, expect per-aggregate ordering to be preserved) gets one aggregate's events hashed across different partitions with **no ordering relationship between them at all** — strictly worse than having done nothing. That is a trap, not a gap.
+
+**What to do instead: one partition per topic, one topic per event meshlette.**
+
+- `num_partitions = 1` on every topic. This gives **total order within each topic** — a stronger guarantee than per-aggregate ordering, not a weaker one. A worker consuming one topic sees every event in that meshlette in the order it was appended, with no re-sequencing and no per-key reasoning.
+- Parallelism comes from **topic count**, not partition count: N event meshlettes are N topics, consumed by N independent workers, running concurrently.
+
+State the costs plainly in the architecture document:
+
+- **Single-topic write throughput is the ceiling** for any one meshlette. A genuinely high-volume event type cannot be scaled by adding partitions; the only lever is splitting it into more than one meshlette, which is a domain modelling decision, not a config change.
+- **There is no cross-topic ordering.** Events in different meshlettes have no defined relative order.
+- **There is no multi-node story.** merkql is an embedded library, not a broker (see `merkql-architecture`); a topic lives in one process's filesystem.
+
+Cross-topic causality is *not* solved by partitioning — it is handled by the rejection mechanism in the next section: a worker that sees an event referencing something it hasn't observed yet emits a rejection, and that rejection **withdraws itself** when the referent arrives. That is the designed answer to "these two events are in different topics and arrived in the wrong order." Do not reach for a partition scheme, a re-sequencer, or a hold-back buffer to solve it.
+
+**Known upstream gap.** The honest fix is a partition-key selector on `MerkqlRepository` — a configurable function from Envelope to key, defaulting to the current envelope-id behaviour — so that a deployment which genuinely wants per-aggregate partitioning can key on `payload.aggregateId` instead. Until that exists, the one-partition-per-topic rule above is not a preference; it is the only configuration that gives a guarantee you can actually rely on.
+
+### Other Rust adapters
+
+- **`meshql-ksql`** has the same limitation for the same reason: the key is the Envelope id at `meshql-ksql/src/repository.rs:99` and `:228`, both calling `produce_record(&self.topic, &envelope.id, ...)`, which sends `"key": { "type": "STRING", "data": key }` (`meshql-ksql/src/client.rs:58`). The adapter does not create topics, so partition count comes from whatever provisioned them (Terraform, in `examples/egg-economy-ksql`). **Provision those topics with one partition** unless you have accepted the loss of ordering in writing.
+- **The SQL and document adapters** (`meshql-postgres`, `meshql-sqlite`, `meshql-mysql`, `meshql-mongo`) are not event logs and have no partitioning concept; ordering there is the store's own, and this section does not apply.
+
+If a future adapter genuinely supports a partition-key selector, this section should say so for that adapter specifically — do not generalise from one backend to another.
+
+Whatever you choose, **write down in the architecture document what you prioritised and what you gave up.** It is a domain decision, so it belongs where the domain is described — next to the event storm artifact — not implied by a partition count in a deploy manifest that nobody reads as a design statement. A reader six months later must be able to tell the difference between "we chose total order per meshlette and capped our write throughput at one topic" and "nobody thought about it."
 
 ## A refused command is a domain object, not an error response
 
@@ -160,6 +207,7 @@ This is only sound because nothing bypasses the event log — which is exactly w
 - Treating a noun as the source of truth — if the log and the noun disagree, the log wins and the noun gets rebuilt.
 - A worker fold that isn't deterministic/idempotent (depends on wall-clock, random, or read-back state) — it breaks replay and makes at-least-once delivery unsafe.
 - **A worker that commits a consumed offset without durably checkpointing its fold state alongside it.** The two are one decision (see above). Committing the offset alone means a restart resumes at a position with an empty projector, which silently produces a wrong noun rather than an obvious failure.
-- **Machinery to reconstruct a total order before publishing** — a re-sequencer, a parking/hold-back buffer, a single-partition funnel, a physical-row-id cursor. The topic append defines the order; this is code written against a problem that was already solved.
+- **Machinery to reconstruct a total order before publishing** — a re-sequencer, a parking/hold-back buffer, an all-entities-through-one-topic funnel, a physical-row-id cursor. The topic append defines the order; this is code written against a problem that was already solved. (A *per-meshlette* single-partition topic is not this — see "The queue is the ordering authority.")
+- **Raising `num_partitions` above 1 on a merkql topic and expecting per-aggregate ordering.** The producer key is hardcoded to the Envelope id (`meshql-merkql/src/repository.rs:83`), which is unique per record, so this scatters one aggregate's events across partitions with no ordering between them — worse than leaving it at 1. One partition per topic, one topic per event meshlette.
 - **A partition/retention/acks choice made silently.** Ordering vs throughput vs durability is a domain decision — record in the architecture document what you prioritised and what you gave up.
 - **A stateful domain check performed at admission and reported as a 4xx**, discarding the fact that the user tried. Admission refuses only what's refusable without domain state; everything else is a rejection object in a projection, queryable by the client.

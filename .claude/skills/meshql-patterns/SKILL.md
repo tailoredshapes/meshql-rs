@@ -64,8 +64,8 @@ let farm_searcher: Arc<dyn Searcher> =
     Arc::new(MongoSearcher::new(URI, DB, "farms", Arc::clone(&auth)).await?);
 
 let farm_config = RootConfig::builder()
-    .singleton("getFarm", r#"{"id": "{{id}}"}"#)
-    .vector("getFarms", r#"{"name": "{{name}}"}"#)
+    .singleton("getFarm", r#"{"id": "{{id}}"}"#)          // envelope id — top-level
+    .vector("getFarms", r#"{"payload.name": "{{name}}"}"#) // payload field — needs payload.
     .vector_resolver("coops", None, "getCoopsByFarm", "/coop/graph")
     .build();
 
@@ -74,7 +74,52 @@ let farm_config = RootConfig::builder()
 // then meshql_server::run(config)  — or run_with_auth / run_ext for custom Auth / extra routes
 ```
 
-Query templates are **Handlebars producing a JSON query**: `{"farmId": "{{id}}"}`. Top-level keys address payload fields (adapters map them to JSONB/doc paths); `id` addresses the Envelope id.
+### Query templates: `payload.` is not optional
+
+Query templates are **Handlebars producing a JSON query**. The single most important rule:
+
+> **Payload fields need the `payload.` prefix. The Envelope's own `id` is top-level.**
+> `{"payload.farmId": "{{id}}"}` — correct. `{"farmId": "{{id}}"}` — silently wrong.
+
+Every Rust adapter's query builder matches on exactly these two shapes:
+
+| Adapter | `{"id": …}` becomes | `{"payload.x": …}` becomes | A bare `{"x": …}` does |
+|---|---|---|---|
+| `meshql-merkql` | dot-path `id` on the Envelope | dot-path `payload.x` | **no match → empty result** |
+| `meshql-postgres` | `id = $n` | `(payload::jsonb)->>'x' = $n` | **silently skipped** (`query.rs`) |
+| `meshql-sqlite` | `id = ?` | `json_extract(payload, '$.x') = ?` | **silently skipped** |
+| `meshql-ksql` | `id = '…'` | `EXTRACTJSONFIELD(payload, '$.x') = '…'` | **silently skipped** |
+| `meshql-mysql` | `` `id` = ? `` | `JSON_UNQUOTE(JSON_EXTRACT(payload, '$.x')) = ?` | emitted as a bare column → **SQL error** |
+| `meshql-mongo` | `id` (top-level) | `payload.x` (nested doc path) | matches a non-existent top-level field → **empty result** |
+
+**Every one of these failure modes is silent.** merkql's matcher (`meshql-merkql/src/matcher.rs:16-26`) does a literal dot-path lookup against the serialized Envelope — `{id, payload, created_at, deleted, authorized_tokens}` — and returns `false` when the path is absent:
+
+```rust
+for (key, expected) in query_obj {
+    let path: Vec<&str> = key.split('.').collect();
+    match get_path(record_json, &path) {
+        Some(actual) => { if actual != expected { return false; } }
+        None => return false,
+    }
+}
+```
+
+The SQL adapters are arguably worse: an unrecognised key hits `// Unknown key — skip` (`meshql-postgres/src/query.rs`, `meshql-sqlite/src/query.rs`, `meshql-ksql/src/query.rs`), so if it was the *only* condition the WHERE clause comes out empty and the query returns **every record** rather than none.
+
+**You will not get an error either way.** A by-id test passes regardless, because `id` is top-level and correct in both the right and the wrong version of a template. So: **always test a list/vector query against data you actually wrote.** A test suite that only exercises `getById` will go green over a completely broken set of templates. This exact bug was fixed in `examples/farm` — see `examples/farm/src/lib.rs:35-36`, where `getFarm` uses `{"id": …}` and `getFarms` uses `{"payload.name": …}`.
+
+### merkql matcher limits: equality and AND, nothing else
+
+`matches()` above is the whole matcher. It supports **exact equality only, with all conditions ANDed.** There is **no range comparison, no OR, no ORDER BY, no LIKE, no IN.** A `>=` or a sort order cannot be expressed in a merkql query template at all.
+
+Every range question must therefore become a **materialised bucket field** written by the worker at fold time — `close_period`, `occurred_on`, `size_band` — and then queried by equality:
+
+```rust
+// Not expressible: "reports in the last 30 days"
+.vector("getLayReportsOn", r#"{"payload.occurred_on": "{{occurred_on}}"}"#)
+```
+
+Treat this as good practice rather than merely a workaround: bucket fields are also the **portable intersection across all the adapters**, so a projection built this way keeps invariant 5's swap-and-replay property intact. A projection that leans on Postgres range predicates silently pins itself to Postgres.
 
 ## Deployment model: compose your own binary
 
@@ -101,6 +146,8 @@ A meshql system is a small Rust binary owned by the service developer — there 
 - A GraphQL query without `at: Float` — breaks temporal uniformity. (`at: Int` is also wrong: millisecond timestamps overflow GraphQL's 32-bit `Int`.)
 - Hard deletes, in-place updates, or reads that don't filter `deleted`.
 - A Searcher query path that skips `authorized_tokens` filtering.
+- **A query template addressing a payload field without the `payload.` prefix** — `{"farmId": "{{id}}"}`. Fails silently: empty results on merkql/Mongo, *all* results on the SQL adapters, an error only on MySQL. Test a list query against written data, not just `getById`.
+- **A range, `OR`, or sort expressed in a query template.** The merkql matcher is equality-and-AND only; materialise a bucket field in the projection instead.
 - Business/aggregation logic inside an adapter crate (`meshql-mongo`, `meshql-postgres`, …) — it belongs in restlette validators/side-effects, extra routes, or projection entities.
 - Cross-entity joins implemented in a restlette — that's what graphlette resolvers are for.
 - A new adapter merged without passing the certification suite.

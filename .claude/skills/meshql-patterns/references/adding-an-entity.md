@@ -68,8 +68,8 @@ let widget_config = RootConfig::builder()
     // queries: name must match the GraphQL Query field; template is
     // Handlebars rendering a JSON query against payload fields (and "id")
     .singleton("getWidget", r#"{"id": "{{id}}"}"#)
-    .vector("getWidgets", r#"{"name": "{{name}}"}"#)
-    .vector("getWidgetsByParent", r#"{"parentId": "{{id}}"}"#)
+    .vector("getWidgets", r#"{"payload.name": "{{name}}"}"#)
+    .vector("getWidgetsByParent", r#"{"payload.parentId": "{{id}}"}"#)
     // relations: see references/federation.md
     .singleton_resolver("parent", Some("parentId"), "getParent", "/parent/graph")
     .build();

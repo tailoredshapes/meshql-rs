@@ -8,13 +8,13 @@ Defined on `RootConfig` (`meshql-core/src/config.rs`). A template is Handlebars 
 
 ```rust
 .singleton("getCoop", r#"{"id": "{{id}}"}"#)              // one result
-.vector("getCoops", r#"{"name": "{{name}}"}"#)            // many results
-.vector("getCoopsByFarm", r#"{"farmId": "{{id}}"}"#)      // relation lookup
+.vector("getCoops", r#"{"payload.name": "{{name}}"}"#)            // many results
+.vector("getCoopsByFarm", r#"{"payload.farmId": "{{id}}"}"#)      // relation lookup
 ```
 
 - `singleton` vs `vector` controls whether the GraphQL field returns an object or a list — it must match the schema's return type (`Coop` vs `[Coop]`).
 - Top-level template keys address **payload fields** (`farmId`, `name`); the special key `id` addresses the Envelope id. Adapters translate to their native form (Mongo query doc, SQL over JSONB, etc.).
-- Args come from the GraphQL call's arguments — `getCoopsByFarm(id: "farm-1")` renders `{"farmId": "farm-1"}`.
+- Args come from the GraphQL call's arguments — `getCoopsByFarm(id: "farm-1")` renders `{"payload.farmId": "farm-1"}`.
 
 ## The two resolver directions
 
@@ -35,9 +35,9 @@ Reads `farmId` from the parent Coop object, then invokes `getFarm` on `/farm/gra
 .vector_resolver("coops", None, "getCoopsByFarm", "/coop/graph")
 ```
 
-`foreign_key: None` means "pass this object's own `id`". The target graphlette must define `getCoopsByFarm` with template `{"farmId": "{{id}}"}` — **the relation query lives on the child entity's RootConfig**, the resolver on the parent's. Forgetting one half is the most common federation bug.
+`foreign_key: None` means "pass this object's own `id`". The target graphlette must define `getCoopsByFarm` with template `{"payload.farmId": "{{id}}"}` — **the relation query lives on the child entity's RootConfig**, the resolver on the parent's. Forgetting one half is the most common federation bug.
 
-**The relation query's GraphQL argument must be named `id`, whatever the field it filters on.** Resolvers pass the parent's key under the literal argument name `id`, so the child's `Query` field has to declare `getCoopsByFarm(id: ID, at: Float)` — *not* `getCoopsByFarm(farmId: ID, at: Float)`, however much more natural that reads. Get this wrong and there's no error: the resolver passes `id`, the query binds nothing, the template renders empty, and the field silently resolves to `null`/`[]` forever. The Handlebars template still refers to the *payload* field being matched (`{"farmId": "{{id}}"}` — `farmId` is the stored field, `{{id}}` is the incoming argument), which is exactly why the mismatch is easy to introduce and hard to spot.
+**The relation query's GraphQL argument must be named `id`, whatever the field it filters on.** Resolvers pass the parent's key under the literal argument name `id`, so the child's `Query` field has to declare `getCoopsByFarm(id: ID, at: Float)` — *not* `getCoopsByFarm(farmId: ID, at: Float)`, however much more natural that reads. Get this wrong and there's no error: the resolver passes `id`, the query binds nothing, the template renders empty, and the field silently resolves to `null`/`[]` forever. The Handlebars template still refers to the *payload* field being matched (`{"payload.farmId": "{{id}}"}` — `payload.farmId` is the stored field, `{{id}}` is the incoming argument), which is exactly why the mismatch is easy to introduce and hard to spot. Note the `payload.` prefix: dropping it is a second, independent silent failure with the same symptom (see SKILL.md, "Query templates: `payload.` is not optional"), so when a relation resolves to `[]` forever, check both.
 
 ## Internal vs HTTP resolution
 
