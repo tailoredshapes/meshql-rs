@@ -6,6 +6,7 @@
 
 use crate::conversion::{envelope_key, envelope_to_value};
 use crate::log::AppendOnlyLog;
+use crate::notify::Notification;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use merk_object::backend::Backend;
@@ -62,25 +63,41 @@ impl<B: Backend> MerkRepository<B> {
         envelope.authorized_tokens = tokens.to_vec();
         envelope
     }
-}
 
-#[async_trait]
-impl<B: Backend> Repository for MerkRepository<B> {
-    async fn create(&self, envelope: Envelope, tokens: &[String]) -> Result<Envelope> {
+    /// `create`, plus the wake-up message for wherever the record landed.
+    ///
+    /// The gateway needs both — append, then notify, then `201` — and the
+    /// `Repository` trait can only give it the envelope. Re-deriving the partition
+    /// from the id would mean recomputing `hash(key) % num_partitions` outside the
+    /// engine, and a notification sent to the wrong partition wakes the wrong
+    /// worker, costs nothing, logs nothing, and leaves the right partition unread
+    /// until the five-minute sweep. So the number comes from the engine.
+    ///
+    /// Note the ordering this implies and the reason it is safe: the append is
+    /// durable before the message is sent, so a crash in between costs latency and
+    /// not data — the log is still the sole source of truth and the consumer pulls
+    /// the delta from its own committed offset. That is what distinguishes this
+    /// from a `post_create` event publish, which would be a dual write.
+    pub async fn create_located(
+        &self,
+        envelope: Envelope,
+        tokens: &[String],
+    ) -> Result<(Envelope, Notification)> {
         let env = Self::prepare(envelope, tokens);
-        self.log
+        let partition = self
+            .log
             .append(envelope_key(&env), envelope_to_value(&env)?)
             .await?;
-        Ok(env)
+        let notification = Notification::new(self.log.topic(), partition);
+        Ok((env, notification))
     }
 
-    /// One append per partition touched, not one per record: `send_batch`
-    /// coalesces everything routing to the same partition into a single request.
-    async fn create_many(
+    /// `create_many`, plus one wake-up per partition touched — not one per record.
+    pub async fn create_many_located(
         &self,
         envelopes: Vec<Envelope>,
         tokens: &[String],
-    ) -> Result<Vec<Envelope>> {
+    ) -> Result<(Vec<Envelope>, Vec<Notification>)> {
         let prepared: Vec<Envelope> = envelopes
             .into_iter()
             .map(|e| Self::prepare(e, tokens))
@@ -90,8 +107,33 @@ impl<B: Backend> Repository for MerkRepository<B> {
         for env in &prepared {
             entries.push((envelope_key(env), envelope_to_value(env)?));
         }
-        self.log.append_batch(entries).await?;
-        Ok(prepared)
+        let partitions = self.log.append_batch(entries).await?;
+        let notifications = partitions
+            .into_iter()
+            .map(|p| Notification::new(self.log.topic(), p))
+            .collect();
+        Ok((prepared, notifications))
+    }
+}
+
+#[async_trait]
+impl<B: Backend> Repository for MerkRepository<B> {
+    async fn create(&self, envelope: Envelope, tokens: &[String]) -> Result<Envelope> {
+        self.create_located(envelope, tokens)
+            .await
+            .map(|(env, _)| env)
+    }
+
+    /// One append per partition touched, not one per record: `send_batch`
+    /// coalesces everything routing to the same partition into a single request.
+    async fn create_many(
+        &self,
+        envelopes: Vec<Envelope>,
+        tokens: &[String],
+    ) -> Result<Vec<Envelope>> {
+        self.create_many_located(envelopes, tokens)
+            .await
+            .map(|(envelopes, _)| envelopes)
     }
 
     async fn read(

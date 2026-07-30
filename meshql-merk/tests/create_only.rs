@@ -26,9 +26,16 @@ fn plan() -> TopicPlan {
 }
 
 fn repo(location: &str) -> MerkRepository<MemoryBackend> {
+    let (repo, _broker) = repo_and_broker(location);
+    repo
+}
+
+/// Some tests need the broker as well, to ask the topic where a key routes.
+fn repo_and_broker(location: &str) -> (MerkRepository<MemoryBackend>, BrokerRef<MemoryBackend>) {
     let broker = open(location);
     meshql_merk::provision(&broker, &plan()).unwrap();
-    MerkRepository::new(&broker, "story_event")
+    let repo = MerkRepository::new(&broker, "story_event");
+    (repo, broker)
 }
 
 fn envelope(id: &str, body: &str) -> Envelope {
@@ -95,6 +102,67 @@ async fn create_many_stores_every_envelope() {
 async fn create_many_of_nothing_is_not_an_error() {
     let repo = repo("mem://merk-create-many-empty");
     assert!(repo.create_many(vec![], &star()).await.unwrap().is_empty());
+}
+
+/// The gateway's step 7 is append, then notify, then 201 — and the notify needs
+/// the partition, which `Repository::create` cannot return.
+///
+/// The assertion is that the partition the engine assigned is the one
+/// `Topic::route` computes for the same key. Not because the gateway should
+/// re-derive it — it should not, and `create_located` exists so it does not have
+/// to — but because if the two ever disagreed, a gateway that *did* re-derive
+/// would send every wake-up to the wrong worker, and nothing would log a word
+/// about it.
+#[tokio::test]
+async fn create_located_reports_the_partition_the_engine_chose() {
+    let (repo, broker) = repo_and_broker("mem://merk-located");
+    let topic = broker.topic("story_event").unwrap();
+
+    for i in 0..20 {
+        let id = format!("e-{i:02}");
+        let (env, notification) = repo
+            .create_located(envelope(&id, "body"), &star())
+            .await
+            .unwrap();
+
+        assert_eq!(env.id, id);
+        assert_eq!(notification.topic, "story_event");
+        assert_eq!(
+            notification.partition,
+            topic.route(&Some(id.clone())),
+            "the engine and Topic::route disagree about where {id} belongs"
+        );
+        assert!(notification.partition < 8);
+    }
+}
+
+/// A batch gets one wake-up per partition touched, not one per record — 200
+/// records over 8 partitions is 8 messages.
+#[tokio::test]
+async fn create_many_located_notifies_each_partition_once() {
+    let (repo, _broker) = repo_and_broker("mem://merk-located-many");
+    let batch: Vec<Envelope> = (0..200)
+        .map(|i| envelope(&uuid::Uuid::new_v4().to_string(), &format!("b{i}")))
+        .collect();
+
+    let (stored, notifications) = repo.create_many_located(batch, &star()).await.unwrap();
+    assert_eq!(stored.len(), 200);
+
+    assert!(
+        !notifications.is_empty() && notifications.len() <= 8,
+        "expected at most one notification per partition, got {}",
+        notifications.len()
+    );
+
+    let mut partitions: Vec<u32> = notifications.iter().map(|n| n.partition).collect();
+    let before = partitions.len();
+    partitions.sort_unstable();
+    partitions.dedup();
+    assert_eq!(partitions.len(), before, "a partition was notified twice");
+    assert!(
+        notifications.iter().all(|n| n.topic == "story_event"),
+        "a notification named the wrong topic"
+    );
 }
 
 /// The whole point of the crate. Every read path fails loudly, and says why.
