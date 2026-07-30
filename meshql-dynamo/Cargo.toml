@@ -1,0 +1,46 @@
+[package]
+name = "meshql-dynamo"
+version = "0.1.0"
+edition = "2021"
+description = "meshql-dynamo — Repository + Searcher over Amazon DynamoDB"
+license = "MIT"
+repository = "https://github.com/tailoredshapes/meshql-rs"
+
+[dependencies]
+meshql-core = { version = "0.1.0", path = "../meshql-core" }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-dynamodb = { version = "1", features = ["behavior-version-latest"] }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+handlebars = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+futures = "0.3"
+
+[dev-dependencies]
+tokio = { workspace = true }
+uuid = { workspace = true }
+serde_json = { workspace = true }
+meshql-cert = { version = "0.1.0", path = "../meshql-cert" }
+meshql-server = { version = "0.1.0", path = "../meshql-server" }
+cucumber = "0.21"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+axum = { workspace = true }
+
+[[test]]
+name = "repo_cert"
+harness = true
+
+[[test]]
+name = "repo_auth_cert"
+harness = true
+
+[[test]]
+name = "searcher_cert"
+harness = true
+
+[[test]]
+name = "authz_cert"
+harness = false

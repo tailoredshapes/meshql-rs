@@ -25,7 +25,7 @@ MeshQL-RS is the Rust implementation of [MeshQL](https://tailoredshapes.github.i
 
 - **Dual APIs**: REST and GraphQL from the same entity definition
 - **Federation**: Resolvers connect entities across graphlettes via HTTP or in-process calls
-- **Multiple datastores**: MongoDB, PostgreSQL, MySQL, SQLite, MerkQL — mix and match
+- **Multiple datastores**: MongoDB, PostgreSQL, MySQL, SQLite, MerkQL, DynamoDB, merk-cloud — mix and match
 - **Temporal queries**: Point-in-time reads on any query
 - **"Honesty" as-of freshness**: REST responses carry `X-Meshql-Created-At`/`X-Meshql-Deleted` headers; GraphQL types can opt into a `createdAt` field — so the FE always knows how fresh a payload is
 - **Change feed**: `meshql-changes` streams SSE change notifications so clients don't have to poll for read-your-writes
@@ -47,6 +47,8 @@ meshql-rs/
 ├── meshql-merkql/      # MerkQL adapter (embedded event log)
 ├── meshql-merksql/     # ksqlDB-style streaming SQL engine over merkql
 ├── meshql-ksql/        # Confluent Cloud ksqlDB/Kafka adapter (HTTP-only)
+├── meshql-dynamo/      # DynamoDB adapter (Repository + Searcher)
+├── meshql-merk/        # merk-cloud adapter — create-only Repository, no Searcher
 ├── meshql-casbin/      # RBAC authorization (wraps another Auth)
 ├── meshql-changes/     # SSE change feed + deployment manifest generator
 ├── meshql-mcp/         # Auto-derived MCP server for LLM agents

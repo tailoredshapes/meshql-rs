@@ -1,0 +1,38 @@
+[package]
+name = "meshql-merk"
+version = "0.1.0"
+edition = "2021"
+description = "meshql-merk — create-only Repository over merk-cloud (merk-aws / S3 Express One Zone)"
+license = "MIT"
+repository = "https://github.com/tailoredshapes/meshql-rs"
+
+[dependencies]
+meshql-core = { version = "0.1.0", path = "../meshql-core" }
+merk-aws = { workspace = true }
+merk-object = { workspace = true }
+anyhow = "1"
+toml = "0.8"
+serde_json = { workspace = true }
+chrono = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+# Tests that need a real S3 Express One Zone directory bucket. There is no
+# emulator: append-at-offset exists only on Express One Zone and LocalStack does
+# not implement it, so these are opt-in and read MESHQL_MERK_TEST_LOCATION.
+live = []
+
+[[test]]
+name = "live_create_cert"
+required-features = ["live"]
+
+[[test]]
+name = "live_rolling"
+required-features = ["live"]

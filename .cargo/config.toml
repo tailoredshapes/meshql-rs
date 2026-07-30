@@ -1,0 +1,11 @@
+[net]
+# merk-cloud is a private GitHub repository, so `meshql-merk`'s dependency on it
+# is an SSH git URL. Cargo's built-in libgit2 transport cannot use an
+# ssh-agent-less session or a credential helper, and fails with
+# "no authentication methods succeeded"; the git CLI can, because it already
+# knows how the developer authenticates. This makes cargo shell out to it.
+#
+# CI needs a deploy key (or a token-rewritten URL via `insteadOf`) for the same
+# reason. If merk-cloud is ever made public, this line and the ssh:// URL in
+# Cargo.toml can both go.
+git-fetch-with-cli = true

@@ -35,21 +35,65 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      # meshql-merk depends on merk-cloud, which is a **private** repository, so
+      # cargo cannot resolve it without a credential. `.cargo/config.toml` sets
+      # `net.git-fetch-with-cli = true` so the git CLI does the authenticating;
+      # this rewrites the SSH URL to an HTTPS one carrying a token, which is the
+      # form a runner can supply.
+      #
+      # Fails loudly rather than skipping, because the alternative is a build
+      # that resolves everything except the two new adapters and reports success.
+      # If merk-cloud is made public, this step and the ssh:// URL in Cargo.toml
+      # both go away.
+      - name: Authenticate to the private merk-cloud repository
+        shell: bash
+        env:
+          MERK_CLOUD_TOKEN: ${{ secrets.MERK_CLOUD_TOKEN }}
+        run: |
+          if [ -z "${MERK_CLOUD_TOKEN}" ]; then
+            echo "::error::MERK_CLOUD_TOKEN is not set. meshql-merk depends on the private"
+            echo "::error::tailoredshapes/merk-cloud repository; cargo cannot resolve it without"
+            echo "::error::a credential. Add a repository secret with read access to merk-cloud."
+            exit 1
+          fi
+          git config --global \
+            url."https://x-access-token:${MERK_CLOUD_TOKEN}@github.com/tailoredshapes/merk-cloud".insteadOf \
+            "ssh://git@github.com/tailoredshapes/merk-cloud"
+
       - name: Build
         run: cargo build --workspace
 
+      # meshql-dynamo certifies against DynamoDB Local rather than real AWS.
+      # Unlike the testcontainers-backed adapters it does not start its own
+      # container, because every cert needs the same endpoint and a per-test
+      # container would be slower than the tests.
+      - name: Start DynamoDB Local
+        if: runner.os == 'Linux'
+        run: |
+          docker run -d --name dynamodb-local -p 8123:8000 amazon/dynamodb-local:latest
+          for _ in $(seq 1 30); do
+            if curl -s -o /dev/null "http://localhost:8123"; then exit 0; fi
+            sleep 1
+          done
+          echo "::error::DynamoDB Local did not become reachable on 8123"
+          exit 1
+
       # Linux runners have a Docker daemon, so the testcontainers-backed DB
-      # adapter certs (meshql-mongo / meshql-mysql / meshql-postgres) can run.
+      # adapter certs (meshql-mongo / meshql-mysql / meshql-postgres) can run,
+      # and so can meshql-dynamo's.
       - name: Run tests (full suite)
         if: runner.os == 'Linux'
+        env:
+          MESHQL_DYNAMO_ENDPOINT: http://localhost:8123
         run: cargo test --workspace
 
       # macOS and Windows runners have no Docker daemon, so the DB adapter certs
       # can't start their containers. Run everything else (which still covers the
-      # sqlite / merkql / ksql adapters and all pure-logic crates cross-platform).
+      # sqlite / merkql / ksql adapters, meshql-merk's non-live tests, and all
+      # pure-logic crates cross-platform).
       - name: Run tests (excluding Docker-backed DB adapter certs)
         if: runner.os != 'Linux'
-        run: cargo test --workspace --exclude meshql-mongo --exclude meshql-mysql --exclude meshql-postgres
+        run: cargo test --workspace --exclude meshql-mongo --exclude meshql-mysql --exclude meshql-postgres --exclude meshql-dynamo
 
   clippy:
     name: Clippy
@@ -72,6 +116,31 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+
+      # meshql-merk depends on merk-cloud, which is a **private** repository, so
+      # cargo cannot resolve it without a credential. `.cargo/config.toml` sets
+      # `net.git-fetch-with-cli = true` so the git CLI does the authenticating;
+      # this rewrites the SSH URL to an HTTPS one carrying a token, which is the
+      # form a runner can supply.
+      #
+      # Fails loudly rather than skipping, because the alternative is a build
+      # that resolves everything except the two new adapters and reports success.
+      # If merk-cloud is made public, this step and the ssh:// URL in Cargo.toml
+      # both go away.
+      - name: Authenticate to the private merk-cloud repository
+        shell: bash
+        env:
+          MERK_CLOUD_TOKEN: ${{ secrets.MERK_CLOUD_TOKEN }}
+        run: |
+          if [ -z "${MERK_CLOUD_TOKEN}" ]; then
+            echo "::error::MERK_CLOUD_TOKEN is not set. meshql-merk depends on the private"
+            echo "::error::tailoredshapes/merk-cloud repository; cargo cannot resolve it without"
+            echo "::error::a credential. Add a repository secret with read access to merk-cloud."
+            exit 1
+          fi
+          git config --global \
+            url."https://x-access-token:${MERK_CLOUD_TOKEN}@github.com/tailoredshapes/merk-cloud".insteadOf \
+            "ssh://git@github.com/tailoredshapes/merk-cloud"
 
       - name: Run clippy
         run: cargo clippy --workspace -- -D warnings

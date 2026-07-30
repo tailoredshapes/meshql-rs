@@ -1,6 +1,13 @@
 # Storage Adapters: Repository, Searcher, and Certification
 
-A datastore plugs into meshql by implementing two traits from `meshql-core/src/lib.rs`. Existing adapters: `meshql-mongo`, `meshql-postgres`, `meshql-mysql`, `meshql-sqlite` (smallest — best starting reference), `meshql-merkql`, `meshql-merksql`, `meshql-ksql`.
+A datastore plugs into meshql by implementing two traits from `meshql-core/src/lib.rs`. Existing adapters: `meshql-mongo`, `meshql-postgres`, `meshql-mysql`, `meshql-sqlite` (smallest — best starting reference), `meshql-merkql`, `meshql-merksql`, `meshql-ksql`, `meshql-dynamo`, `meshql-merk`.
+
+Two of them are deliberately not general-purpose, and both are worth knowing about before you pick one:
+
+- **`meshql-dynamo`** implements both traits and passes every suite, but `read`/`read_many` are single-`Query` point reads while **every non-`id` search predicate is a full table `Scan`** — arbitrary-attribute equality plus latest-version-per-id plus a temporal cutoff has no expression in a key-value store's key model, and the template language has no way to declare an index. Fine for point reads and small projections; not a substitute for an indexed store behind a wide search surface.
+- **`meshql-merk`** implements `Repository::create`/`create_many` and **nothing else** — every read path returns an error and there is no `Searcher` at all. It backs create-only event meshlettes on object storage, where a search would scan the log from offset zero and download it whole. It does not pass repository certification and is not meant to: it is a write-side adapter, paired with an indexed store on the read side.
+
+Certification is still the contract for the parts they implement. An adapter narrower than the traits should say so in its own docs and be unable to pretend otherwise — see `meshql-merk`'s `tests/structural_guards.rs`.
 
 ## The traits
 
@@ -58,6 +65,16 @@ The replacements, in order of what you were actually trying to do:
 2. Constructor convention: `<Store>Repository::new(uri, db, collection, auth: Arc<dyn Auth>)` and matching `<Store>Searcher::new(...)` — mirrors Mongo/Postgres so examples stay copy-paste portable.
 3. Implement both traits per the semantics above. `meshql-sqlite/src/` is the smallest complete reference (~250 LOC for both).
 4. **Certify.** Wire the shared behavior tests from `meshql-core/src/testing.rs` against your adapter. Existing adapters carry `tests/repo_cert.rs`, `tests/searcher_cert.rs`, and `tests/farm_cert.rs` (copy the pattern from `meshql-sqlite/tests/`): `cargo test -p meshql-<store> --test repo_cert --test searcher_cert`. The Cucumber suite in `meshql-cert` provides BDD-level coverage. An adapter is not done until certification passes — it covers create/read/list/remove, bulk ops, temporal reads, soft delete, and token visibility.
+
+## Three gaps certification does not close
+
+Found by deliberately breaking each guard while writing `meshql-dynamo` and watching what went red. **A green certification does not currently rule any of these out**, so an adapter author has to get them right without help.
+
+1. **Unrecognised template key: empty vs wide.** No cert case exists. `meshql-merkql` fails *empty* (the dot path resolves to `None`, the record is rejected); the SQL adapters *skip* the condition, so a single mistyped key — `{"kind": "x"}` instead of `{"payload.kind": "x"}` — returns **every** record. Both certify clean. Prefer empty: failing wide on a typo is an authorization-shaped bug, because a searcher's result set is what a graphlette hands a caller. Pin it with your own test (`meshql-dynamo/src/matcher.rs`, `meshql-dynamo/src/searcher.rs`).
+
+2. **The `at` cutoff is only ever exercised on millisecond boundaries.** Every seeded `created_at` in `testing.rs` comes from `DateTime::from_timestamp_millis` or is separated by whole seconds, so an adapter whose cutoff is off by one millisecond passes all of it. The case that would catch it: two versions of one id at `T` and `T + 400µs`, then `read(.., Some(T_ms))` asserting the *second* comes back, since the contract is `created_at_ms <= at_ms`. Worth writing against your own adapter until the shared suite has it.
+
+3. **Tombstone tokens are unspecified, and the adapters disagree.** `remove` appends a `deleted: true` version; nothing says whose `authorized_tokens` it carries. `meshql-merkql`, `meshql-mysql`, `meshql-mongo` and `meshql-ksql` preserve the resolved version's; `meshql-sqlite` and `meshql-postgres` stamp the *caller's* — they build `deleted_env` with the original tokens and then hand it to `create`, which overwrites them, so the code's visible intent is the opposite of its behaviour. No cert notices, because every read path resolves the latest version and then drops it as deleted regardless. It only becomes observable through a temporal read landing on the tombstone. **Do not read this as harmless** — it is unspecified behaviour in a security-relevant field, and the right fix is a cert case plus a decision, not six independent guesses.
 
 ## What does NOT belong in an adapter
 
