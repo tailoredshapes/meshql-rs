@@ -202,6 +202,14 @@ async fn open_source(config: &ConnectorConfig) -> Result<Box<dyn CommitSource>> 
             .await?,
         )),
 
+        // The token comes from the environment, never from the config file —
+        // `from_config` resolves it and fails here rather than at the first
+        // poll, which is minutes after the topic has been claimed.
+        #[cfg(feature = "hubspot")]
+        SourceConfig::Hubspot { .. } => Ok(Box::new(
+            merkql_connect::hubspot::HubspotSource::from_config(&config.source)?,
+        )),
+
         #[allow(unreachable_patterns)]
         other => anyhow::bail!(
             "this build of merkql-connect has no support for source {other:?}; \

@@ -107,6 +107,8 @@ pub mod mongo;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 
+#[cfg(feature = "hubspot")]
+pub mod hubspot;
 #[cfg(feature = "salesforce")]
 pub mod salesforce;
 #[cfg(feature = "sap")]
