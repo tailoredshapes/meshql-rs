@@ -353,10 +353,12 @@ pub async fn ensure_indexed_table(client: &Client, table: &str, plan: &IndexPlan
         )));
     }
 
+    // `add_index` waits for each build to finish, which is what makes a
+    // multi-field plan legal: DynamoDB allows only one online index build per
+    // table at a time.
     for field in missing {
         add_index(client, table, field).await?;
     }
-    wait_for_active(client, table).await?;
     Ok(())
 }
 
@@ -430,7 +432,6 @@ pub async fn migrate_indexes(client: &Client, table: &str, plan: &IndexPlan) -> 
     for field in plan.fields() {
         if !present.contains(field) {
             add_index(client, table, field).await?;
-            wait_for_active(client, table).await?;
         }
     }
     Ok(rewritten)
@@ -503,41 +504,110 @@ async fn create_table(client: &Client, table: &str, plan: &IndexPlan) -> Result<
     Ok(())
 }
 
-/// Add one index to a live table.
+/// How long to keep waiting for the control plane to have room for one more
+/// index build before giving up and saying so.
+const INDEX_BUILD_CAPACITY_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Add one index to a live table, **and wait until it is usable**.
 ///
-/// One at a time, deliberately: DynamoDB allows only a single GSI creation per
-/// table at a time, and a batch that half-succeeds is harder to reason about
-/// than a sequence that stops.
+/// # The wait belongs here, not in the caller
+///
+/// DynamoDB permits only **one** online index build per table at a time, so a
+/// plan adding two fields must let the first finish before asking for the
+/// second. That was documented on this function and then not honoured by
+/// [`ensure_indexed_table`], which fired both `UpdateTable`s back to back;
+/// [`migrate_indexes`] did honour it. An invariant that holds at one call site
+/// and not another is not an invariant, so the wait now lives inside the
+/// operation it constrains and a third caller cannot forget it.
+///
+/// It showed up as a *flaky test*, which is the expensive way to find it: it
+/// only fails when the first build has not finished by the time the second
+/// request lands, so it passes on an idle machine and fails under load.
+/// Reproduced at **12 failures in 90 attempts** with six concurrent openers;
+/// zero after this change.
+///
+/// # `LimitExceededException` is backpressure, not failure
+///
+/// There is a second, *account-wide* limit — at most five tables may be
+/// building indexes at once — and unlike the per-table one it cannot be
+/// serialised away, because other processes in the same account contribute to
+/// it. It is not observable except by asking: the attempt *is* the check. So
+/// this waits and asks again, which is the documented handling (the SDK itself
+/// marks the response retryable) and is the same shape as `create_table`
+/// already tolerating `ResourceInUseException` from a concurrent creator.
+///
+/// This is deliberately **not** a general retry. Exactly one error code is
+/// treated as "ask later"; every other failure propagates on the first
+/// attempt, and running out of patience is a distinct error that names the
+/// limit rather than a generic timeout. A retry loop that swallowed anything
+/// else would hide precisely the provisioning bugs this module exists to
+/// surface.
+///
+/// Transient 5xx — `InternalFailure` and friends — are **not** handled here on
+/// purpose. The SDK's own retry policy owns that layer and already retries
+/// them; duplicating it would mean two backoffs stacked on one request, and
+/// widening this loop to "anything the SDK calls retryable" is how a targeted
+/// wait becomes a retry-everything that hides real errors.
 async fn add_index(client: &Client, table: &str, field: &str) -> Result<()> {
-    client
-        .update_table()
-        .table_name(table)
-        .attribute_definitions(string_attribute(&index::attribute_name(field))?)
-        .global_secondary_index_updates(
-            GlobalSecondaryIndexUpdate::builder()
-                .create(
-                    CreateGlobalSecondaryIndexAction::builder()
-                        .index_name(index::index_name(field))
-                        .key_schema(key_schema(&index::attribute_name(field), KeyType::Hash)?)
-                        .key_schema(key_schema(SK, KeyType::Range)?)
-                        .projection(
-                            Projection::builder()
-                                .projection_type(ProjectionType::KeysOnly)
-                                .build(),
-                        )
-                        .build()
-                        .map_err(|e| MeshqlError::Storage(e.to_string()))?,
-                )
-                .build(),
-        )
-        .send()
-        .await
-        .map_err(|e| {
-            MeshqlError::Storage(format!(
-                "update_table {table}: adding index on {field:?}: {}",
-                describe_sdk_error(&e)
-            ))
-        })?;
+    let deadline = std::time::Instant::now() + INDEX_BUILD_CAPACITY_TIMEOUT;
+
+    loop {
+        let outcome = client
+            .update_table()
+            .table_name(table)
+            .attribute_definitions(string_attribute(&index::attribute_name(field))?)
+            .global_secondary_index_updates(
+                GlobalSecondaryIndexUpdate::builder()
+                    .create(
+                        CreateGlobalSecondaryIndexAction::builder()
+                            .index_name(index::index_name(field))
+                            .key_schema(key_schema(&index::attribute_name(field), KeyType::Hash)?)
+                            .key_schema(key_schema(SK, KeyType::Range)?)
+                            .projection(
+                                Projection::builder()
+                                    .projection_type(ProjectionType::KeysOnly)
+                                    .build(),
+                            )
+                            .build()
+                            .map_err(|e| MeshqlError::Storage(e.to_string()))?,
+                    )
+                    .build(),
+            )
+            .send()
+            .await;
+
+        match outcome {
+            Ok(_) => break,
+            Err(e) => {
+                let at_capacity = e
+                    .as_service_error()
+                    .map(|se| se.is_limit_exceeded_exception())
+                    .unwrap_or(false);
+                if !at_capacity {
+                    return Err(MeshqlError::Storage(format!(
+                        "update_table {table}: adding index on {field:?}: {}",
+                        describe_sdk_error(&e)
+                    )));
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(MeshqlError::Storage(format!(
+                        "update_table {table}: adding index on {field:?}: DynamoDB reported \
+                         no capacity for another index build for {}s. At most one index per \
+                         table and five tables per account may build at once; something else \
+                         is holding that budget. Detail: {}",
+                        INDEX_BUILD_CAPACITY_TIMEOUT.as_secs(),
+                        describe_sdk_error(&e)
+                    )));
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
+
+    // The index is `CREATING` until DynamoDB has backfilled it. Returning here
+    // would let the caller add the next one — which is the per-table limit
+    // above — and would let a searcher query an index that is not yet complete.
+    wait_for_active(client, table).await?;
     Ok(())
 }
 

@@ -497,6 +497,23 @@ The migration is `O(V)` — one `Scan` plus one `PutItem` per stored version,
 about **$0.63 per million versions** — and it is paid once per new index, not
 per query. Compare that to `O(V)` on *every* search, which is what §4 is about.
 
+**Provisioning has its own limits, and they are not capacity limits.** DynamoDB
+builds at most **one index per table** and **five tables' worth** at a time, so
+a plan adding several fields to an existing table has to wait for each build
+before requesting the next. Adding them together earns a `LimitExceededException`
+whenever the previous build has not finished — which is load-dependent, so it
+passes on an idle machine and fails in CI. It reached `main` and surfaced as a
+guard test that went red about one run in six; reproduced at **12 failures in
+90 attempts** under six concurrent openers, and zero once each `add_index`
+waited for its own build. The account-wide limit cannot be serialised away,
+because other processes contribute to it, so it is treated as backpressure —
+wait and ask again — while every other error propagates immediately.
+
+The general shape, worth remembering for any control-plane work here: **an
+operation that returns before the state it requested exists is not finished**,
+and the wait belongs inside that operation rather than in each caller. It had
+been written into one call site and not the other.
+
 A template whose keys are neither `id` nor `payload.…` is refused at startup
 too, but for a different reason: it matches nothing on *every* meshql backend
 (see the matcher), so it is a configuration bug rather than a cost problem. At

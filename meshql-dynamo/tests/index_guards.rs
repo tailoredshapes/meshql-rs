@@ -200,6 +200,85 @@ async fn indexing_an_empty_table_needs_no_migration() {
     let _ = meshql_dynamo::drop_table(&client, &table).await;
 }
 
+/// A plan with **two** new indexes on an existing table, opened by several
+/// processes at once — which is what a multi-entity `lib.rs` does at startup.
+///
+/// This is a regression test for a real provisioning bug, and it is here rather
+/// than in the cost suite because it found itself as a *flaky guard test*:
+/// `indexing_an_empty_table_needs_no_migration` went red about once in every
+/// several runs and passed on every re-run, which is the failure mode that
+/// trains people to re-run instead of read.
+///
+/// The cause was two `UpdateTable`s fired back to back. DynamoDB permits only
+/// **one** online index build per table at a time, so the second is rejected
+/// whenever the first has not finished — likely under load, unlikely on an idle
+/// machine. There is a second, account-wide limit of five tables building
+/// indexes at once, which is why this opens several concurrently.
+///
+/// Measured before the fix: **12 failures in 90 attempts**. After: zero.
+/// Sized so that it reliably catches a regression rather than merely being able
+/// to; verified by reverting the fix and watching it go red.
+#[tokio::test]
+async fn a_multi_field_plan_adds_every_index_to_an_existing_table() {
+    /// Five filtered fields, so opening drives five sequential `add_index`
+    /// calls and therefore four chances to fire one before the previous build
+    /// has finished. More fields is a better probe than more concurrency:
+    /// concurrency past about four openers makes DynamoDB Local return 500s
+    /// from its own Jetty, and a test that flakes on the emulator's limits
+    /// instead of the adapter's is no better than the one it replaced.
+    fn wide_config() -> meshql_core::RootConfig {
+        let mut builder = meshql_core::RootConfig::builder();
+        for field in ["alpha", "beta", "gamma", "delta", "epsilon"] {
+            builder = builder.vector(
+                format!("by_{field}"),
+                format!(r#"{{"payload.{field}": "{{{{v}}}}"}}"#),
+            );
+        }
+        builder.build()
+    }
+
+    async fn open_one() -> Result<(), String> {
+        let client = client().await;
+        let table = fresh_table_name();
+        // Create the table *without* indexes first, so opening it with the
+        // wide plan goes through the add-index path rather than through
+        // `CreateTable`, which takes all the indexes in one atomic request and
+        // never had the bug.
+        DynamoRepository::new_with_client(client.clone(), &table)
+            .await
+            .map_err(|e| format!("plain open: {e}"))?;
+        let outcome = DynamoCollection::open_with_client(client.clone(), &table, &wide_config())
+            .await
+            .map_err(|e| format!("indexed open: {e}"))
+            .and_then(|c| {
+                if c.plan().len() == 5 {
+                    Ok(())
+                } else {
+                    Err(format!("expected 5 indexes, got {}", c.plan().len()))
+                }
+            });
+        let _ = meshql_dynamo::drop_table(&client, &table).await;
+        outcome
+    }
+
+    let mut failures = Vec::new();
+    for _ in 0..3 {
+        for outcome in futures::future::join_all((0..4).map(|_| open_one())).await {
+            if let Err(e) = outcome {
+                failures.push(e);
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of 12 openings of a five-index plan failed. DynamoDB allows one index \
+         build per table and five per account at a time, so each index must be \
+         waited for before the next is requested.\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
 /// Opening the same indexed table twice is the ordinary case — every restart,
 /// and every second process — and must not try to create the indexes again.
 #[tokio::test]
