@@ -90,6 +90,32 @@ async fn open_source(config: &ConnectorConfig) -> Result<Box<dyn CommitSource>> 
             .await?,
         )),
 
+        #[cfg(feature = "sap")]
+        SourceConfig::Sap {
+            service_root,
+            entity_set,
+            odata_version,
+            entity,
+            key_properties,
+            changed_at_property,
+            authorized_tokens,
+            auth,
+            poll_interval_ms,
+        } => Ok(Box::new(
+            merkql_connect::sap::SapSource::open(
+                service_root,
+                entity_set,
+                entity,
+                *odata_version,
+                key_properties,
+                changed_at_property.as_deref(),
+                authorized_tokens,
+                auth,
+                std::time::Duration::from_millis(*poll_interval_ms),
+            )
+            .await?,
+        )),
+
         #[allow(unreachable_patterns)]
         other => anyhow::bail!(
             "this build of merkql-connect has no support for source {other:?}; \

@@ -31,12 +31,19 @@ notify = { version = "6", optional = true }
 meshql-mongo = { version = "0.1.0", path = "../meshql-mongo", optional = true }
 mongodb = { version = "3", optional = true }
 bson = { version = "2", features = ["chrono-0_4"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+url = { version = "2", optional = true }
+base64 = { version = "0.22", optional = true }
+percent-encoding = { version = "2", optional = true }
 
 [features]
 default = ["sqlite", "mongo", "postgres"]
 sqlite = ["dep:sqlx", "sqlx/sqlite", "dep:notify"]
 postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/chrono"]
 mongo = ["dep:mongodb", "dep:bson", "dep:meshql-mongo"]
+# Not in `default`: SAP is an ingress connector reaching out over the network to
+# a system the other three never touch, so a deployment opts into it.
+sap = ["dep:reqwest", "dep:url", "dep:base64", "dep:percent-encoding"]
 
 [dev-dependencies]
 tempfile = "3"
@@ -55,3 +62,5 @@ meshql-postgres = { version = "0.1.0", path = "../meshql-postgres" }
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["mongo", "postgres"] }
 uuid = { workspace = true }
+# The SAP tests never touch a network: wiremock stands in for the OData service.
+wiremock = "0.6"
