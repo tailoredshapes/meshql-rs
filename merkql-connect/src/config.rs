@@ -249,6 +249,9 @@ pub enum SourceConfig {
     /// - **Hard deletes are not captured.** A deleted HubSpot object stops
     ///   appearing in search results and leaves no tombstone, so a projection
     ///   built from this source retains records the CRM no longer has.
+    ///   *Merges are the exception and are handled* — a merged-away record is
+    ///   retired with a `deleted: true` version, because HubSpot does leave a
+    ///   trace of a merge on the surviving record.
     /// - **`index_lag_ms` is a correctness knob, not a tuning one.** HubSpot's
     ///   search index is eventually consistent and does not become searchable
     ///   in timestamp order; the watermark is held this far behind the newest
@@ -258,8 +261,26 @@ pub enum SourceConfig {
         /// `tickets`, or a custom object's type name.
         objects: Vec<String>,
         entity: String,
-        /// Properties to request. Empty means HubSpot's default set; the
-        /// last-modified property is always added.
+        /// Properties to request.
+        ///
+        /// **Empty means every property defined on the object type**, read from
+        /// `GET /crm/v3/properties/{objectType}` when the stream opens. It does
+        /// *not* mean HubSpot's default set: that set is a small subset — for
+        /// contacts roughly `firstname`, `lastname`, `email`, `createdate`,
+        /// `lastmodifieddate`, `hs_object_id` — and every other property,
+        /// including every custom one, is dropped from the payload without an
+        /// error, a warning or any downstream sign that it existed.
+        ///
+        /// Naming properties here narrows the payload, and is then a
+        /// **deliberate truncation**: a property added in HubSpot later, or one
+        /// misspelled here, is silently absent forever — HubSpot ignores an
+        /// unknown property name rather than rejecting it. The last-modified
+        /// property and the merge properties are appended regardless, because
+        /// without them the connector cannot advance and cannot see a merge.
+        ///
+        /// Discovery needs the private app's `crm.schemas.{object}.read` scope;
+        /// without it the connector fails at startup naming the scope rather
+        /// than falling back to the truncated default.
         #[serde(default)]
         properties: Vec<String>,
         /// Copied onto every synthesised envelope. HubSpot has no notion of a
