@@ -1033,7 +1033,7 @@ mod tests {
     #[test]
     fn non_insert_messages_are_ignored() {
         let relations = HashMap::new();
-        for tag in [b'B', b'U', b'D', b'T', b'O', b'Y'] {
+        for tag in *b"BUDTOY" {
             let mut message = vec![tag];
             message.extend_from_slice(&[0u8; 16]);
             assert!(
