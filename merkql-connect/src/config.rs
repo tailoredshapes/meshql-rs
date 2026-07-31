@@ -156,6 +156,16 @@ pub enum SourceConfig {
     /// An SAP S/4HANA entity set, replicated over OData delta. See the `sap`
     /// module for the argument; the things an operator must know are:
     ///
+    /// - **The service must be delta-enabled, and stock S/4HANA APIs are not.**
+    ///   v2 delta is something each application's data provider class has to
+    ///   implement; v4 delta is on-premise / private cloud only; no standard
+    ///   A2X OData API is documented as delta-enabled. Where there is no delta
+    ///   support the answer is CDS Change Data Capture over ODP (on-premise),
+    ///   the CDI API (public cloud), or business events — not this source.
+    /// - **`snapshot_mode = "when_needed"` is the intended pairing.** Nothing
+    ///   documents how long a v2 delta token lives; it survives until somebody
+    ///   schedules SAP's cleanup report. Losing the cursor and re-baselining is
+    ///   normal operation for this source, not an incident.
     /// - **`key_properties` is required and is not discovered.** It decides the
     ///   envelope id, and an id derived from a `$metadata` document SAP
     ///   rewrites on upgrade is an id that can silently change and fork every

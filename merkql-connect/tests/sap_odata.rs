@@ -7,6 +7,12 @@
 //! change-track, a tombstone that must land on the same envelope id as its
 //! upsert — are all failures you cannot reliably *cause* on a real S/4HANA
 //! system, so a test that needed one would be a test nobody ran.
+//!
+//! The v2 cases serve **Atom**, not JSON, and that is the point rather than an
+//! aesthetic choice: an OData v2 service can only express a deletion as an Atom
+//! `deleted-entry`, so a v2 suite written against JSON bodies would agree with a
+//! connector that never sees a delete. See
+//! [`a_v2_delta_tombstone_is_actually_observed`].
 
 #![cfg(feature = "sap")]
 
@@ -17,7 +23,7 @@ use merkql_connect::sap::SapSource;
 use merkql_connect::{ChangeRecord, ChangeStream, CommitSource, Resume, SnapshotMode};
 use serde_json::{json, Value};
 use std::time::Duration;
-use wiremock::matchers::{header, method, path, query_param, query_param_is_missing};
+use wiremock::matchers::{header, headers, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const ENTITY_SET: &str = "A_BusinessPartnerAddress";
@@ -590,30 +596,58 @@ async fn a_missing_credential_environment_variable_fails_at_open() {
     );
 }
 
-/// An OData v2 service speaks a different envelope entirely, and its dates are
-/// `/Date(ms)/`. Same records out the other side.
-#[tokio::test]
-async fn an_odata_v2_service_produces_the_same_envelopes() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path(format!("{SERVICE_PATH}/{ENTITY_SET}")))
-        .and(query_param("$format", "json"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "d": {
-                "results": [{
-                    "__metadata": { "id": format!("{ENTITY_SET}(BusinessPartner='1000',AddressID='7')") },
-                    "BusinessPartner": "1000",
-                    "AddressID": "7",
-                    "CityName": "Leeds",
-                    "LastChangeDateTime": "/Date(1785495600000)/",
-                }],
-                "__delta": format!("{}{SERVICE_PATH}/{ENTITY_SET}?!deltatoken=D1", server.uri()),
-            }
-        })))
-        .mount(&server)
-        .await;
+// ── OData v2, which is Atom, because a v2 deletion exists nowhere else ───────
 
-    let source = SapSource::open(
+/// One Atom entry, as SAP Gateway renders an entity.
+fn v2_entry(bp: &str, address_id: &str, city: &str) -> String {
+    format!(
+        r#"<entry>
+             <id>https://s4.example.com/svc/{ENTITY_SET}(BusinessPartner='{bp}',AddressID='{address_id}')</id>
+             <link rel="edit" href="{ENTITY_SET}(BusinessPartner='{bp}',AddressID='{address_id}')"/>
+             <link rel="http://schemas.microsoft.com/ado/2007/08/dataservices/related/ToRegion"
+                   href="{ENTITY_SET}(BusinessPartner='{bp}',AddressID='{address_id}')/ToRegion"/>
+             <content type="application/xml">
+               <m:properties>
+                 <d:BusinessPartner>{bp}</d:BusinessPartner>
+                 <d:AddressID>{address_id}</d:AddressID>
+                 <d:CityName>{city}</d:CityName>
+                 <d:LastChangeDateTime m:type="Edm.DateTime">2026-07-31T09:00:00</d:LastChangeDateTime>
+               </m:properties>
+             </content>
+           </entry>"#
+    )
+}
+
+/// An RFC 6721 tombstone — the only way an OData v2 service can say "gone".
+fn v2_deleted_entry(bp: &str, address_id: &str) -> String {
+    format!(
+        r#"<at:deleted-entry
+             ref="https://s4.example.com/svc/{ENTITY_SET}(BusinessPartner='{bp}',AddressID='{address_id}')"
+             when="2026-07-31T10:30:00Z"/>"#
+    )
+}
+
+fn v2_feed(entries: &str, delta_link: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata"
+      xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices"
+      xmlns:at="http://purl.org/atom/tombstones/1.0">
+  <id>https://s4.example.com/svc/{ENTITY_SET}</id>
+  <title type="text">{ENTITY_SET}</title>
+  {entries}
+  <link rel="delta" href="{delta_link}"/>
+</feed>"#
+    )
+}
+
+fn atom(body: String) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_raw(body, "application/atom+xml;type=feed;charset=utf-8")
+}
+
+async fn v2_source(server: &MockServer) -> SapSource {
+    SapSource::open(
         &format!("{}{SERVICE_PATH}", server.uri()),
         ENTITY_SET,
         "business_partner_address",
@@ -625,8 +659,108 @@ async fn an_odata_v2_service_produces_the_same_envelopes() {
         Duration::from_millis(50),
     )
     .await
-    .unwrap();
+    .expect("the v2 source opens")
+}
 
+/// **The defect this file exists to close.** An OData v2 service can only
+/// express a deletion as an Atom `deleted-entry`; an earlier build asked for
+/// JSON and looked for v4's `@sap.deleted_entity`, so on a real v2 service no
+/// deletion was ever observed and nothing said so.
+///
+/// This test fails on that build and passes on this one, which is the whole
+/// point: the tombstone must arrive, and it must arrive on the same envelope id
+/// as the upsert it deletes.
+#[tokio::test]
+async fn a_v2_delta_tombstone_is_actually_observed() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("{SERVICE_PATH}/{ENTITY_SET}")))
+        .and(query_param_is_missing("!deltatoken"))
+        .respond_with(atom(v2_feed(
+            &v2_entry("1000", "7", "Leeds"),
+            &format!("{}{SERVICE_PATH}/{ENTITY_SET}?!deltatoken=D1", server.uri()),
+        )))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("{SERVICE_PATH}/{ENTITY_SET}")))
+        .and(query_param("!deltatoken", "D1"))
+        .respond_with(atom(v2_feed(
+            &v2_deleted_entry("1000", "7"),
+            &format!("{}{SERVICE_PATH}/{ENTITY_SET}?!deltatoken=D2", server.uri()),
+        )))
+        .mount(&server)
+        .await;
+
+    let source = v2_source(&server).await;
+    let mut stream = source
+        .changes(Resume::Cold, SnapshotMode::Initial)
+        .await
+        .unwrap();
+    let records = take(&mut stream, 2).await;
+
+    let upsert = records[0].after.as_ref().unwrap();
+    let tombstone = records[1].after.as_ref().unwrap();
+    assert!(!upsert.deleted);
+    assert!(
+        tombstone.deleted,
+        "a v2 deleted-entry must reach the topic as a deletion"
+    );
+    assert_eq!(
+        tombstone.id, upsert.id,
+        "a tombstone that lands on a different id deletes nothing"
+    );
+    assert_eq!(
+        tombstone.id,
+        "A_BusinessPartnerAddress(AddressID='7',BusinessPartner='1000')"
+    );
+    assert_eq!(records[1].op, Op::Create);
+    assert_eq!(meta(&records[1])["op"], json!("delete"));
+
+    // A tombstone has no properties for `changed_at_property` to name, so the
+    // `when` attribute is the only honest time available — and the payload says
+    // where it came from rather than passing our poll clock off as SAP's.
+    assert_eq!(meta(&records[1])["changed_at_source"], json!("tombstone"));
+    assert_eq!(
+        tombstone.created_at.to_rfc3339(),
+        "2026-07-31T10:30:00+00:00"
+    );
+}
+
+/// An OData v2 service speaks Atom, not the v4 JSON envelope — and the request
+/// must ask for it. `$format=json` is one of the options SAP documents as
+/// mutually exclusive with a v2 delta query, and this is the read that issues
+/// the delta token.
+#[tokio::test]
+async fn an_odata_v2_service_is_read_as_atom_and_produces_the_same_envelopes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("{SERVICE_PATH}/{ENTITY_SET}")))
+        .and(query_param_is_missing("$format"))
+        .and(query_param_is_missing("$top"))
+        // `headers` rather than `header` because wiremock splits a comma-joined
+        // header into its values.
+        .and(headers(
+            "accept",
+            vec!["application/atom+xml", "application/xml;q=0.9"],
+        ))
+        .respond_with(atom(v2_feed(
+            &v2_entry("1000", "7", "Leeds"),
+            &format!("{}{SERVICE_PATH}/{ENTITY_SET}?!deltatoken=D1", server.uri()),
+        )))
+        .mount(&server)
+        .await;
+
+    // Anything that asked for JSON, or pinned `$format`, falls through to here
+    // and fails the test rather than quietly getting a JSON body.
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("not a v2 delta-compatible read"))
+        .mount(&server)
+        .await;
+
+    let source = v2_source(&server).await;
     let mut stream = source
         .changes(Resume::Cold, SnapshotMode::Initial)
         .await
@@ -640,10 +774,69 @@ async fn an_odata_v2_service_produces_the_same_envelopes() {
     );
     assert_eq!(meta(&record)["odata_version"], json!("v2"));
     assert_eq!(meta(&record)["changed_at_source"], json!("entity"));
-    // `/Date(...)/` was normalised on the way in, so the entity's own time is
-    // usable rather than silently falling back to our clock.
     assert_eq!(
-        record.after.as_ref().unwrap().created_at.timestamp_millis(),
-        1785495600000
+        record.after.as_ref().unwrap().payload["CityName"],
+        json!("Leeds")
     );
+    // `Edm.DateTime` has no offset and SAP means UTC. Normalising on the way in
+    // is what stops the entity's own time being silently replaced by our clock.
+    assert_eq!(
+        record.after.as_ref().unwrap().created_at.to_rfc3339(),
+        "2026-07-31T09:00:00+00:00"
+    );
+}
+
+/// A v2 service that answers JSON anyway has no way to have told us about a
+/// deletion. Reading it would look perfectly healthy while every delete was
+/// dropped, so the cycle stops and names the limitation instead.
+#[tokio::test]
+async fn a_v2_service_answering_json_is_refused_rather_than_read_without_deletions() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(format!("{SERVICE_PATH}/{ENTITY_SET}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "d": {
+                "results": [{ "BusinessPartner": "1000", "AddressID": "7" }],
+                "__delta": format!("{}{SERVICE_PATH}/{ENTITY_SET}?!deltatoken=D1", server.uri()),
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let source = v2_source(&server).await;
+    let mut stream = source
+        .changes(Resume::Cold, SnapshotMode::Initial)
+        .await
+        .unwrap();
+    match stream.next().await {
+        Some(Err(e @ merkql_connect::CdcError::Backend(_))) => {
+            assert!(e.to_string().contains("deletion"), "got: {e}")
+        }
+        other => panic!("expected a refusal naming the v2 JSON limitation, got {other:?}"),
+    }
+}
+
+/// The same refusal from the other direction: a stored v2 delta link that pins
+/// JSON is a cursor written by a build that could not see deletions, so
+/// following it would silently continue the gap. It is an unusable position, and
+/// `when_needed` re-baselines onto a correct one.
+#[tokio::test]
+async fn a_stored_v2_delta_link_pinning_json_is_an_unusable_position() {
+    let server = MockServer::start().await;
+    let stored = format!(
+        "{}{SERVICE_PATH}/{ENTITY_SET}?$format=json&!deltatoken=D1",
+        server.uri()
+    );
+
+    let source = v2_source(&server).await;
+    match source
+        .changes(Resume::At(stored), SnapshotMode::WhenNeeded)
+        .await
+    {
+        Err(merkql_connect::CdcError::UnusablePosition { reason, .. }) => {
+            assert!(reason.contains("$format=json"), "got: {reason}")
+        }
+        Err(other) => panic!("expected UnusablePosition, got {other:?}"),
+        Ok(_) => panic!("a delta link pinning JSON must not be followed"),
+    }
 }

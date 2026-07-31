@@ -35,6 +35,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 url = { version = "2", optional = true }
 base64 = { version = "0.22", optional = true }
 percent-encoding = { version = "2", optional = true }
+# OData **v2** delta responses represent deletions only as the Atom
+# `deleted-entry` element — SAP does not support them in JSON. A v2 source read
+# as JSON therefore never observes a deletion, ever, and says nothing about it.
+# That is the exact silent gap this crate exists to refuse, so the v2 path parses
+# Atom and this dependency is the price. See `sap.rs`.
+quick-xml = { version = "0.39", optional = true }
 
 # Queue backends. merkql is always available; every other queue is a
 # `meshql_core::Repository` reached through `RepositorySink`.
@@ -48,7 +54,7 @@ mongo = ["dep:mongodb", "dep:bson", "dep:meshql-mongo"]
 ksql = ["dep:meshql-ksql"]
 # Not in `default`: SAP is an ingress connector reaching out over the network to
 # a system the other three never touch, so a deployment opts into it.
-sap = ["dep:reqwest", "dep:url", "dep:base64", "dep:percent-encoding"]
+sap = ["dep:reqwest", "dep:url", "dep:base64", "dep:percent-encoding", "dep:quick-xml"]
 # Salesforce is an *ingress* connector to a SaaS, not a store this workspace
 # provisions, so it stays out of `default`: a build that never talks to
 # Salesforce should not carry an HTTP client it cannot use.

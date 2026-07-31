@@ -1,6 +1,95 @@
 //! SAP S/4HANA CDC over OData delta: the delta token *is* the cursor, and the
 //! entity key predicate *is* the envelope id.
 //!
+//! # Scope: this connector needs a *delta-enabled* service, which stock S/4HANA
+//! APIs are not
+//!
+//! Read this before pointing the connector at an API. The delta protocol is not
+//! a generic OData feature that any entity set has:
+//!
+//! - **OData v2 delta is a framework capability each application's data
+//!   provider class must implement.** SAP Gateway supplies the plumbing (the
+//!   delta token, the `/IWBEP/D_QRL_*` tables); whether a given entity set
+//!   answers a tracked read at all is up to the DPC someone wrote.
+//! - **OData v4 delta in the ABAP OData v4 framework is on-premise / private
+//!   cloud only.** It is excluded from S/4HANA Cloud public edition.
+//! - **No stock S/4HANA A2X OData API is documented as delta-enabled.**
+//!
+//! So this source is for a service someone deliberately built delta support
+//! into. Point it at a standard `API_BUSINESS_PARTNER`-style A2X API and the
+//! best case is the immediate hard failure [`CdcError::NoFeed`] (no delta link
+//! came back), which is why that guard exists and why it is fatal rather than a
+//! warning.
+//!
+//! ## What to use instead when the service has no delta support
+//!
+//! - **On-premise / private cloud:** define a CDS view with Change Data Capture
+//!   and consume it through ODP (the Operational Delta Queue). That is SAP's
+//!   own supported change feed and it does capture deletions.
+//! - **S/4HANA Cloud public edition:** the CDI (Cloud Data Integration) API over
+//!   CDS views, for the same reason.
+//! - **Business events** via SAP Event Mesh / the Event Bus. These are real
+//!   push, but they are **key-only**: an event names the object that changed and
+//!   nothing else, so every event needs a follow-up API read to get a payload,
+//!   and that read sees the *current* state rather than the state at the event.
+//!   A connector built on them is a different source, not this one.
+//!
+//! ## How long a cursor lives
+//!
+//! Nothing in SAP documents an expiry for an OData v2 delta token. Its lifetime
+//! is instead governed by whenever somebody schedules the cleanup report
+//! `/IWBEP/R_CLEAN_UP_QRL` over `/IWBEP/D_QRL_HDR` and `/IWBEP/D_QRL_ITM` — an
+//! operational decision at the SAP end that this connector cannot see, predict
+//! or influence. The only concretely documented retention numbers anywhere in
+//! the stack are the Operational Delta Queue's, and they are for a different
+//! mechanism: recovery of already-retrieved data **24 hours**, low relevance
+//! **1 week**, medium relevance **31 days**.
+//!
+//! Treat "the cursor is gone, re-baseline" as a **normal operating mode**, not
+//! an exception. That is what `snapshot_mode = "when_needed"` is for, and it is
+//! the mode a SAP source should be deployed with unless the operator has a
+//! specific reason otherwise. What must never happen is the re-baseline
+//! happening *silently*, which is why an expired token surfaces as
+//! [`CdcError::UnusablePosition`] and lets [`SnapshotMode`] decide.
+//!
+//! # OData v2 deletions exist only in Atom, so the v2 path parses Atom
+//!
+//! This is the sharpest protocol difference between the two dialects, and
+//! getting it wrong is invisible.
+//!
+//! A v4 delta response spells a deletion in JSON, as `{"@removed": …,
+//! "@id": …}`. **A v2 delta response cannot.** SAP Gateway's delta query support
+//! carries deletions as the Atom `deleted-entry` element of RFC 6721 (the
+//! backend hands the framework a `<DELETED_ENTITIES>` list of entity ids), and
+//! SAP states plainly that this is Atom/XML only and **not supported in JSON**.
+//!
+//! An earlier cut of this module requested `application/json` on both dialects
+//! and looked for `@sap.deleted_entity` / `deleted_entity` in the v2 payload.
+//! Those keys are v4's spelling wearing a v2 costume: on a real v2 service they
+//! never appear, so **no deletion would ever be observed, and nothing would
+//! report a problem.** Rows would keep flowing, the connector would look
+//! perfectly healthy, and every deleted business partner would live forever in
+//! the mesh. That is precisely the silent gap this crate exists to prevent, so
+//! it is fixed rather than documented:
+//!
+//! - **v2 reads ask for `application/atom+xml` and are parsed as an Atom feed**,
+//!   including `<at:deleted-entry ref="…">` tombstones. See [`parse_v2_atom`].
+//! - **No `$format=json` is sent.** SAP's own documentation lists JSON format
+//!   alongside `$skiptoken`, `$top`, `$skip` and `$expand` as *mutually
+//!   exclusive with a v2 delta query*, so asking for it is asking the service to
+//!   either refuse the delta or answer without one.
+//! - A v2 response body that turns out to be JSON is a **hard error naming this
+//!   limitation** rather than a best-effort parse, because a best-effort parse
+//!   is exactly how the gap reopens.
+//! - The refuse-to-start alternative — hard-failing `open()` for any v2 source —
+//!   was rejected: it costs a dependency to actually capture deletes, and
+//!   "capture them" beats "decline to run" whenever the capture is achievable.
+//!
+//! Paging on the *initial* snapshot read is a different request and stays: the
+//! server drives it with `rel="next"`, and following it is how a snapshot
+//! finishes. It is only the delta read that must carry none of those options,
+//! and none of them are sent on one.
+//!
 //! # Where this logic came from, and why it is duplicated rather than shared
 //!
 //! The OData v2/v4 delta walk and all of the SAP auth modes below are
@@ -19,10 +108,10 @@
 //!   snapshot-then-stream, and above all **[`CdcError::UnusablePosition`] or
 //!   nothing**. Roughly half of what follows exists only to express that, and
 //!   would have to live here even if the transport were shared.
-//! - Two divergences below are *corrections*, not ports (see `$top` and key
-//!   canonicalisation), and shipping them as a shared-crate change would mean
-//!   changing `sap-cdc-mcp`'s behaviour as a side effect of writing a merkql
-//!   connector.
+//! - Three divergences below are *corrections*, not ports (see `$top`, key
+//!   canonicalisation, and the Atom v2 delta path above), and shipping them as a
+//!   shared-crate change would mean changing `sap-cdc-mcp`'s behaviour as a side
+//!   effect of writing a merkql connector.
 //!
 //! When a third consumer of SAP OData appears, extract then. Until then this
 //! note is the pointer: **a fix to the delta walk or to auth probably belongs
@@ -97,9 +186,12 @@ use crate::config::{SapAuthConfig, SapODataVersion};
 use crate::record::{ChangeRecord, Op, Snapshot, SourceInfo};
 use crate::source::{CdcError, ChangeStream, CommitSource, Resume, SnapshotMode};
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use futures::stream;
 use meshql_core::{Envelope, Stash};
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::name::QName;
+use quick_xml::Reader;
 use reqwest::{Client, ClientBuilder, RequestBuilder, StatusCode};
 use serde_json::{json, Value as Json};
 use std::collections::{BTreeMap, VecDeque};
@@ -729,6 +821,11 @@ struct RowEvent {
     row: serde_json::Map<String, Json>,
     /// The service's own id URL for the entity, when the payload carries one.
     id_url: Option<String>,
+    /// When the service says the deletion happened. Only Atom carries this —
+    /// `<at:deleted-entry when="…">` — and a tombstone has no properties for
+    /// `changed_at_property` to name, so this is the only chance to report a
+    /// deletion's real time instead of our poll time.
+    deleted_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Default)]
@@ -738,84 +835,343 @@ struct Page {
     delta_link: Option<String>,
 }
 
-/// OData v2: `{"d": {"results": [...], "__next": "...", "__delta": "..."}}`.
-fn parse_v2(body: &Json) -> Result<Page, CdcError> {
-    let d = body.get("d").ok_or_else(|| {
-        CdcError::Backend(anyhow::anyhow!(
-            "an OData v2 response has no 'd' wrapper; is the service really v2, and did the \
-             request reach SAP rather than a proxy error page?"
-        ))
-    })?;
-
-    let mut page = Page {
-        next_link: d.get("__next").and_then(Json::as_str).map(str::to_string),
-        delta_link: d.get("__delta").and_then(Json::as_str).map(str::to_string),
-        ..Page::default()
-    };
-
-    let results = d
-        .get("results")
-        .and_then(Json::as_array)
-        .cloned()
-        .unwrap_or_default();
-
-    for entry in results {
-        let object = entry.as_object().ok_or_else(|| {
-            CdcError::Backend(anyhow::anyhow!("an OData v2 result entry is not an object"))
-        })?;
-        let mut row = serde_json::Map::new();
-        let mut deleted = false;
-        let mut id_url = None;
-
-        for (key, value) in object {
-            if key == "__metadata" {
-                if let Some(meta) = value.as_object() {
-                    id_url = meta.get("id").and_then(Json::as_str).map(str::to_string);
-                    deleted |= meta
-                        .get("deleted_entity")
-                        .and_then(Json::as_bool)
-                        .unwrap_or(false);
-                }
-                continue;
-            }
-            if key == "@sap.deleted_entity" {
-                deleted |= value.as_bool().unwrap_or(false);
-                continue;
-            }
-            // `__deferred` navigation stubs are links, not data.
-            if key.starts_with('@') || value.get("__deferred").is_some() {
-                continue;
-            }
-            row.insert(key.clone(), normalize_v2_value(value));
-        }
-
-        page.rows.push(RowEvent {
-            deleted,
-            row,
-            id_url,
-        });
+/// OData **v2**: an Atom feed, because that is the only representation in which
+/// a v2 deletion exists at all.
+///
+/// See the module docs for the argument. The shape:
+///
+/// ```xml
+/// <feed xmlns="http://www.w3.org/2005/Atom"
+///       xmlns:m="…/metadata" xmlns:d="…/dataservices"
+///       xmlns:at="http://purl.org/atom/tombstones/1.0">
+///   <link rel="delta" href="…?!deltatoken=D1"/>
+///   <entry>
+///     <id>https://host/svc/A_X(Key='1')</id>
+///     <content type="application/xml">
+///       <m:properties><d:Key>1</d:Key><d:City>Leeds</d:City></m:properties>
+///     </content>
+///   </entry>
+///   <at:deleted-entry ref="https://host/svc/A_X(Key='2')" when="2026-07-31T10:00:00Z"/>
+/// </feed>
+/// ```
+///
+/// Three things here are load-bearing rather than incidental:
+///
+/// - **`<link>` is only read outside an `<entry>`.** An entry's own links are
+///   `edit` and navigation-property links; mistaking one for `rel="next"` would
+///   walk the cycle off into a related entity set.
+/// - **A `deleted-entry` with no `ref` is a hard error.** It is the one element
+///   in the whole feed whose only content is the identity of something that has
+///   gone; dropping it because it was malformed would lose a deletion silently,
+///   which is the exact failure this parse path exists to prevent.
+/// - **A JSON body is refused**, not best-effort parsed. A v2 service answering
+///   JSON has no way to have told us about deletions.
+fn parse_v2_atom(body: &str) -> Result<Page, CdcError> {
+    if body.trim_start().starts_with('{') {
+        return Err(CdcError::Backend(anyhow::anyhow!(
+            "the OData v2 service answered with JSON. OData v2 delta responses carry deletions \
+             only as the Atom `deleted-entry` element and SAP does not support them in JSON, so \
+             reading this body would mean never observing a deletion and never saying so. Check \
+             that the service honours `Accept: application/atom+xml`, and that no `$format=json` \
+             is pinned in source.service_root or in the stored delta link."
+        )));
     }
 
-    Ok(page)
+    let mut reader = Reader::from_str(body);
+    reader.config_mut().trim_text(true);
+
+    let mut feed = AtomFeed::default();
+    loop {
+        let event = reader.read_event().map_err(|e| {
+            CdcError::Backend(anyhow::anyhow!(
+                "the OData v2 service's response is not well-formed XML: {e}"
+            ))
+        })?;
+        match event {
+            Event::Start(e) => feed.start(&e)?,
+            // A self-closing element — `<at:deleted-entry …/>`, `<link …/>`, an
+            // empty property — is a start immediately followed by an end.
+            Event::Empty(e) => {
+                let local = atom_local(e.name());
+                feed.start(&e)?;
+                feed.end(&local);
+            }
+            Event::End(e) => {
+                let local = atom_local(e.name());
+                feed.end(&local);
+            }
+            Event::Text(t) => {
+                let raw = t.xml_content().map_err(|e| {
+                    CdcError::Backend(anyhow::anyhow!(
+                        "the OData v2 service's response contains unreadable XML text: {e}"
+                    ))
+                })?;
+                // Unescaping is not optional. A business partner called
+                // `O&apos;Neill &amp; Sons` is a key value, and a key value read
+                // with its entities intact is a different envelope id from the
+                // same record read any other way.
+                let chunk = quick_xml::escape::unescape(&raw).map_err(|e| {
+                    CdcError::Backend(anyhow::anyhow!(
+                        "the OData v2 service's response contains an XML entity that cannot be \
+                         resolved, so a property value would be wrong rather than missing: {e}"
+                    ))
+                })?;
+                feed.text.push_str(&chunk);
+            }
+            Event::CData(c) => feed.text.push_str(&String::from_utf8_lossy(&c)),
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+
+    if !feed.saw_feed {
+        return Err(CdcError::Backend(anyhow::anyhow!(
+            "the OData v2 service's response is XML but not an Atom <feed>. A gateway error page \
+             or an HTML login redirect looks like this; so does a single-entity read, which is \
+             not what this connector requests."
+        )));
+    }
+
+    Ok(feed.page)
 }
 
-/// v2 renders dates as `/Date(1700000000000)/`. Normalising here rather than
-/// downstream is what makes an entity's `changed_at` parse identically under v2
-/// and v4.
-fn normalize_v2_value(value: &Json) -> Json {
-    let Some(s) = value.as_str() else {
-        return value.clone();
-    };
-    let epoch_ms = s
-        .strip_prefix("/Date(")
-        .and_then(|rest| rest.strip_suffix(")/"))
-        // v2 sometimes appends a timezone offset: `/Date(1700000000000+0060)/`.
-        .map(|num| num.split(['+', '-']).next().unwrap_or(num))
-        .and_then(|num| num.trim().parse::<i64>().ok());
-    match epoch_ms.and_then(DateTime::<Utc>::from_timestamp_millis) {
-        Some(ts) => Json::String(ts.to_rfc3339()),
-        None => value.clone(),
+/// The Atom reader's state. A struct rather than a pile of locals because a
+/// self-closing element has to run the start and end handling in one step, and
+/// closures over a dozen `&mut`s do not.
+#[derive(Default)]
+struct AtomFeed {
+    page: Page,
+    saw_feed: bool,
+    /// Depth of the element currently open; the document root is 1.
+    depth: usize,
+    /// Depth of the enclosing `<entry>`, when inside one.
+    entry_depth: Option<usize>,
+    /// Depth of the enclosing `<m:properties>`, when inside one.
+    props_depth: Option<usize>,
+    /// The entry being built.
+    row: serde_json::Map<String, Json>,
+    id_url: Option<String>,
+    /// Open complex properties, innermost last. Empty means the next value
+    /// belongs directly to `row`.
+    objects: Vec<serde_json::Map<String, Json>>,
+    names: Vec<String>,
+    /// `(m:type, m:null)` per open property, parallel to `names`.
+    types: Vec<(Option<String>, bool)>,
+    capture_id: bool,
+    text: String,
+}
+
+impl AtomFeed {
+    fn start(&mut self, e: &BytesStart<'_>) -> Result<(), CdcError> {
+        self.depth += 1;
+        self.text.clear();
+        let local = atom_local(e.name());
+
+        // Inside `<m:properties>` every element is a property, and a property
+        // is either a leaf (text) or a complex type (child elements). Which one
+        // is not known until it closes, so push a place for both.
+        if self.props_depth.is_some() {
+            self.names.push(local);
+            self.objects.push(serde_json::Map::new());
+            self.types.push((
+                atom_attr(e, "type")?,
+                atom_attr(e, "null")?.as_deref() == Some("true"),
+            ));
+            return Ok(());
+        }
+
+        match local.as_str() {
+            "feed" if self.depth == 1 => self.saw_feed = true,
+            "entry" if self.entry_depth.is_none() => {
+                self.entry_depth = Some(self.depth);
+                self.row = serde_json::Map::new();
+                self.id_url = None;
+            }
+            "properties" => self.props_depth = Some(self.depth),
+            // The feed's own `<id>`, or an author's, is not an entity id.
+            "id" if self.entry_depth == Some(self.depth - 1) => self.capture_id = true,
+            // RFC 6721 tombstones. `ref` is the deleted entity's id URL, which
+            // is the *only* thing the feed says about it, and `when` is the one
+            // place a deletion's real time is ever available.
+            "deleted-entry" => {
+                let reference = atom_attr(e, "ref")?.ok_or_else(|| {
+                    CdcError::Backend(anyhow::anyhow!(
+                        "an OData v2 Atom `deleted-entry` carries no `ref` attribute, so the \
+                         entity it deletes cannot be named. Skipping it would drop a deletion \
+                         silently — the failure this whole Atom path exists to prevent — so the \
+                         cycle stops here instead."
+                    ))
+                })?;
+                let when = atom_attr(e, "when")?
+                    .as_deref()
+                    .and_then(parse_edm_datetime);
+                self.page.rows.push(RowEvent {
+                    deleted: true,
+                    row: serde_json::Map::new(),
+                    id_url: Some(reference),
+                    deleted_at: when,
+                });
+            }
+            // Only feed-level links are the cycle's. SAP spells the v2 delta
+            // link `rel="delta"`; a gateway that uses a fully-qualified
+            // relation URI ends it the same way.
+            "link" if self.entry_depth.is_none() => {
+                let rel = atom_attr(e, "rel")?.unwrap_or_default();
+                if let Some(href) = atom_attr(e, "href")? {
+                    if rel == "next" || rel.ends_with("/next") {
+                        self.page.next_link = Some(href);
+                    } else if rel == "delta" || rel.ends_with("/delta") {
+                        self.page.delta_link = Some(href);
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
+
+    fn end(&mut self, local: &str) {
+        if let Some(props_depth) = self.props_depth {
+            if self.depth > props_depth {
+                let object = self.objects.pop().unwrap_or_default();
+                let name = self.names.pop().unwrap_or_default();
+                let (edm_type, is_null) = self.types.pop().unwrap_or((None, false));
+                // Child elements arrived, so this was a complex type and the
+                // text buffer holds nothing but the last leaf's leftovers.
+                let value = if object.is_empty() {
+                    atom_value(&self.text, edm_type.as_deref(), is_null)
+                } else {
+                    Json::Object(object)
+                };
+                match self.objects.last_mut() {
+                    Some(parent) => parent.insert(name, value),
+                    None => self.row.insert(name, value),
+                };
+                self.text.clear();
+                self.depth -= 1;
+                return;
+            }
+            if self.depth == props_depth {
+                self.props_depth = None;
+            }
+        }
+
+        if self.capture_id && local == "id" {
+            self.id_url = Some(self.text.trim().to_string());
+            self.capture_id = false;
+        }
+
+        if local == "entry" && self.entry_depth == Some(self.depth) {
+            self.entry_depth = None;
+            self.page.rows.push(RowEvent {
+                deleted: false,
+                row: std::mem::take(&mut self.row),
+                id_url: self.id_url.take(),
+                deleted_at: None,
+            });
+        }
+
+        self.text.clear();
+        self.depth -= 1;
+    }
+}
+
+fn atom_local(name: QName<'_>) -> String {
+    String::from_utf8_lossy(name.local_name().as_ref()).into_owned()
+}
+
+/// An attribute by *local* name. Namespace prefixes are a service's choice —
+/// `m:type` and `metadata:type` are the same attribute — so matching on the
+/// prefix would make the parser depend on how a particular gateway declares its
+/// namespaces.
+fn atom_attr(e: &BytesStart<'_>, want: &str) -> Result<Option<String>, CdcError> {
+    for attribute in e.attributes() {
+        let attribute = attribute.map_err(|err| {
+            CdcError::Backend(anyhow::anyhow!(
+                "an attribute in the OData v2 Atom response is malformed: {err}"
+            ))
+        })?;
+        if attribute.key.local_name().as_ref() == want.as_bytes() {
+            let value = attribute.unescape_value().map_err(|err| {
+                CdcError::Backend(anyhow::anyhow!(
+                    "an attribute in the OData v2 Atom response is not valid XML text: {err}"
+                ))
+            })?;
+            return Ok(Some(value.into_owned()));
+        }
+    }
+    Ok(None)
+}
+
+/// One Atom leaf property, typed by its `m:type`.
+///
+/// **`Edm.Int64` and `Edm.Decimal` stay text on purpose.** OData v2's own JSON
+/// renders them as strings for the same reason: a JSON number cannot hold them
+/// without losing digits, and a key value that loses digits is an envelope id
+/// that merges records. Everything unrecognised also stays text, which is the
+/// safe direction — [`key_text`] canonicalises to text anyway, so a
+/// conservative mapping never changes an id.
+fn atom_value(text: &str, edm_type: Option<&str>, is_null: bool) -> Json {
+    if is_null {
+        return Json::Null;
+    }
+    let trimmed = text.trim();
+    match edm_type.unwrap_or("Edm.String") {
+        "Edm.Boolean" => match trimmed {
+            "true" => Json::Bool(true),
+            "false" => Json::Bool(false),
+            other => Json::String(other.to_string()),
+        },
+        "Edm.Byte" | "Edm.SByte" | "Edm.Int16" | "Edm.Int32" => trimmed
+            .parse::<i64>()
+            .map(Json::from)
+            .unwrap_or_else(|_| Json::String(text.to_string())),
+        "Edm.Single" | "Edm.Double" => trimmed
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+            .map(Json::Number)
+            .unwrap_or_else(|| Json::String(text.to_string())),
+        "Edm.DateTime" | "Edm.DateTimeOffset" => match parse_edm_datetime(trimmed) {
+            Some(ts) => Json::String(ts.to_rfc3339()),
+            None => Json::String(text.to_string()),
+        },
+        _ => Json::String(text.to_string()),
+    }
+}
+
+/// Every shape SAP renders an instant in, normalised to one.
+///
+/// v2 JSON says `/Date(1700000000000)/`, v2 Atom says the offset-less
+/// `2026-07-31T09:00:00` — `Edm.DateTime` has no time zone and SAP means UTC —
+/// and v4 says RFC 3339. Normalising all three in one place is what makes
+/// `changed_at` mean the same thing whichever dialect a service speaks, instead
+/// of one dialect silently falling back to our poll clock.
+fn parse_edm_datetime(text: &str) -> Option<DateTime<Utc>> {
+    let text = text.trim();
+
+    if let Some(rest) = text
+        .strip_prefix("/Date(")
+        .and_then(|r| r.strip_suffix(")/"))
+    {
+        // v2 sometimes appends a timezone offset: `/Date(1700000000000+0060)/`.
+        let millis = rest.split(['+', '-']).next().unwrap_or(rest).trim();
+        return millis
+            .parse::<i64>()
+            .ok()
+            .and_then(DateTime::<Utc>::from_timestamp_millis);
+    }
+
+    if let Ok(ts) = DateTime::parse_from_rfc3339(text) {
+        return Some(ts.with_timezone(&Utc));
+    }
+
+    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%dT%H:%M"] {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(text, format) {
+            return Some(naive.and_utc());
+        }
+    }
+    None
 }
 
 /// OData v4: `{"value": [...], "@odata.nextLink": "...", "@odata.deltaLink": "..."}`.
@@ -872,6 +1228,8 @@ fn parse_v4(body: &Json) -> Result<Page, CdcError> {
             deleted,
             row,
             id_url,
+            // v4 tombstones name no time. `@removed` carries only a `reason`.
+            deleted_at: None,
         });
     }
 
@@ -972,8 +1330,15 @@ impl Inner {
     /// for a CDC connector: OData's `$top` bounds the *whole* result, not a
     /// page, so a `$top` on the initial read silently truncates history at that
     /// row and the connector then streams forward from a snapshot that never
-    /// finished. Paging is server-driven — the service hands back `__next` /
-    /// `@odata.nextLink` and this module follows it until there is none.
+    /// finished. Paging is server-driven — the service hands back a `rel="next"`
+    /// link / `@odata.nextLink` and this module follows it until there is none.
+    ///
+    /// **No `$format` either.** An earlier cut appended `$format=json` on v2,
+    /// which is one of the options SAP documents as mutually exclusive with a v2
+    /// delta query — and this is the read that issues the delta token, so
+    /// pinning JSON on it is asking for a cursor the service may decline to give
+    /// and a deletion representation that does not exist. Format is negotiated
+    /// with `Accept` in [`Inner::fetch_page`], per dialect.
     fn initial_url(&self) -> Result<Url, CdcError> {
         let mut url = self.service_root.clone();
         url.path_segments_mut()
@@ -985,11 +1350,6 @@ impl Inner {
             })?
             .pop_if_empty()
             .push(&self.entity_set);
-
-        if self.version == SapODataVersion::V2 {
-            // v2 negotiates JSON with a query option, not with Accept.
-            url.query_pairs_mut().append_pair("$format", "json");
-        }
         Ok(url)
     }
 
@@ -1000,11 +1360,19 @@ impl Inner {
     /// *position* or merely a backend failure: on a cold read there is no
     /// position for the service to be objecting to.
     async fn fetch_page(&self, url: &Url, position: Option<&str>) -> Result<Page, CdcError> {
+        // The dialects genuinely differ here and must not be unified. A v4
+        // delta response spells a deletion in JSON; a v2 one can only spell it
+        // in Atom, so asking a v2 service for JSON is asking it for a feed with
+        // the deletions removed and no note saying so.
+        let accept = match self.version {
+            SapODataVersion::V2 => "application/atom+xml,application/xml;q=0.9",
+            SapODataVersion::V4 => "application/json",
+        };
         let request = self
             .client
             .client
             .get(url.clone())
-            .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::ACCEPT, accept)
             // v4's change-tracking opt-in. Harmless on v2, where tracking is a
             // property of the service, and sending it unconditionally keeps the
             // two paths identical.
@@ -1022,16 +1390,24 @@ impl Inner {
             return Err(classify_failure(status, &body, position, url));
         }
 
-        let body: Json = response.json().await.map_err(|e| {
+        let body = response.text().await.map_err(|e| {
             CdcError::Backend(anyhow::anyhow!(
-                "parsing the OData response from {}: {e}",
+                "reading the OData response from {}: {e}",
                 redact(url)
             ))
         })?;
 
         match self.version {
-            SapODataVersion::V2 => parse_v2(&body),
-            SapODataVersion::V4 => parse_v4(&body),
+            SapODataVersion::V2 => parse_v2_atom(&body),
+            SapODataVersion::V4 => {
+                let body: Json = serde_json::from_str(&body).map_err(|e| {
+                    CdcError::Backend(anyhow::anyhow!(
+                        "parsing the OData response from {}: {e}",
+                        redact(url)
+                    ))
+                })?;
+                parse_v4(&body)
+            }
         }
     }
 
@@ -1053,7 +1429,7 @@ impl Inner {
             event.id_url.as_deref(),
         )?;
 
-        let (changed_at, changed_at_source) = self.changed_at(&event.row);
+        let (changed_at, changed_at_source) = self.changed_at(event);
 
         let mut payload: Stash = event.row.clone();
         // A silent overwrite here would put connector bookkeeping where a
@@ -1111,14 +1487,22 @@ impl Inner {
     /// payload says so — because a consumer doing temporal reasoning needs to
     /// know it is looking at poll lag rather than business time, and a
     /// connector that reported one as the other would be undetectably wrong.
-    fn changed_at(&self, row: &serde_json::Map<String, Json>) -> (DateTime<Utc>, &'static str) {
-        let parsed = self
+    ///
+    /// A tombstone has no properties for `changed_at_property` to name, so the
+    /// only chance at its real time is the Atom `<at:deleted-entry when="…">`
+    /// attribute — labelled `tombstone`, because it is the service's word for
+    /// when the row went, not for when the row last changed.
+    fn changed_at(&self, event: &RowEvent) -> (DateTime<Utc>, &'static str) {
+        if let Some(ts) = self
             .changed_at_property
             .as_deref()
-            .and_then(|name| row.get(name))
-            .and_then(parse_timestamp);
-        match parsed {
-            Some(ts) => (ts, "entity"),
+            .and_then(|name| event.row.get(name))
+            .and_then(parse_timestamp)
+        {
+            return (ts, "entity");
+        }
+        match event.deleted_at {
+            Some(ts) => (ts, "tombstone"),
             None => (Utc::now(), "observed"),
         }
     }
@@ -1128,10 +1512,7 @@ fn parse_timestamp(value: &Json) -> Option<DateTime<Utc>> {
     if let Some(ms) = value.as_i64() {
         return DateTime::<Utc>::from_timestamp_millis(ms);
     }
-    let s = value.as_str()?;
-    DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|ts| ts.with_timezone(&Utc))
+    parse_edm_datetime(value.as_str()?)
 }
 
 /// A URL with its query stripped. Delta links carry the token, and a token is
@@ -1179,6 +1560,45 @@ fn classify_failure(status: StatusCode, body: &str, position: Option<&str>, url:
             body.chars().take(400).collect::<String>()
         )),
     }
+}
+
+/// Why a link cannot be followed as an OData **v2** delta read, if it cannot.
+///
+/// SAP documents v2 delta queries as mutually exclusive with JSON format,
+/// `$skiptoken`, `$top`, `$skip` and `$expand`. This connector adds none of them
+/// — see [`Inner::initial_url`] — but a delta link is a string the *service*
+/// composed and the offset store then kept, possibly across a gateway upgrade,
+/// so it is read before it is followed.
+///
+/// `$format` is the one that matters. A v2 delta link pinning JSON puts the
+/// connector back exactly where this module started: seeing every change except
+/// the deletions, and reporting nothing wrong. `$top` and `$skip` truncate a
+/// cycle, which is a gap rather than a duplicate. `$expand` changes the row
+/// shape mid-replication.
+///
+/// `$skiptoken` is deliberately **not** rejected. A v2 delta response is
+/// unpaged, so it should never appear — but if a gateway sends one anyway,
+/// following it is doing what the service asked, and the paging loop in
+/// [`Feed::cycle`] already handles it.
+fn v2_delta_link_objection(url: &Url) -> Option<String> {
+    for (name, value) in url.query_pairs() {
+        match name.as_ref() {
+            "$format" if !matches!(value.as_ref(), "atom" | "xml") => {
+                return Some(format!(
+                    "it pins $format={value}, and an OData v2 delta response cannot represent a \
+                     deletion in anything but Atom"
+                ));
+            }
+            "$top" | "$skip" | "$expand" => {
+                return Some(format!(
+                    "it carries {name}, which SAP documents as mutually exclusive with a v2 \
+                     delta query"
+                ));
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn mentions_delta_token(body: &str) -> bool {
@@ -1321,7 +1741,19 @@ impl Feed {
         // `UnusablePosition` and needs `snapshot_mode = "when_needed"` to
         // recover. `CommitSource` has no way to commit a position without a
         // record, so there is nothing better available here.
-        self.next_url = self.resolve(&delta_link)?;
+        let next_url = self.resolve(&delta_link)?;
+        if self.inner.version == SapODataVersion::V2 {
+            if let Some(objection) = v2_delta_link_objection(&next_url) {
+                return Err(CdcError::Backend(anyhow::anyhow!(
+                    "{} handed back a link that cannot be followed as an OData v2 delta read: \
+                     {objection}. Following it anyway would keep the connector running while \
+                     deletions stopped arriving, which is the one thing merkql-connect will not \
+                     do.",
+                    self.inner.entity_set
+                )));
+            }
+        }
+        self.next_url = next_url;
         self.position = Some(delta_link);
         self.initial = false;
         Ok(())
@@ -1427,6 +1859,17 @@ impl SapSource {
                 url.host_str().unwrap_or("<no host>"),
                 self.inner.service_root.host_str().unwrap_or("<no host>"),
             )));
+        }
+
+        if self.inner.version == SapODataVersion::V2 {
+            if let Some(objection) = v2_delta_link_objection(&url) {
+                return Err(unusable(format!(
+                    "the stored position cannot be followed as an OData v2 delta read: \
+                     {objection}. It was written by a build of this connector that requested \
+                     JSON, under which no deletion was ever visible, so re-baselining is the \
+                     only way to a correct topic"
+                )));
+            }
         }
 
         Ok(url)
@@ -1702,34 +2145,193 @@ mod tests {
 
     // ── Page parsing ────────────────────────────────────────────────────
 
+    const V2_FEED: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+        <feed xmlns="http://www.w3.org/2005/Atom"
+              xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata"
+              xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices"
+              xmlns:at="http://purl.org/atom/tombstones/1.0">
+          <id>https://s4.example.com/svc/A_BusinessPartner</id>
+          <link rel="next" href="https://s4.example.com/next"/>
+          <link rel="delta" href="https://s4.example.com/delta?!deltatoken=D1"/>
+          <entry>
+            <id>https://s4.example.com/svc/A_BusinessPartner('1')</id>
+            <link rel="edit" href="A_BusinessPartner('1')"/>
+            <link rel="http://…/related/ToAddress" href="A_BusinessPartner('1')/ToAddress"/>
+            <content type="application/xml">
+              <m:properties>
+                <d:BusinessPartner>1</d:BusinessPartner>
+                <d:BusinessPartnerName>ACME</d:BusinessPartnerName>
+                <d:CreditLimit m:type="Edm.Int32">4200</d:CreditLimit>
+                <d:LastChangeDateTime m:type="Edm.DateTime">2023-11-14T22:13:20</d:LastChangeDateTime>
+                <d:MiddleName m:null="true"/>
+              </m:properties>
+            </content>
+          </entry>
+          <at:deleted-entry
+            ref="https://s4.example.com/svc/A_BusinessPartner('2')"
+            when="2026-07-31T10:00:00Z"/>
+        </feed>"#;
+
+    /// The whole point of the Atom path: a v2 feed's rows, its paging and delta
+    /// links, and — the thing JSON could never have carried — its tombstone.
     #[test]
-    fn v2_pages_yield_rows_links_and_tombstones() {
-        let body: Json = serde_json::from_str(
-            r#"{"d":{
-                "results":[
-                    {"__metadata":{"id":"A_BusinessPartner('1')"},
-                     "BusinessPartner":"1","BusinessPartnerName":"ACME",
-                     "LastChangeDateTime":"/Date(1700000000000)/"},
-                    {"__metadata":{"id":"A_BusinessPartner('2')","deleted_entity":true}}
-                ],
-                "__next":"https://s4.example.com/next",
-                "__delta":"https://s4.example.com/delta?!deltatoken=D1"
-            }}"#,
-        )
-        .unwrap();
-        let page = parse_v2(&body).unwrap();
+    fn a_v2_atom_feed_yields_rows_links_and_deleted_entries() {
+        let page = parse_v2_atom(V2_FEED).unwrap();
         assert_eq!(page.rows.len(), 2);
+
         assert!(!page.rows[0].deleted);
-        assert!(page.rows[1].deleted);
+        assert_eq!(page.rows[0].row.get("BusinessPartner"), Some(&json!("1")));
+        assert_eq!(
+            page.rows[0].id_url.as_deref(),
+            Some("https://s4.example.com/svc/A_BusinessPartner('1')")
+        );
+
+        let deleted = &page.rows[1];
+        assert!(deleted.deleted, "a deleted-entry must be a tombstone");
+        assert_eq!(
+            deleted.id_url.as_deref(),
+            Some("https://s4.example.com/svc/A_BusinessPartner('2')")
+        );
+        assert_eq!(
+            deleted.deleted_at.map(|t| t.to_rfc3339()).as_deref(),
+            Some("2026-07-31T10:00:00+00:00")
+        );
+
+        // Only the feed's own links are the cycle's; the entry's `edit` and
+        // navigation links must not be mistaken for one.
         assert_eq!(
             page.next_link.as_deref(),
             Some("https://s4.example.com/next")
         );
-        assert!(page.delta_link.is_some());
-        // `/Date(...)/` must already be RFC 3339 by the time anything else sees
-        // it, so `changed_at` parses the same way under v2 and v4.
-        let changed = page.rows[0].row.get("LastChangeDateTime").unwrap();
-        assert!(changed.as_str().unwrap().contains('T'), "got {changed}");
+        assert_eq!(
+            page.delta_link.as_deref(),
+            Some("https://s4.example.com/delta?!deltatoken=D1")
+        );
+    }
+
+    /// `m:type` decides the JSON shape, and `Edm.DateTime`'s offset-less text is
+    /// normalised so `changed_at` parses identically under v2 and v4.
+    #[test]
+    fn atom_properties_are_typed_by_their_edm_type() {
+        let row = &parse_v2_atom(V2_FEED).unwrap().rows[0].row;
+        assert_eq!(row.get("CreditLimit"), Some(&json!(4200)));
+        assert_eq!(row.get("MiddleName"), Some(&Json::Null));
+        let changed = row.get("LastChangeDateTime").unwrap();
+        assert_eq!(changed, &json!("2023-11-14T22:13:20+00:00"));
+        assert_eq!(
+            parse_timestamp(changed).unwrap().timestamp_millis(),
+            1_700_000_000_000
+        );
+    }
+
+    /// `Edm.Int64` and `Edm.Decimal` do not fit a JSON number without losing
+    /// digits, and a key value that loses digits is an envelope id that merges
+    /// two records.
+    #[test]
+    fn wide_numeric_edm_types_stay_text() {
+        let feed = r#"<feed xmlns="http://www.w3.org/2005/Atom"><entry><content><m:properties
+            xmlns:m="m" xmlns:d="d">
+              <d:Id m:type="Edm.Int64">9007199254740993</d:Id>
+              <d:Amount m:type="Edm.Decimal">12345678901234567890.99</d:Amount>
+            </m:properties></content></entry></feed>"#;
+        let row = &parse_v2_atom(feed).unwrap().rows[0].row;
+        assert_eq!(row.get("Id"), Some(&json!("9007199254740993")));
+        assert_eq!(row.get("Amount"), Some(&json!("12345678901234567890.99")));
+    }
+
+    /// A complex property is an object, not a flattened mess that could collide
+    /// with a sibling scalar of the same leaf name.
+    #[test]
+    fn complex_atom_properties_nest() {
+        let feed = r#"<feed xmlns="http://www.w3.org/2005/Atom"><entry><content><m:properties
+            xmlns:m="m" xmlns:d="d">
+              <d:Address><d:City>Leeds</d:City><d:Country>GB</d:Country></d:Address>
+              <d:City>elsewhere</d:City>
+            </m:properties></content></entry></feed>"#;
+        let row = &parse_v2_atom(feed).unwrap().rows[0].row;
+        assert_eq!(
+            row.get("Address"),
+            Some(&json!({"City":"Leeds","Country":"GB"}))
+        );
+        assert_eq!(row.get("City"), Some(&json!("elsewhere")));
+    }
+
+    /// The failure that motivated this whole path. A v2 service answering JSON
+    /// cannot have told us about a deletion, so reading it would mean losing
+    /// deletions forever while looking healthy.
+    #[test]
+    fn a_v2_json_body_is_refused_rather_than_read_without_its_deletions() {
+        let err = parse_v2_atom(r#"{"d":{"results":[{"BusinessPartner":"1"}]}}"#)
+            .expect_err("a v2 JSON body must be refused");
+        assert!(err.to_string().contains("deletions"), "got: {err}");
+    }
+
+    /// A tombstone's `ref` is the only thing the feed says about the deleted
+    /// entity. Skipping a malformed one would drop a deletion in silence.
+    #[test]
+    fn a_deleted_entry_without_a_ref_stops_the_cycle() {
+        let feed = r#"<feed xmlns="http://www.w3.org/2005/Atom"
+            xmlns:at="http://purl.org/atom/tombstones/1.0">
+            <at:deleted-entry when="2026-07-31T10:00:00Z"/></feed>"#;
+        let err = parse_v2_atom(feed).expect_err("an unnamed deletion must not be skipped");
+        assert!(err.to_string().contains("deleted-entry"), "got: {err}");
+    }
+
+    /// A gateway error page or an HTML login redirect is XML-ish and would
+    /// otherwise parse into an empty feed — which reads as "nothing changed".
+    #[test]
+    fn a_response_that_is_not_an_atom_feed_is_refused() {
+        let err = parse_v2_atom("<html><body>Login required</body></html>")
+            .expect_err("a non-feed body must be refused");
+        assert!(err.to_string().contains("Atom"), "got: {err}");
+    }
+
+    /// A v2 tombstone must land on the id its upsert used, exactly as a v4 one
+    /// must — the Atom `ref` is a full URL and the row's key is raw properties,
+    /// so this is the encoding doing real work rather than a tautology.
+    #[test]
+    fn a_v2_tombstone_and_its_upsert_share_an_envelope_id() {
+        let keys = vec!["BusinessPartner".to_string()];
+        let page = parse_v2_atom(V2_FEED).unwrap();
+        let upsert = SapKey::from_row(
+            "A_BusinessPartner",
+            &keys,
+            &page.rows[0].row,
+            page.rows[0].id_url.as_deref(),
+        )
+        .unwrap();
+        let tombstone = SapKey::from_row(
+            "A_BusinessPartner",
+            &keys,
+            &page.rows[1].row,
+            page.rows[1].id_url.as_deref(),
+        )
+        .unwrap();
+        assert_eq!(
+            upsert.envelope_id(),
+            "A_BusinessPartner(BusinessPartner='1')"
+        );
+        assert_eq!(
+            tombstone.envelope_id(),
+            "A_BusinessPartner(BusinessPartner='2')"
+        );
+    }
+
+    /// A v2 delta link that pins JSON is the bug reintroducing itself, and it
+    /// must not be followed however it got there.
+    #[test]
+    fn a_v2_delta_link_pinning_json_is_objected_to() {
+        let json =
+            Url::parse("https://s4.example.com/svc/A_X?$format=json&!deltatoken=D1").unwrap();
+        assert!(v2_delta_link_objection(&json).is_some());
+
+        let truncating = Url::parse("https://s4.example.com/svc/A_X?$top=100").unwrap();
+        assert!(v2_delta_link_objection(&truncating).is_some());
+
+        // What SAP actually hands back, plus the paging option v2 delta is
+        // documented not to use but which is harmless to follow if it appears.
+        let ok = Url::parse("https://s4.example.com/svc/A_X?!deltatoken=D1&$skiptoken=5").unwrap();
+        assert!(v2_delta_link_objection(&ok).is_none());
     }
 
     #[test]
