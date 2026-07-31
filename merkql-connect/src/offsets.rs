@@ -94,16 +94,25 @@ impl OffsetStore {
 
     /// Where the source should start.
     ///
-    /// A position committed while a snapshot was still running is deliberately
-    /// **not** resumable: it names a row inside the snapshot, not a place in
-    /// the live stream, so resuming from it would start streaming from a
-    /// point the stream never reached and skip everything in between. An
-    /// interrupted snapshot restarts as a cold start — duplicates, never a
-    /// gap.
+    /// A position committed while a snapshot was still running names a row
+    /// *inside* the snapshot, not a place in the live stream, so it must never
+    /// be handed back as [`crate::Resume::At`] — resuming the live stream from
+    /// it would begin at a point the stream never reached and skip everything
+    /// between.
+    ///
+    /// It is handed back as [`crate::Resume::Snapshotting`] instead of being
+    /// discarded. The distinction is the source's to act on: one that cannot
+    /// continue a partial snapshot calls
+    /// [`crate::Resume::without_snapshot_resume`] and restarts it, which is
+    /// what every source did before the variant existed; one that can, resumes
+    /// and skips re-reading history it already emitted. Either way this method
+    /// no longer decides on the source's behalf, and no source has to
+    /// mis-stage `snapshot_in_progress` to get the position back.
     pub fn resume(&self) -> crate::Resume {
         match &self.stored {
-            Some(s) if !s.snapshot_in_progress => crate::Resume::At(s.position.clone()),
-            _ => crate::Resume::Cold,
+            Some(s) if s.snapshot_in_progress => crate::Resume::Snapshotting(s.position.clone()),
+            Some(s) => crate::Resume::At(s.position.clone()),
+            None => crate::Resume::Cold,
         }
     }
 
@@ -221,22 +230,34 @@ mod tests {
         assert_eq!(store(dir.path()).resume(), Resume::Cold);
     }
 
-    /// An interrupted snapshot must restart as a cold start. Resuming a
-    /// snapshot position as a *streaming* position would begin the live feed
-    /// at a place it never reached and drop everything before it.
+    /// A mid-snapshot position comes back as `Snapshotting`, never as `At`.
+    ///
+    /// The distinction it draws is the whole safety property: handing this
+    /// position back as a *streaming* position would begin the live feed at a
+    /// place it never reached and drop everything before it. Handing it back
+    /// as `Snapshotting` lets a source that can continue an ordered walk do
+    /// so, while a source that cannot calls `without_snapshot_resume()` and
+    /// gets the historical restart.
     #[test]
-    fn a_position_committed_mid_snapshot_is_not_resumable() {
+    fn a_position_committed_mid_snapshot_resumes_as_snapshotting_not_as_a_stream() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = store(dir.path());
         s.stage("17", true);
         s.commit_now().unwrap();
         drop(s);
 
+        let resumed = store(dir.path()).resume();
         assert_eq!(
-            store(dir.path()).resume(),
-            Resume::Cold,
-            "an interrupted snapshot must re-snapshot, not resume as a stream"
+            resumed,
+            Resume::Snapshotting("17".to_string()),
+            "a mid-snapshot position must be offered as a snapshot cursor"
         );
+        assert!(
+            !matches!(resumed, Resume::At(_)),
+            "a mid-snapshot position must never be a streaming position"
+        );
+        // And the opt-out still yields exactly the old behaviour.
+        assert_eq!(resumed.without_snapshot_resume(), Resume::Cold);
     }
 
     #[test]

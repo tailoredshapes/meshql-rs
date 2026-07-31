@@ -1783,7 +1783,31 @@ impl CommitSource for SapSource {
     }
 
     async fn changes(&self, from: Resume, mode: SnapshotMode) -> Result<ChangeStream, CdcError> {
+        // OData's delta protocol produces no mid-snapshot position, so this
+        // collapses to a cold start.
+        //
+        // A delta token is issued only as the *tail* of a completed read — the
+        // `rel="delta"` link on the final page. Interior pages of the initial
+        // read carry a `rel="next"` skiptoken, which is a paging handle, not a
+        // resumable change position: it is not accepted where a delta token
+        // goes, and `validate_stored_position` rejects it precisely so that a
+        // paging handle can never be mistaken for a cursor. So an interrupted
+        // initial read has nothing durable to resume from and must be redone.
+        //
+        // Resuming the *paging* would be possible if the next-link were
+        // persisted, but that link is a server-side cursor with its own
+        // undocumented lifetime, and a stale one silently returns a partial
+        // set. Redoing the read is slower and correct; the module docs already
+        // record that "re-baseline is normal operation" for this connector.
+        let from = from.without_snapshot_resume();
+
         let (next_url, position, initial) = match &from {
+            // Collapsed to `Cold` by `without_snapshot_resume` immediately
+            // above. Named rather than wildcarded so that removing that call
+            // is a compile error here instead of a silent behaviour change.
+            Resume::Snapshotting(_) => {
+                unreachable!("Resume::Snapshotting was collapsed to Cold before this match")
+            }
             Resume::Cold => (self.inner.initial_url()?, None, true),
             Resume::At(link) => {
                 let url = self.validate_stored_position(link)?;

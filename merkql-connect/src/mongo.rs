@@ -170,6 +170,20 @@ impl CommitSource for MongoSource {
             .watch()
             .full_document(FullDocumentType::UpdateLookup);
 
+        // An interrupted snapshot restarts here, and cannot do otherwise.
+        //
+        // The position a snapshot record carries is the change stream's
+        // `start_token` — where the *stream* stood before the scan began — not
+        // a cursor into the scan. It is deliberately identical for every
+        // record in the snapshot (that is what makes resuming from it replay
+        // the whole snapshot and skip nothing), so it says nothing about how
+        // far the scan got. There is no position to resume from, and the
+        // unordered `find({})` below offers nowhere to resume to.
+        //
+        // Restarting is therefore not a limitation of this branch but of the
+        // snapshot's shape: correct, and duplicates rather than a gap.
+        let from = from.without_snapshot_resume();
+
         let resuming = matches!(from, Resume::At(_));
         if let Resume::At(position) = &from {
             watch = watch.start_after(Self::decode_token(position)?);
@@ -178,7 +192,7 @@ impl CommitSource for MongoSource {
         let stream = watch.await.map_err(|e| {
             if resuming && Self::is_server_rejection(&e) {
                 let position = match &from {
-                    Resume::At(p) => p.clone(),
+                    Resume::At(p) | Resume::Snapshotting(p) => p.clone(),
                     Resume::Cold => String::new(),
                 };
                 CdcError::UnusablePosition {

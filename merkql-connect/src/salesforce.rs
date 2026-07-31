@@ -1305,7 +1305,30 @@ impl CommitSource for SalesforceSource {
     async fn changes(&self, from: Resume, mode: SnapshotMode) -> Result<ChangeStream, CdcError> {
         let mut snapshot_records: Vec<Result<ChangeRecord, CdcError>> = Vec::new();
 
+        // This source never produces a mid-snapshot position to resume from,
+        // so the variant collapses to a cold start.
+        //
+        // It is not that resuming would be wrong — it is that the offset store
+        // is never given the chance. Only the **last** record of the snapshot
+        // carries a position (see `snapshot_rows`), and that record is flagged
+        // `Snapshot::Last`, for which `in_progress()` is false. Interior
+        // snapshot records carry `None`, and `run_connector` only stages a
+        // position when a record has one. So a snapshot interrupted here
+        // leaves either no stored position at all or a completed one, and
+        // `Resume::Snapshotting` cannot arise.
+        //
+        // Handling it explicitly rather than by a catch-all keeps that fact
+        // checkable: if the position rule above ever changes, this comment is
+        // wrong at a named line rather than silently absorbed by a wildcard.
+        let from = from.without_snapshot_resume();
+
         let cursor = match &from {
+            // Collapsed to `Cold` by `without_snapshot_resume` immediately
+            // above. Named rather than wildcarded so that removing that call
+            // is a compile error here instead of a silent behaviour change.
+            Resume::Snapshotting(_) => {
+                unreachable!("Resume::Snapshotting was collapsed to Cold before this match")
+            }
             Resume::At(position) => self.validate_cursor(position).await?,
             Resume::Cold => {
                 // Capture the streaming position FIRST, then snapshot — the

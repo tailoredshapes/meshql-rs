@@ -1661,6 +1661,20 @@ impl CommitSource for HubspotSource {
         let mut cursor = match &from {
             Resume::At(position) => Cursor::decode(position)?,
             Resume::Cold => Cursor::default(),
+            // An interrupted backfill resumes rather than restarting, and this
+            // source is the one where that matters most: the snapshot walks
+            // every object in the portal, at five requests per second, over as
+            // many properties as the schema defines. Restarting it can cost
+            // hours, and a connector that cannot survive one interruption may
+            // never finish a large portal at all.
+            //
+            // It is resumable because — unlike a table scan followed by a
+            // separate live stream — the snapshot here *is* the first pass of
+            // the ordinary poll. The cursor is the same `{watermark, seen}`
+            // structure in both phases, so a mid-snapshot cursor is already a
+            // valid poll cursor and needs no translation. That equivalence is
+            // what makes resuming safe, not merely convenient.
+            Resume::Snapshotting(position) => Cursor::decode(position)?,
         };
 
         // A type present in the config but absent from a stored cursor starts
@@ -1671,7 +1685,14 @@ impl CommitSource for HubspotSource {
         // one. Types in the cursor but no longer configured are left untouched
         // so that re-adding one resumes rather than re-backfills.
 
-        let phase = if matches!(from, Resume::Cold) && mode.snapshots_on_cold_start() {
+        // A resumed snapshot stays in `Phase::Snapshot`, so its remaining
+        // records keep arriving as `op: r` with `snapshot == true`. Switching
+        // to `Live` here would relabel the tail of one backfill as live
+        // traffic, and a consumer suppressing notifications during a backfill
+        // would start firing them halfway through.
+        let phase = if matches!(from, Resume::Cold | Resume::Snapshotting(_))
+            && mode.snapshots_on_cold_start()
+        {
             Phase::Snapshot
         } else {
             Phase::Live
