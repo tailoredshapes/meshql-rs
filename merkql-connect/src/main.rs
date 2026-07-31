@@ -167,6 +167,14 @@ async fn open_source(config: &ConnectorConfig) -> Result<Box<dyn CommitSource>> 
             .await?,
         )),
 
+        // Same rule as `sap`: the config names an auth mode and the environment
+        // variables, and `from_config` resolves them here so an unreadable
+        // credential fails before the topic is claimed.
+        #[cfg(feature = "sap-odp")]
+        SourceConfig::SapOdp { .. } => Ok(Box::new(
+            merkql_connect::sap_odp::SapOdpSource::from_config(&config.source).await?,
+        )),
+
         // Credentials are read from the environment inside `open`, never from
         // `config`: see `salesforce`'s module docs and the `SourceConfig`
         // variant. Nothing in this arm can carry a secret from the TOML.

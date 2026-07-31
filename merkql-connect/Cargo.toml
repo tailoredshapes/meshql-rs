@@ -55,6 +55,18 @@ ksql = ["dep:meshql-ksql"]
 # Not in `default`: SAP is an ingress connector reaching out over the network to
 # a system the other three never touch, so a deployment opts into it.
 sap = ["dep:reqwest", "dep:url", "dep:base64", "dep:percent-encoding", "dep:quick-xml"]
+# SAP ODP (Operational Delta Queue) ingress, over the ODP OData interface. A
+# **separate** feature from `sap` rather than part of it: the two speak to the
+# same gateways with the same credentials but they are different mechanisms —
+# `sap` needs a delta-enabled application service, `sap-odp` needs an ODP
+# subscription — and a deployment has exactly one of them. Off by default for
+# the same reason `sap` is.
+#
+# No `quick-xml`: an ODP delta spells a deletion as the `ODQ_CHANGEMODE`
+# *property* of an ordinary row, so JSON loses nothing here. That is the one
+# place ODP is simpler than generic OData v2 delta, and `sap_odp`'s module docs
+# explain why the argument that forces Atom on `sap` does not apply.
+sap-odp = ["dep:reqwest", "dep:url", "dep:base64", "dep:percent-encoding"]
 # Salesforce is an *ingress* connector to a SaaS, not a store this workspace
 # provisions, so it stays out of `default`: a build that never talks to
 # Salesforce should not carry an HTTP client it cannot use.
