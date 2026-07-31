@@ -1,13 +1,75 @@
-//! The merkql side: the single-writer guard, and the connector loop.
+//! The queue side: the sink seam, the merkql single-writer guard, and the
+//! connector loop.
+//!
+//! # Why the sink is a trait and not `merkql`
+//!
+//! "The queue" is not merkql. It is **whichever persistent queue a deployment
+//! configured** — merkql for development and early growth, Kafka (via
+//! `meshql-ksql`) in production, merk-cloud on AWS, and a PostgreSQL-backed
+//! queue for the medium/large tier. A connector that named merkql in its
+//! append path would have to be rewritten once per queue, which is exactly the
+//! coupling meshql's adapter guarantee exists to prevent.
+//!
+//! So the connector appends through [`TopicSink`], and there are two shapes of
+//! implementation:
+//!
+//! - [`TopicWriter`] — merkql direct, keeping the `flock` single-writer guard
+//!   and the single-partition check that merkql specifically requires. It puts
+//!   the **whole [`ChangeRecord`]** on the topic, preserving today's wire
+//!   format exactly.
+//! - [`RepositorySink`] — any `meshql_core::Repository`, which is the seam
+//!   every other queue already implements. Kafka, merk-cloud, Postgres and
+//!   DynamoDB arrive here for free, and a new queue backend is a config change
+//!   rather than a connector change.
+//!
+//! ## The one difference between them, and it is load-bearing
+//!
+//! `Repository::create` takes an `Envelope`, not a `ChangeRecord`. So a
+//! `RepositorySink` appends **`record.after` — the envelope alone** — and the
+//! Debezium `source` block (native position, snapshot flag, connector name)
+//! stays connector-local rather than riding on the topic.
+//!
+//! That is the right trade for the reason the ingress connectors exist: an
+//! ingress connector **synthesises** the envelope from a foreign record, so
+//! everything the domain needs is already inside the payload it built. It is
+//! *not* free for the database CDC sources, where a consumer that wants to
+//! distinguish backfill (`op: r`) from live traffic (`op: c`) can only do so
+//! on a merkql sink. A source that needs that distinction downstream must
+//! materialise it into the envelope payload rather than relying on the
+//! Debezium block surviving the append.
 
 use crate::offsets::OffsetStore;
 use crate::record::ChangeRecord;
 use crate::source::{CdcError, CommitSource, Resume, SnapshotMode};
 use anyhow::{bail, Context, Result};
+use async_trait::async_trait;
 use futures::StreamExt;
 use merkql::broker::{Broker, BrokerRef};
 use merkql::record::ProducerRecord;
+use meshql_core::Repository;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// One configured queue, appended to.
+///
+/// The connector loop knows nothing about which queue it is feeding. See the
+/// module docs for why this is a trait and what the two implementations differ
+/// on.
+#[async_trait]
+pub trait TopicSink: Send + Sync {
+    /// Append one change record. Must not return until the record is durable
+    /// on the queue, because the caller commits the source position
+    /// immediately afterwards and a premature return turns a crash into a
+    /// permanent gap.
+    async fn append(&self, record: &ChangeRecord) -> Result<()>;
+
+    /// The topic being written, for log lines and errors.
+    fn topic(&self) -> &str;
+
+    /// Which queue backend this is — `"merkql"`, `"repository"`. Logged at
+    /// startup so an operator can see which sink a config actually selected.
+    fn backend(&self) -> &'static str;
+}
 
 /// Exclusive write access to one merkql topic.
 ///
@@ -120,13 +182,95 @@ impl TopicWriter {
     }
 }
 
+#[async_trait]
+impl TopicSink for TopicWriter {
+    /// Puts the **whole** `ChangeRecord` on the topic — Debezium block and
+    /// all — which is the wire format this connector has always produced.
+    async fn append(&self, record: &ChangeRecord) -> Result<()> {
+        TopicWriter::append(self, record).map(|_offset| ())
+    }
+
+    fn topic(&self) -> &str {
+        &self.topic
+    }
+
+    fn backend(&self) -> &'static str {
+        "merkql"
+    }
+}
+
+/// Any `meshql_core::Repository` as a queue.
+///
+/// This is how every non-merkql queue is reached: Kafka via
+/// `meshql_ksql::KsqlRepository`, merk-cloud via `meshql_merk::MerkRepository`,
+/// Postgres via `meshql_postgres::PostgresRepository`. The connector binary
+/// does not depend on any of them — the caller constructs the repository and
+/// hands it over, so adding a queue backend never touches this file.
+///
+/// # What lands on the topic
+///
+/// `record.after` — the envelope — and nothing else. See the module docs for
+/// why, and for what a source must do if it needs the Debezium metadata
+/// downstream.
+///
+/// A record with no `after` is a Debezium delete, which meshql's append-only
+/// sources never emit (a deletion is a new envelope with `deleted: true`). If
+/// one ever arrives it is an error rather than a silent drop, because a
+/// dropped record is the gap this whole crate is built to prevent.
+pub struct RepositorySink {
+    topic: String,
+    repository: Arc<dyn Repository>,
+}
+
+impl RepositorySink {
+    pub fn new(topic: impl Into<String>, repository: Arc<dyn Repository>) -> Self {
+        Self {
+            topic: topic.into(),
+            repository,
+        }
+    }
+}
+
+#[async_trait]
+impl TopicSink for RepositorySink {
+    async fn append(&self, record: &ChangeRecord) -> Result<()> {
+        let envelope = record.after.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "change record for topic '{}' has no `after` envelope; a Repository sink has \
+                 nothing to append. meshql sources are append-only and never emit a Debezium \
+                 delete, so this is a source bug — failing rather than dropping the record.",
+                self.topic
+            )
+        })?;
+
+        // The envelope's own tokens are the authority. Passing them back as
+        // the caller credentials is what a restlette POST does, and it keeps
+        // an adapter that filters on write from rejecting the connector's
+        // append.
+        let tokens = envelope.authorized_tokens.clone();
+        self.repository
+            .create(envelope.clone(), &tokens)
+            .await
+            .with_context(|| format!("appending to queue topic '{}'", self.topic))?;
+        Ok(())
+    }
+
+    fn topic(&self) -> &str {
+        &self.topic
+    }
+
+    fn backend(&self) -> &'static str {
+        "repository"
+    }
+}
+
 /// Run one source into one topic, forever.
 ///
 /// The loop's whole job is the ordering rule: **append, then commit the
 /// position.** Everything else is policy about how to start.
 pub async fn run_connector(
     source: &dyn CommitSource,
-    writer: &TopicWriter,
+    writer: &dyn TopicSink,
     offsets: &mut OffsetStore,
     mode: SnapshotMode,
 ) -> Result<()> {
@@ -163,7 +307,7 @@ pub async fn run_connector(
 
         // 1. Append first. If this fails the position is not committed, so the
         //    record is re-delivered on the next start.
-        writer.append(&record)?;
+        writer.append(&record).await?;
 
         // 2. Only then stage the position, and commit it periodically.
         if let Some(position) = record.position() {
@@ -539,5 +683,116 @@ mod tests {
             cold_only: false,
         });
         assert_eq!(source.connector(), "test");
+    }
+
+    /// A `Repository` that records what it was asked to append.
+    struct RecordingRepo {
+        seen: std::sync::Mutex<Vec<(String, Vec<String>)>>,
+    }
+
+    #[async_trait]
+    impl Repository for RecordingRepo {
+        async fn create(
+            &self,
+            envelope: Envelope,
+            tokens: &[String],
+        ) -> meshql_core::Result<Envelope> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((envelope.id.clone(), tokens.to_vec()));
+            Ok(envelope)
+        }
+        async fn read(
+            &self,
+            _: &str,
+            _: &[String],
+            _: Option<chrono::DateTime<chrono::Utc>>,
+        ) -> meshql_core::Result<Option<Envelope>> {
+            unreachable!("a sink never reads")
+        }
+        async fn list(&self, _: &[String]) -> meshql_core::Result<Vec<Envelope>> {
+            unreachable!("a sink never reads")
+        }
+        async fn remove(&self, _: &str, _: &[String]) -> meshql_core::Result<bool> {
+            unreachable!("a sink never removes")
+        }
+        async fn create_many(
+            &self,
+            _: Vec<Envelope>,
+            _: &[String],
+        ) -> meshql_core::Result<Vec<Envelope>> {
+            unreachable!("the loop appends one at a time")
+        }
+        async fn read_many(
+            &self,
+            _: &[String],
+            _: &[String],
+        ) -> meshql_core::Result<Vec<Envelope>> {
+            unreachable!("a sink never reads")
+        }
+        async fn remove_many(
+            &self,
+            _: &[String],
+            _: &[String],
+        ) -> meshql_core::Result<std::collections::HashMap<String, bool>> {
+            unreachable!("a sink never removes")
+        }
+    }
+
+    /// The whole point of the seam: the same connector loop drives a queue
+    /// that is not merkql, with no merkql types involved.
+    #[tokio::test]
+    async fn a_repository_sink_appends_the_envelope_through_the_repository() {
+        let repo = Arc::new(RecordingRepo {
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let sink = RepositorySink::new("lay_report", Arc::clone(&repo) as Arc<dyn Repository>);
+
+        assert_eq!(sink.backend(), "repository");
+        assert_eq!(TopicSink::topic(&sink), "lay_report");
+
+        sink.append(&record("hen-1", "1", Snapshot::False))
+            .await
+            .unwrap();
+
+        let seen = repo.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "hen-1");
+    }
+
+    /// The envelope's own tokens are passed back as the caller credentials, so
+    /// an adapter that filters on write does not reject the connector.
+    #[tokio::test]
+    async fn a_repository_sink_presents_the_envelopes_own_tokens() {
+        let repo = Arc::new(RecordingRepo {
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let sink = RepositorySink::new("lay_report", Arc::clone(&repo) as Arc<dyn Repository>);
+
+        let mut rec = record("hen-1", "1", Snapshot::False);
+        rec.after.as_mut().unwrap().authorized_tokens = vec!["farm-1".to_string()];
+        sink.append(&rec).await.unwrap();
+
+        assert_eq!(repo.seen.lock().unwrap()[0].1, vec!["farm-1".to_string()]);
+    }
+
+    /// A record with no `after` must be an error, never a silent drop — a
+    /// dropped record is exactly the permanent gap this crate exists to
+    /// prevent.
+    #[tokio::test]
+    async fn a_repository_sink_refuses_a_record_with_no_envelope() {
+        let repo = Arc::new(RecordingRepo {
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let sink = RepositorySink::new("lay_report", repo as Arc<dyn Repository>);
+
+        let mut rec = record("hen-1", "1", Snapshot::False);
+        rec.after = None;
+        let err = sink.append(&rec).await.unwrap_err();
+        assert!(
+            err.to_string().contains("no `after` envelope"),
+            "got: {err}"
+        );
     }
 }

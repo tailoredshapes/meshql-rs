@@ -109,8 +109,8 @@ pub mod postgres;
 
 pub mod cert;
 
-pub use config::{ConnectorConfig, SourceConfig};
+pub use config::{ConnectorConfig, QueueConfig, SourceConfig};
 pub use offsets::OffsetStore;
 pub use record::{ChangeRecord, Op, Snapshot, SourceInfo};
-pub use sink::{run_connector, TopicWriter};
+pub use sink::{run_connector, RepositorySink, TopicSink, TopicWriter};
 pub use source::{CdcError, ChangeStream, CommitSource, Resume, SnapshotMode};
