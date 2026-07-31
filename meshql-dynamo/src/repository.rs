@@ -6,11 +6,14 @@ use chrono::{DateTime, Utc};
 use meshql_core::{envelope_visible_to, Envelope, MeshqlError, Repository, Result};
 use std::collections::HashMap;
 
+use crate::metering::{return_consumed_capacity, CapacityMeter, Op};
 use crate::store;
 
 pub struct DynamoRepository {
     client: Client,
     table: String,
+    /// `None` unless an operator asked for metering. See [`crate::metering`].
+    meter: Option<std::sync::Arc<CapacityMeter>>,
 }
 
 impl DynamoRepository {
@@ -28,9 +31,30 @@ impl DynamoRepository {
         let repo = Self {
             client,
             table: table.to_string(),
+            meter: None,
         };
         repo.ensure_table().await?;
         Ok(repo)
+    }
+
+    /// Account every request this repository makes against `meter`.
+    ///
+    /// Opt-in and additive: without it no request sets `ReturnConsumedCapacity`
+    /// and there is nothing to pay for. Share one meter with a
+    /// [`crate::DynamoSearcher`] over the same table to get the whole
+    /// collection's bill in one report.
+    pub fn with_meter(mut self, meter: std::sync::Arc<CapacityMeter>) -> Self {
+        self.meter = Some(meter);
+        self
+    }
+
+    /// The attached meter, if any.
+    pub fn meter(&self) -> Option<&std::sync::Arc<CapacityMeter>> {
+        self.meter.as_ref()
+    }
+
+    fn meter_ref(&self) -> Option<&CapacityMeter> {
+        self.meter.as_deref()
     }
 
     pub async fn ensure_table(&self) -> Result<()> {
@@ -55,10 +79,12 @@ impl Repository for DynamoRepository {
         }
         env.authorized_tokens = tokens.to_vec();
 
-        self.client
+        let put = self
+            .client
             .put_item()
             .table_name(&self.table)
             .set_item(Some(store::envelope_to_item(&env)))
+            .set_return_consumed_capacity(return_consumed_capacity(self.meter_ref()))
             .send()
             .await
             .map_err(|e| {
@@ -69,6 +95,10 @@ impl Repository for DynamoRepository {
                     store::describe_sdk_error(&e)
                 ))
             })?;
+
+        if let Some(m) = self.meter_ref() {
+            m.record(Op::PutItem, put.consumed_capacity());
+        }
 
         Ok(env)
     }
@@ -88,7 +118,7 @@ impl Repository for DynamoRepository {
         // resolving would let an older visible version of a now-restricted
         // record resurface — see
         // `test_repository_auth_latest_version_controls_visibility`.
-        match store::query_latest(&self.client, &self.table, id, cutoff).await? {
+        match store::query_latest(&self.client, &self.table, id, cutoff, self.meter_ref()).await? {
             None => Ok(None),
             Some(env) => {
                 if env.deleted || !envelope_visible_to(&env, tokens) {
@@ -102,8 +132,13 @@ impl Repository for DynamoRepository {
 
     async fn list(&self, tokens: &[String]) -> Result<Vec<Envelope>> {
         // No `at` on `list`, so the cutoff is now.
-        let resolved =
-            store::scan_latest(&self.client, &self.table, store::now_cutoff_nanos()).await?;
+        let resolved = store::scan_latest(
+            &self.client,
+            &self.table,
+            store::now_cutoff_nanos(),
+            self.meter_ref(),
+        )
+        .await?;
         Ok(resolved
             .into_iter()
             .filter(|env| envelope_visible_to(env, tokens))

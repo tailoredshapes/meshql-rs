@@ -44,3 +44,16 @@ harness = true
 [[test]]
 name = "authz_cert"
 harness = false
+
+# Real-AWS cost validation. `harness = false` so that a skip — no credentials, no
+# opt-in — is *visible*: libtest captures println! from a passing test, and a skip
+# nobody can see is the same as no skip at all.
+[[test]]
+name = "capacity_cost"
+harness = false
+
+# A *design probe*, not a certification: measures what an indexed-payload-field
+# GSI would cost. Nothing it exercises is shipped. Same opt-in gate.
+[[test]]
+name = "gsi_cost"
+harness = false

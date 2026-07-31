@@ -15,6 +15,10 @@
 //! be pushed into a `FilterExpression` even as an optimisation, and the crate's
 //! notes on GSIs for what a fix would look like.
 //!
+//! What a scan costs is not a matter of opinion: [`metering`] is an opt-in
+//! capacity meter that reports what DynamoDB actually billed, and
+//! `docs/cost-model-dynamodb.md` is the model it validated.
+//!
 //! ```no_run
 //! # async fn example() -> meshql_core::Result<()> {
 //! use meshql_dynamo::{DynamoRepository, DynamoSearcher};
@@ -29,10 +33,12 @@
 
 pub mod convert;
 pub mod matcher;
+pub mod metering;
 pub mod repository;
 pub mod searcher;
 pub mod store;
 
+pub use metering::{CapacityMeter, CapacityReport, Op, OpStats, Rates};
 pub use repository::DynamoRepository;
 pub use searcher::DynamoSearcher;
 pub use store::{drop_table, ensure_table, make_client};

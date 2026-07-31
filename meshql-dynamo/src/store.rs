@@ -37,6 +37,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::convert;
+use crate::metering::{return_consumed_capacity, CapacityMeter, Op};
 
 pub const PK: &str = "pk";
 pub const SK: &str = "sk";
@@ -369,11 +370,16 @@ pub fn describe_sdk_error<E: std::fmt::Debug, R: std::fmt::Debug>(e: &SdkError<E
 /// Deletion and visibility are deliberately **not** applied here — the caller
 /// applies them to the resolved version. Applying them first would resurface an
 /// older visible version of a now-restricted record.
+///
+/// `meter` is `None` for an unmetered call, which is the default everywhere:
+/// without it `ReturnConsumedCapacity` is never set and the request on the wire
+/// is unchanged. See [`crate::metering`].
 pub async fn query_latest(
     client: &Client,
     table: &str,
     id: &str,
     cutoff_nanos: i64,
+    meter: Option<&CapacityMeter>,
 ) -> Result<Option<Envelope>> {
     let out = client
         .query()
@@ -385,11 +391,16 @@ pub async fn query_latest(
         .expression_attribute_values(":hi", AttributeValue::S(upper_bound(cutoff_nanos)))
         .scan_index_forward(false)
         .limit(1)
+        .set_return_consumed_capacity(return_consumed_capacity(meter))
         .send()
         .await
         .map_err(|e| {
             MeshqlError::Storage(format!("query {table} pk={id}: {}", describe_sdk_error(&e)))
         })?;
+
+    if let Some(m) = meter {
+        m.record(Op::Query, out.consumed_capacity());
+    }
 
     match out.items().first() {
         None => Ok(None),
@@ -409,7 +420,29 @@ pub async fn query_latest(
 /// Visibility is not applied here either, for the same reason as
 /// [`query_latest`] — and because a `limit` must never be able to consume an
 /// invisible row.
-pub async fn scan_latest(client: &Client, table: &str, cutoff_nanos: i64) -> Result<Vec<Envelope>> {
+///
+/// **The pages are chained.** Each request needs the previous response's
+/// `LastEvaluatedKey`, so the round trips are strictly serial and the wall clock
+/// is `⌈V·S / 1 MiB⌉ × RTT`, not `RTT`. That is the single biggest fact about
+/// this function's latency and it is measured in `docs/cost-model-dynamodb.md`.
+/// A parallel `Scan` (`Segment` / `TotalSegments`) is the mitigation, and it is
+/// free: capacity is charged on bytes examined and the segments partition the
+/// same bytes, so **RRU is invariant in the segment count** — measured at
+/// 122,254 RRU at one segment against 122,269 at sixty-four, a drift of 0.012%.
+///
+/// It does **not** divide the wall clock by the segment count. Measured from a
+/// 2 GB Lambda in-region at V = 1,000,000: 45.4 s at one segment, 17.3 s at
+/// four, and **no further improvement at sixteen or sixty-four**. The plateau is
+/// ~58 MB/s and it is a *consumer-side* ceiling — raising the Lambda to 10 GB
+/// moved it to 83 MB/s. Four segments is the whole win; more is waste.
+///
+/// See `docs/cost-model-dynamodb.md` §11.
+pub async fn scan_latest(
+    client: &Client,
+    table: &str,
+    cutoff_nanos: i64,
+    meter: Option<&CapacityMeter>,
+) -> Result<Vec<Envelope>> {
     let hi = upper_bound(cutoff_nanos);
     let mut latest: HashMap<String, (String, Envelope)> = HashMap::new();
     let mut start_key: Option<HashMap<String, AttributeValue>> = None;
@@ -420,7 +453,8 @@ pub async fn scan_latest(client: &Client, table: &str, cutoff_nanos: i64) -> Res
             .table_name(table)
             .filter_expression("#sk < :hi")
             .expression_attribute_names("#sk", SK)
-            .expression_attribute_values(":hi", AttributeValue::S(hi.clone()));
+            .expression_attribute_values(":hi", AttributeValue::S(hi.clone()))
+            .set_return_consumed_capacity(return_consumed_capacity(meter));
         if let Some(key) = start_key.take() {
             req = req.set_exclusive_start_key(Some(key));
         }
@@ -428,6 +462,10 @@ pub async fn scan_latest(client: &Client, table: &str, cutoff_nanos: i64) -> Res
         let out = req.send().await.map_err(|e| {
             MeshqlError::Storage(format!("scan {table}: {}", describe_sdk_error(&e)))
         })?;
+
+        if let Some(m) = meter {
+            m.record(Op::Scan, out.consumed_capacity());
+        }
 
         for item in out.items() {
             let sk = item_sort_key(item)?;

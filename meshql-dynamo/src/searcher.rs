@@ -42,12 +42,15 @@ use handlebars::Handlebars;
 use meshql_core::{Envelope, MeshqlError, Result, Searcher, Stash};
 use serde_json::{json, Value};
 
+use crate::metering::CapacityMeter;
 use crate::{matcher, store};
 
 pub struct DynamoSearcher {
     client: Client,
     table: String,
     handlebars: Handlebars<'static>,
+    /// `None` unless an operator asked for metering. See [`crate::metering`].
+    meter: Option<std::sync::Arc<CapacityMeter>>,
 }
 
 impl DynamoSearcher {
@@ -66,9 +69,29 @@ impl DynamoSearcher {
             client,
             table: table.to_string(),
             handlebars,
+            meter: None,
         };
         searcher.ensure_table().await?;
         Ok(searcher)
+    }
+
+    /// Account every request this searcher makes against `meter`.
+    ///
+    /// This is the one worth attaching. A search without an `"id"` key is a
+    /// paginated `Scan`, and the meter is what turns "a scan, presumably
+    /// expensive" into a number an operator can put in a budget.
+    pub fn with_meter(mut self, meter: std::sync::Arc<CapacityMeter>) -> Self {
+        self.meter = Some(meter);
+        self
+    }
+
+    /// The attached meter, if any.
+    pub fn meter(&self) -> Option<&std::sync::Arc<CapacityMeter>> {
+        self.meter.as_ref()
+    }
+
+    fn meter_ref(&self) -> Option<&CapacityMeter> {
+        self.meter.as_deref()
     }
 
     pub async fn ensure_table(&self) -> Result<()> {
@@ -110,7 +133,9 @@ impl DynamoSearcher {
 
         let candidates = match pushdown_id(&query) {
             Some(Pushdown::Id(id)) => {
-                match store::query_latest(&self.client, &self.table, &id, cutoff).await? {
+                match store::query_latest(&self.client, &self.table, &id, cutoff, self.meter_ref())
+                    .await?
+                {
                     Some(env) if !env.deleted => vec![env],
                     _ => Vec::new(),
                 }
@@ -118,7 +143,7 @@ impl DynamoSearcher {
             // An `"id"` condition whose value is not a string can never equal a
             // record's id, so there is nothing to fetch.
             Some(Pushdown::Impossible) => Vec::new(),
-            None => store::scan_latest(&self.client, &self.table, cutoff).await?,
+            None => store::scan_latest(&self.client, &self.table, cutoff, self.meter_ref()).await?,
         };
 
         Ok(select(candidates, &query, creds, limit))
