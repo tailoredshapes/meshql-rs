@@ -49,6 +49,10 @@ ksql = ["dep:meshql-ksql"]
 # Not in `default`: SAP is an ingress connector reaching out over the network to
 # a system the other three never touch, so a deployment opts into it.
 sap = ["dep:reqwest", "dep:url", "dep:base64", "dep:percent-encoding"]
+# Salesforce is an *ingress* connector to a SaaS, not a store this workspace
+# provisions, so it stays out of `default`: a build that never talks to
+# Salesforce should not carry an HTTP client it cannot use.
+salesforce = ["dep:reqwest"]
 
 [dev-dependencies]
 tempfile = "3"
@@ -64,8 +68,8 @@ tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
 meshql-postgres = { version = "0.1.0", path = "../meshql-postgres" }
+wiremock = "0.6"
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["mongo", "postgres"] }
 uuid = { workspace = true }
 # The SAP tests never touch a network: wiremock stands in for the OData service.
-wiremock = "0.6"
