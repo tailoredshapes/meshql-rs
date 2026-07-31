@@ -1,0 +1,57 @@
+[package]
+name = "merkql-connect"
+version = "0.1.0"
+edition = "2021"
+description = "merkql-connect — a standalone change-data-capture connector that replicates committed meshql envelope writes from SQLite, MongoDB or PostgreSQL onto a merkql topic"
+license = "MIT"
+repository = "https://github.com/tailoredshapes/meshql-rs"
+
+[[bin]]
+name = "merkql-connect"
+path = "src/main.rs"
+
+[dependencies]
+meshql-core = { version = "0.1.0", path = "../meshql-core" }
+merkql = { workspace = true }
+anyhow = "1"
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+futures = "0.3"
+toml = "0.8"
+fs2 = "0.4"
+
+# Backends. All on by default: a standalone connector binary is normally
+# built once and pointed at whichever store a deployment actually runs.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio"], optional = true }
+notify = { version = "6", optional = true }
+meshql-mongo = { version = "0.1.0", path = "../meshql-mongo", optional = true }
+mongodb = { version = "3", optional = true }
+bson = { version = "2", features = ["chrono-0_4"], optional = true }
+
+[features]
+default = ["sqlite", "mongo", "postgres"]
+sqlite = ["dep:sqlx", "sqlx/sqlite", "dep:notify"]
+postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/chrono"]
+mongo = ["dep:mongodb", "dep:bson", "dep:meshql-mongo"]
+
+[dev-dependencies]
+tempfile = "3"
+meshql-mongo = { version = "0.1.0", path = "../meshql-mongo" }
+mongodb = "3"
+bson = { version = "2", features = ["chrono-0_4"] }
+async-trait = { workspace = true }
+meshql-sqlite = { version = "0.1.0", path = "../meshql-sqlite" }
+meshql-restlette = { version = "0.1.0", path = "../meshql-restlette" }
+meshql-merkql = { version = "0.1.0", path = "../meshql-merkql" }
+axum = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
+meshql-postgres = { version = "0.1.0", path = "../meshql-postgres" }
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["mongo", "postgres"] }
+uuid = { workspace = true }

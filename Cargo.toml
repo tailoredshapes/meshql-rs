@@ -25,6 +25,7 @@ members = [
     "examples/egg-economy-lambda",
     "examples/egg-economy-ksql",
     "examples/farm-azure",
+    "merkql-connect",
 ]
 resolver = "2"
 
