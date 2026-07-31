@@ -24,19 +24,29 @@
 //! *strict* upper bound on "nanos <= cutoff". See
 //! `tests::hash_separator_makes_the_upper_bound_exact` — that claim is right by
 //! accident unless it is pinned.
+//!
+//! # Indexed fields
+//!
+//! An [`IndexPlan`] adds one promoted attribute per indexed payload field
+//! (`ix_{field}`) and one `KEYS_ONLY` global secondary index over it, hash key
+//! `ix_{field}` and range key `sk`. The base table shape is unchanged, so a
+//! table with indexes and one without hold byte-identical envelopes and
+//! [`item_to_envelope`] does not know the difference. See [`crate::index`].
 
 use aws_sdk_dynamodb::error::SdkError;
 use aws_sdk_dynamodb::types::{
-    AttributeDefinition, AttributeValue, BillingMode, KeySchemaElement, KeyType,
-    ScalarAttributeType, TableStatus,
+    AttributeDefinition, AttributeValue, BillingMode, CreateGlobalSecondaryIndexAction,
+    GlobalSecondaryIndex, GlobalSecondaryIndexUpdate, IndexStatus, KeySchemaElement, KeyType,
+    Projection, ProjectionType, ScalarAttributeType, TableDescription, TableStatus,
 };
 use aws_sdk_dynamodb::Client;
 use chrono::{DateTime, Utc};
 use meshql_core::{Envelope, MeshqlError, Result};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use crate::convert;
+use crate::index::{self, IndexPlan};
 use crate::metering::{return_consumed_capacity, CapacityMeter, Op};
 
 pub const PK: &str = "pk";
@@ -138,6 +148,19 @@ pub fn envelope_to_item(env: &Envelope) -> HashMap<String, AttributeValue> {
         PAYLOAD.to_string(),
         AttributeValue::M(convert::object_to_map(&env.payload)),
     );
+    item
+}
+
+/// [`envelope_to_item`] plus the promoted attributes `plan` calls for.
+///
+/// The promotion is *additive*: the envelope attributes are untouched, so a
+/// table that gains an index still reads back exactly the envelopes it held.
+pub fn envelope_to_indexed_item(
+    env: &Envelope,
+    plan: &IndexPlan,
+) -> HashMap<String, AttributeValue> {
+    let mut item = envelope_to_item(env);
+    plan.promote(&env.payload, &mut item);
     item
 }
 
@@ -256,38 +279,217 @@ pub async fn make_client(endpoint: Option<&str>) -> Client {
 /// Idempotent and safe to call concurrently: a losing racer gets
 /// `ResourceInUseException` from `CreateTable` and falls through to the same
 /// wait as the winner.
+///
+/// Equivalent to [`ensure_indexed_table`] with an empty plan, which means it
+/// also **refuses a table that carries indexes this handle does not maintain**.
+/// That is not pedantry: a repository with no plan writes no promoted
+/// attributes, so pairing one with an indexed searcher over the same table
+/// yields searches that silently return nothing. Failing to open is the only
+/// outcome that cannot be mistaken for working.
 pub async fn ensure_table(client: &Client, table: &str) -> Result<()> {
-    if table_status(client, table).await? == Some(TableStatus::Active) {
+    ensure_indexed_table(client, table, &IndexPlan::default()).await
+}
+
+/// Create or verify the table *and* the global secondary indexes `plan` calls
+/// for, then wait until every one of them reports `ACTIVE`.
+///
+/// - **Absent table** → `CreateTable` with the indexes in place.
+/// - **Present, indexes match** → nothing to do; this is every restart after
+///   the first.
+/// - **Present, an index is missing and the table is empty** → `UpdateTable`
+///   adds it. An empty table has nothing to be wrong about.
+/// - **Present, an index is missing and the table holds data** → **error**.
+///   Promotion happens on write, so items written before the field was indexed
+///   carry no `ix_{field}` and are invisible to the new index. Creating it
+///   anyway would produce a search that silently omits every historical record.
+///   [`migrate_indexes`] is the fix, and the error says so.
+/// - **Present, and it carries a `meshql_ix_*` index the plan does not have** →
+///   **error**. Either this handle is not promoting a field something else
+///   indexes, or the configuration shrank and left an index behind that is now
+///   costing a write unit per write for nothing.
+///
+/// Indexes this crate does not name (no `meshql_ix_` prefix) are ignored
+/// entirely — a client's own index is their business.
+pub async fn ensure_indexed_table(client: &Client, table: &str, plan: &IndexPlan) -> Result<()> {
+    let described = match wait_for_active(client, table).await? {
+        Some(description) => description,
+        None => {
+            create_table(client, table, plan).await?;
+            wait_for_active(client, table).await?.ok_or_else(|| {
+                MeshqlError::Storage(format!("table {table} vanished immediately after creation"))
+            })?
+        }
+    };
+
+    let present = managed_indexes(&described);
+    let wanted: BTreeSet<String> = plan.fields().map(String::from).collect();
+
+    let unexpected: Vec<&String> = present.difference(&wanted).collect();
+    if !unexpected.is_empty() {
+        return Err(MeshqlError::Storage(format!(
+            "table {table} carries global secondary index(es) on {:?} that this handle does \
+             not maintain (its plan indexes: {}). A repository that does not promote a field \
+             another handle indexes writes versions the index cannot see, so the searches \
+             that use it return silently incomplete results. Derive both from the same \
+             RootConfig — see DynamoCollection — or drop the stale index.",
+            unexpected,
+            plan.describe(),
+        )));
+    }
+
+    let missing: Vec<&String> = wanted.difference(&present).collect();
+    if missing.is_empty() {
         return Ok(());
     }
 
-    let key = |name: &str, kind: KeyType| {
-        KeySchemaElement::builder()
-            .attribute_name(name)
-            .key_type(kind)
-            .build()
-            .map_err(|e| MeshqlError::Storage(e.to_string()))
-    };
-    let attr = |name: &str| {
-        AttributeDefinition::builder()
-            .attribute_name(name)
-            .attribute_type(ScalarAttributeType::S)
-            .build()
-            .map_err(|e| MeshqlError::Storage(e.to_string()))
-    };
+    if table_has_items(client, table).await? {
+        return Err(MeshqlError::Storage(format!(
+            "table {table} needs new index(es) on {missing:?} and already holds data. Items \
+             written before a field was indexed carry no ix_ attribute, so the new index \
+             cannot see them and every search on that field would silently omit its \
+             history. Run meshql_dynamo::migrate_indexes(&client, {table:?}, &plan) once — \
+             it rewrites the promoted attributes and then creates the indexes — and start \
+             again."
+        )));
+    }
 
-    let created = client
+    // `add_index` waits for each build to finish, which is what makes a
+    // multi-field plan legal: DynamoDB allows only one online index build per
+    // table at a time.
+    for field in missing {
+        add_index(client, table, field).await?;
+    }
+    Ok(())
+}
+
+/// Bring an existing, populated table up to `plan`: promote the attributes on
+/// every stored item, then create the missing indexes.
+///
+/// Run once, out of band, when a deployment starts filtering on a field it did
+/// not filter on before. It is `O(V)`: one full `Scan` plus one `PutItem` per
+/// stored version, which at the on-demand rate is about **$0.63 per million
+/// versions** and is paid once, not per query.
+///
+/// **The order matters.** Attributes are promoted *before* the index exists, so
+/// the index is built by DynamoDB's own backfill over an already-complete table
+/// and there is never an interval in which the index exists and is missing
+/// history. A concurrent process starting mid-migration sees no index and
+/// refuses to start (see [`ensure_indexed_table`]) rather than serving from a
+/// half-built one.
+///
+/// Rewrites are `PutItem` over the *same* `(pk, sk)`, so they overwrite a
+/// version in place. No new version is created and no history is disturbed.
+///
+/// Returns the number of items rewritten.
+pub async fn migrate_indexes(client: &Client, table: &str, plan: &IndexPlan) -> Result<u64> {
+    wait_for_active(client, table).await?.ok_or_else(|| {
+        MeshqlError::Storage(format!("cannot migrate {table}: it does not exist"))
+    })?;
+
+    let mut rewritten = 0u64;
+    let mut start_key: Option<HashMap<String, AttributeValue>> = None;
+    loop {
+        let mut req = client.scan().table_name(table);
+        if let Some(key) = start_key.take() {
+            req = req.set_exclusive_start_key(Some(key));
+        }
+        let out = req.send().await.map_err(|e| {
+            MeshqlError::Storage(format!("scan {table}: {}", describe_sdk_error(&e)))
+        })?;
+
+        for item in out.items() {
+            let env = item_to_envelope(item)?;
+            let mut promoted = item.clone();
+            plan.promote(&env.payload, &mut promoted);
+            if promoted == *item {
+                continue; // already promoted; nothing to write
+            }
+            client
+                .put_item()
+                .table_name(table)
+                .set_item(Some(promoted))
+                .send()
+                .await
+                .map_err(|e| {
+                    MeshqlError::Storage(format!(
+                        "put_item {table} during migration: {}",
+                        describe_sdk_error(&e)
+                    ))
+                })?;
+            rewritten += 1;
+        }
+
+        match out.last_evaluated_key() {
+            Some(key) if !key.is_empty() => start_key = Some(key.clone()),
+            _ => break,
+        }
+    }
+
+    let described = wait_for_active(client, table).await?.ok_or_else(|| {
+        MeshqlError::Storage(format!("cannot migrate {table}: it does not exist"))
+    })?;
+    let present = managed_indexes(&described);
+    for field in plan.fields() {
+        if !present.contains(field) {
+            add_index(client, table, field).await?;
+        }
+    }
+    Ok(rewritten)
+}
+
+fn key_schema(name: &str, kind: KeyType) -> Result<KeySchemaElement> {
+    KeySchemaElement::builder()
+        .attribute_name(name)
+        .key_type(kind)
+        .build()
+        .map_err(|e| MeshqlError::Storage(e.to_string()))
+}
+
+fn string_attribute(name: &str) -> Result<AttributeDefinition> {
+    AttributeDefinition::builder()
+        .attribute_name(name)
+        .attribute_type(ScalarAttributeType::S)
+        .build()
+        .map_err(|e| MeshqlError::Storage(e.to_string()))
+}
+
+/// Hash `ix_{field}`, range `sk`, projection `KEYS_ONLY`.
+///
+/// `sk` as the range key is what keeps a temporal `at:` cutoff a *key
+/// condition* on the index instead of a filter. `KEYS_ONLY` is right because
+/// the two-phase search reads every candidate from the base table anyway — a
+/// wider projection would be written on every write and read never.
+fn index_definition(field: &str) -> Result<GlobalSecondaryIndex> {
+    GlobalSecondaryIndex::builder()
+        .index_name(index::index_name(field))
+        .key_schema(key_schema(&index::attribute_name(field), KeyType::Hash)?)
+        .key_schema(key_schema(SK, KeyType::Range)?)
+        .projection(
+            Projection::builder()
+                .projection_type(ProjectionType::KeysOnly)
+                .build(),
+        )
+        .build()
+        .map_err(|e| MeshqlError::Storage(e.to_string()))
+}
+
+async fn create_table(client: &Client, table: &str, plan: &IndexPlan) -> Result<()> {
+    let mut req = client
         .create_table()
         .table_name(table)
         .billing_mode(BillingMode::PayPerRequest)
-        .key_schema(key(PK, KeyType::Hash)?)
-        .key_schema(key(SK, KeyType::Range)?)
-        .attribute_definitions(attr(PK)?)
-        .attribute_definitions(attr(SK)?)
-        .send()
-        .await;
+        .key_schema(key_schema(PK, KeyType::Hash)?)
+        .key_schema(key_schema(SK, KeyType::Range)?)
+        .attribute_definitions(string_attribute(PK)?)
+        .attribute_definitions(string_attribute(SK)?);
 
-    if let Err(e) = created {
+    for field in plan.fields() {
+        req = req
+            .attribute_definitions(string_attribute(&index::attribute_name(field))?)
+            .global_secondary_indexes(index_definition(field)?);
+    }
+
+    if let Err(e) = req.send().await {
         let already_there = e
             .as_service_error()
             .map(|se| se.is_resource_in_use_exception())
@@ -299,38 +501,188 @@ pub async fn ensure_table(client: &Client, table: &str) -> Result<()> {
             )));
         }
     }
-
-    // Poll describe_table. DynamoDB Local goes ACTIVE immediately; real
-    // DynamoDB takes seconds.
-    for _ in 0..300 {
-        if table_status(client, table).await? == Some(TableStatus::Active) {
-            return Ok(());
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-
-    Err(MeshqlError::Storage(format!(
-        "table {table} did not become ACTIVE within 30s"
-    )))
+    Ok(())
 }
 
-async fn table_status(client: &Client, table: &str) -> Result<Option<TableStatus>> {
-    match client.describe_table().table_name(table).send().await {
-        Ok(out) => Ok(out.table().and_then(|t| t.table_status()).cloned()),
-        Err(e) => {
-            if e.as_service_error()
-                .map(|se| se.is_resource_not_found_exception())
-                .unwrap_or(false)
-            {
-                Ok(None)
-            } else {
-                Err(MeshqlError::Storage(format!(
-                    "describe_table {table}: {}",
-                    describe_sdk_error(&e)
-                )))
+/// How long to keep waiting for the control plane to have room for one more
+/// index build before giving up and saying so.
+const INDEX_BUILD_CAPACITY_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Add one index to a live table, **and wait until it is usable**.
+///
+/// # The wait belongs here, not in the caller
+///
+/// DynamoDB permits only **one** online index build per table at a time, so a
+/// plan adding two fields must let the first finish before asking for the
+/// second. That was documented on this function and then not honoured by
+/// [`ensure_indexed_table`], which fired both `UpdateTable`s back to back;
+/// [`migrate_indexes`] did honour it. An invariant that holds at one call site
+/// and not another is not an invariant, so the wait now lives inside the
+/// operation it constrains and a third caller cannot forget it.
+///
+/// It showed up as a *flaky test*, which is the expensive way to find it: it
+/// only fails when the first build has not finished by the time the second
+/// request lands, so it passes on an idle machine and fails under load.
+/// Reproduced at **12 failures in 90 attempts** with six concurrent openers;
+/// zero after this change.
+///
+/// # `LimitExceededException` is backpressure, not failure
+///
+/// There is a second, *account-wide* limit — at most five tables may be
+/// building indexes at once — and unlike the per-table one it cannot be
+/// serialised away, because other processes in the same account contribute to
+/// it. It is not observable except by asking: the attempt *is* the check. So
+/// this waits and asks again, which is the documented handling (the SDK itself
+/// marks the response retryable) and is the same shape as `create_table`
+/// already tolerating `ResourceInUseException` from a concurrent creator.
+///
+/// This is deliberately **not** a general retry. Exactly one error code is
+/// treated as "ask later"; every other failure propagates on the first
+/// attempt, and running out of patience is a distinct error that names the
+/// limit rather than a generic timeout. A retry loop that swallowed anything
+/// else would hide precisely the provisioning bugs this module exists to
+/// surface.
+///
+/// Transient 5xx — `InternalFailure` and friends — are **not** handled here on
+/// purpose. The SDK's own retry policy owns that layer and already retries
+/// them; duplicating it would mean two backoffs stacked on one request, and
+/// widening this loop to "anything the SDK calls retryable" is how a targeted
+/// wait becomes a retry-everything that hides real errors.
+async fn add_index(client: &Client, table: &str, field: &str) -> Result<()> {
+    let deadline = std::time::Instant::now() + INDEX_BUILD_CAPACITY_TIMEOUT;
+
+    loop {
+        let outcome = client
+            .update_table()
+            .table_name(table)
+            .attribute_definitions(string_attribute(&index::attribute_name(field))?)
+            .global_secondary_index_updates(
+                GlobalSecondaryIndexUpdate::builder()
+                    .create(
+                        CreateGlobalSecondaryIndexAction::builder()
+                            .index_name(index::index_name(field))
+                            .key_schema(key_schema(&index::attribute_name(field), KeyType::Hash)?)
+                            .key_schema(key_schema(SK, KeyType::Range)?)
+                            .projection(
+                                Projection::builder()
+                                    .projection_type(ProjectionType::KeysOnly)
+                                    .build(),
+                            )
+                            .build()
+                            .map_err(|e| MeshqlError::Storage(e.to_string()))?,
+                    )
+                    .build(),
+            )
+            .send()
+            .await;
+
+        match outcome {
+            Ok(_) => break,
+            Err(e) => {
+                let at_capacity = e
+                    .as_service_error()
+                    .map(|se| se.is_limit_exceeded_exception())
+                    .unwrap_or(false);
+                if !at_capacity {
+                    return Err(MeshqlError::Storage(format!(
+                        "update_table {table}: adding index on {field:?}: {}",
+                        describe_sdk_error(&e)
+                    )));
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(MeshqlError::Storage(format!(
+                        "update_table {table}: adding index on {field:?}: DynamoDB reported \
+                         no capacity for another index build for {}s. At most one index per \
+                         table and five tables per account may build at once; something else \
+                         is holding that budget. Detail: {}",
+                        INDEX_BUILD_CAPACITY_TIMEOUT.as_secs(),
+                        describe_sdk_error(&e)
+                    )));
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
             }
         }
     }
+
+    // The index is `CREATING` until DynamoDB has backfilled it. Returning here
+    // would let the caller add the next one — which is the per-table limit
+    // above — and would let a searcher query an index that is not yet complete.
+    wait_for_active(client, table).await?;
+    Ok(())
+}
+
+/// The payload fields this crate's indexes on `description` cover. Indexes
+/// without the [`index::INDEX_PREFIX`] belong to someone else and are ignored.
+fn managed_indexes(description: &TableDescription) -> BTreeSet<String> {
+    description
+        .global_secondary_indexes()
+        .iter()
+        .filter_map(|gsi| gsi.index_name())
+        .filter_map(index::field_of_index)
+        .map(String::from)
+        .collect()
+}
+
+/// Is there at least one item? One `Scan` with `Limit(1)` — half a read unit,
+/// regardless of how large the table is.
+async fn table_has_items(client: &Client, table: &str) -> Result<bool> {
+    let out = client
+        .scan()
+        .table_name(table)
+        .limit(1)
+        .send()
+        .await
+        .map_err(|e| {
+            MeshqlError::Storage(format!(
+                "scan {table} to check for data: {}",
+                describe_sdk_error(&e)
+            ))
+        })?;
+    Ok(!out.items().is_empty())
+}
+
+/// Poll until the table *and every one of its indexes* is `ACTIVE`, returning
+/// the final description — or `None` if the table does not exist.
+///
+/// Indexes are polled as well as the table because a table can report `ACTIVE`
+/// while a `CREATING` index is still backfilling, and querying an index in that
+/// state is a `ValidationException` at best and an incomplete answer at worst.
+async fn wait_for_active(client: &Client, table: &str) -> Result<Option<TableDescription>> {
+    // Real DynamoDB takes seconds to create a table and minutes to backfill a
+    // large index; DynamoDB Local is immediate.
+    for _ in 0..1200 {
+        let description = match client.describe_table().table_name(table).send().await {
+            Ok(out) => out.table().cloned(),
+            Err(e) => {
+                if e.as_service_error()
+                    .map(|se| se.is_resource_not_found_exception())
+                    .unwrap_or(false)
+                {
+                    return Ok(None);
+                }
+                return Err(MeshqlError::Storage(format!(
+                    "describe_table {table}: {}",
+                    describe_sdk_error(&e)
+                )));
+            }
+        };
+        let Some(description) = description else {
+            return Ok(None);
+        };
+        let table_active = description.table_status() == Some(&TableStatus::Active);
+        let indexes_active = description
+            .global_secondary_indexes()
+            .iter()
+            .all(|gsi| gsi.index_status() == Some(&IndexStatus::Active));
+        if table_active && indexes_active {
+            return Ok(Some(description));
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    Err(MeshqlError::Storage(format!(
+        "table {table} and its indexes did not all become ACTIVE within 10 minutes"
+    )))
 }
 
 /// Drop the table. Not part of the `Repository` contract — exposed for test
@@ -443,44 +795,100 @@ pub async fn scan_latest(
     cutoff_nanos: i64,
     meter: Option<&CapacityMeter>,
 ) -> Result<Vec<Envelope>> {
+    scan_latest_segmented(client, table, cutoff_nanos, meter, 1).await
+}
+
+/// [`scan_latest`], with the scan split across `segments` concurrent workers.
+///
+/// `segments = 1` is the serial scan and is what [`scan_latest`] calls.
+///
+/// **The capacity is the same and the wall clock is not.** DynamoDB charges on
+/// bytes examined and `Segment`/`TotalSegments` partitions the same bytes, so
+/// RRU is invariant in the segment count — measured at 122,254.5 RRU on one
+/// segment against 122,269.0 on sixty-four at V = 1,000,000, a drift of 0.012%.
+///
+/// The obvious objection is that a *small* table should behave differently,
+/// because each segment's final page rounds up to its own 4 KB boundary and
+/// there the rounding is the whole bill. **Measured, it does not, at four
+/// segments**: a three-item table meters 2.0 RRU serially and 2.0 RRU at four,
+/// because a serial `Scan` is already charged per partition and four segments
+/// merely re-partition a rounding that was being paid anyway. Sixteen segments
+/// on the same table costs 9.5 RRU, so the penalty is real above the table's
+/// own partition count.
+///
+/// The speedup is **not** the segment count: 45.4 s → 17.3 s (2.63×) at four
+/// segments and no further improvement at sixteen or sixty-four, against a
+/// consumer-side ceiling of ~58 MB/s. Four segments is the whole win.
+///
+/// The default is one segment regardless, because on a table small enough to
+/// fit in a page four round trips buy nothing, and above that a deployment
+/// should be choosing this deliberately. **An export can afford four segments;
+/// a request path should not be scanning at all.** See
+/// `docs/cost-model-dynamodb.md` §10(b) and §11.
+pub async fn scan_latest_segmented(
+    client: &Client,
+    table: &str,
+    cutoff_nanos: i64,
+    meter: Option<&CapacityMeter>,
+    segments: i32,
+) -> Result<Vec<Envelope>> {
+    let segments = segments.max(1);
     let hi = upper_bound(cutoff_nanos);
-    let mut latest: HashMap<String, (String, Envelope)> = HashMap::new();
-    let mut start_key: Option<HashMap<String, AttributeValue>> = None;
 
-    loop {
-        let mut req = client
-            .scan()
-            .table_name(table)
-            .filter_expression("#sk < :hi")
-            .expression_attribute_names("#sk", SK)
-            .expression_attribute_values(":hi", AttributeValue::S(hi.clone()))
-            .set_return_consumed_capacity(return_consumed_capacity(meter));
-        if let Some(key) = start_key.take() {
-            req = req.set_exclusive_start_key(Some(key));
-        }
+    let walk = |segment: i32| {
+        let hi = hi.clone();
+        async move {
+            let mut found: Vec<(String, Envelope)> = Vec::new();
+            let mut start_key: Option<HashMap<String, AttributeValue>> = None;
+            loop {
+                let mut req = client
+                    .scan()
+                    .table_name(table)
+                    .filter_expression("#sk < :hi")
+                    .expression_attribute_names("#sk", SK)
+                    .expression_attribute_values(":hi", AttributeValue::S(hi.clone()))
+                    .set_return_consumed_capacity(return_consumed_capacity(meter));
+                if segments > 1 {
+                    req = req.segment(segment).total_segments(segments);
+                }
+                if let Some(key) = start_key.take() {
+                    req = req.set_exclusive_start_key(Some(key));
+                }
 
-        let out = req.send().await.map_err(|e| {
-            MeshqlError::Storage(format!("scan {table}: {}", describe_sdk_error(&e)))
-        })?;
+                let out = req.send().await.map_err(|e| {
+                    MeshqlError::Storage(format!("scan {table}: {}", describe_sdk_error(&e)))
+                })?;
 
-        if let Some(m) = meter {
-            m.record(Op::Scan, out.consumed_capacity());
-        }
+                if let Some(m) = meter {
+                    m.record(Op::Scan, out.consumed_capacity());
+                }
 
-        for item in out.items() {
-            let sk = item_sort_key(item)?;
-            let env = item_to_envelope(item)?;
-            match latest.get(&env.id) {
-                Some((seen, _)) if *seen >= sk => {}
-                _ => {
-                    latest.insert(env.id.clone(), (sk, env));
+                for item in out.items() {
+                    found.push((item_sort_key(item)?, item_to_envelope(item)?));
+                }
+
+                match out.last_evaluated_key() {
+                    Some(key) if !key.is_empty() => start_key = Some(key.clone()),
+                    _ => break,
                 }
             }
+            Ok::<_, MeshqlError>(found)
         }
+    };
 
-        match out.last_evaluated_key() {
-            Some(key) if !key.is_empty() => start_key = Some(key.clone()),
-            _ => break,
+    // Merged after every segment has finished, not within one: a segment holds
+    // the versions whose *key* hashes into its slice, and an id's versions all
+    // share a hash key, so they do land together — but relying on that would be
+    // depending on an internal of the partitioning. The merge is global.
+    let per_segment = futures::future::try_join_all((0..segments).map(walk)).await?;
+
+    let mut latest: HashMap<String, (String, Envelope)> = HashMap::new();
+    for (sk, env) in per_segment.into_iter().flatten() {
+        match latest.get(&env.id) {
+            Some((seen, _)) if *seen >= sk => {}
+            _ => {
+                latest.insert(env.id.clone(), (sk, env));
+            }
         }
     }
 
@@ -494,6 +902,108 @@ pub async fn scan_latest(
     // apply a limit to it.
     resolved.sort_by(meshql_core::envelope_order);
     Ok(resolved)
+}
+
+/// Phase 1 of an indexed search: the ids of every **version** whose promoted
+/// `ix_{field}` equals `value` at-or-before the cutoff.
+///
+/// This is a candidate set and nothing more. A version in the index is not a
+/// record whose *resolved* version matches — an id that used to hold this value
+/// stays in this partition of the index forever — so every id it returns must
+/// be re-resolved and re-matched. See [`crate::searcher`] for why that is a
+/// soundness requirement rather than a thoroughness habit.
+///
+/// The cutoff is a key condition on the index's own range key, not a filter, so
+/// versions after `at:` are not read and not charged.
+pub async fn query_index_candidates(
+    client: &Client,
+    table: &str,
+    field: &str,
+    value: &str,
+    cutoff_nanos: i64,
+    meter: Option<&CapacityMeter>,
+) -> Result<HashSet<String>> {
+    let hi = upper_bound(cutoff_nanos);
+    let mut ids = HashSet::new();
+    let mut start_key: Option<HashMap<String, AttributeValue>> = None;
+
+    loop {
+        let mut req = client
+            .query()
+            .table_name(table)
+            .index_name(index::index_name(field))
+            .key_condition_expression("#ix = :v AND #sk < :hi")
+            .expression_attribute_names("#ix", index::attribute_name(field))
+            .expression_attribute_names("#sk", SK)
+            .expression_attribute_values(":v", AttributeValue::S(value.to_string()))
+            .expression_attribute_values(":hi", AttributeValue::S(hi.clone()))
+            .set_return_consumed_capacity(return_consumed_capacity(meter));
+        if let Some(key) = start_key.take() {
+            req = req.set_exclusive_start_key(Some(key));
+        }
+
+        let out = req.send().await.map_err(|e| {
+            MeshqlError::Storage(format!(
+                "query {table} index on {field:?}: {}",
+                describe_sdk_error(&e)
+            ))
+        })?;
+
+        if let Some(m) = meter {
+            m.record(Op::Query, out.consumed_capacity());
+        }
+
+        for item in out.items() {
+            if let Some(AttributeValue::S(id)) = item.get(PK) {
+                ids.insert(id.clone());
+            }
+        }
+
+        match out.last_evaluated_key() {
+            Some(key) if !key.is_empty() => start_key = Some(key.clone()),
+            _ => break,
+        }
+    }
+
+    Ok(ids)
+}
+
+/// How many phase-2 resolutions are in flight at once.
+///
+/// Not unbounded. `read_many` at k = 100 has a p50 of 22 ms and a p99 of
+/// **281 ms** at V = 1M — a hundred concurrent `Query` calls saturate the
+/// connection pool and the fan-out is bounded by the slowest of them, not by
+/// one round trip (`docs/cost-model-dynamodb.md` §11). A candidate set is not
+/// bounded by anything the caller chose, so it needs a ceiling that the caller
+/// did not have to think about.
+const RESOLVE_CONCURRENCY: usize = 32;
+
+/// Phase 2 of an indexed search: resolve each candidate id to its latest
+/// version at-or-before the cutoff, and drop the tombstones.
+///
+/// Exactly [`query_latest`] per distinct id — half a read unit each — run with
+/// bounded concurrency. The result is unordered; the caller sorts, because the
+/// caller is also the one applying the predicate and the token filter, and the
+/// canonical order has to be established after both.
+pub async fn resolve_candidates(
+    client: &Client,
+    table: &str,
+    ids: impl IntoIterator<Item = String>,
+    cutoff_nanos: i64,
+    meter: Option<&CapacityMeter>,
+) -> Result<Vec<Envelope>> {
+    use futures::stream::{self, StreamExt, TryStreamExt};
+
+    let reads = ids.into_iter().map(|id| async move {
+        let resolved = query_latest(client, table, &id, cutoff_nanos, meter).await?;
+        Ok::<Option<Envelope>, MeshqlError>(resolved.filter(|env| !env.deleted))
+    });
+
+    let resolved: Vec<Option<Envelope>> = stream::iter(reads)
+        .buffer_unordered(RESOLVE_CONCURRENCY)
+        .try_collect()
+        .await?;
+    Ok(resolved.into_iter().flatten().collect())
 }
 
 #[cfg(test)]

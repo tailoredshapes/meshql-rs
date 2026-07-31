@@ -862,12 +862,24 @@ async fn main() {
     // destroyed live data. That collision actually happened during this suite's
     // development.
     let mine = CREATED_TABLES.lock().unwrap().clone();
-    let present: Vec<String> = client
-        .list_tables()
-        .send()
-        .await
-        .map(|o| o.table_names().to_vec())
-        .unwrap_or_default();
+
+    // `DeleteTable` returns while the table is still `DELETING`, and a
+    // `DELETING` table is still listed. Without this wait the check verifies
+    // that teardown was *requested*, not that it happened — and it reported a
+    // false leftover for exactly that reason.
+    let mut present: Vec<String> = Vec::new();
+    for _ in 0..120 {
+        present = client
+            .list_tables()
+            .send()
+            .await
+            .map(|o| o.table_names().to_vec())
+            .unwrap_or_default();
+        if !present.iter().any(|t| mine.contains(t)) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
     let others: Vec<&String> = present
         .iter()
         .filter(|t| t.starts_with("dynamocost-") && !mine.contains(t))
