@@ -452,7 +452,7 @@ pub fn attribute_size_bytes(value: &AttributeValue) -> u64 {
 /// a round instant, so its nanosecond timestamp ended in zeroes — metered **2**
 /// write units, not 1. Removing the trailing-zero trim brings the same item to
 /// 1030 bytes, which is consistent. See
-/// `tests/gsi_cost.rs::write_amplification_is_one_unit_per_index`.
+/// `tests/index_cost.rs::write_amplification_and_the_sparse_case`.
 ///
 /// Not trimming is also the right default for a *cost* model independently of
 /// which reading of the documentation is correct: it can over-predict a bill by

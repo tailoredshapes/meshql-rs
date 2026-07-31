@@ -107,16 +107,26 @@ async fn edge_identity(mut req: axum::extract::Request, next: Next) -> axum::res
     next.run(req).await
 }
 
+/// The queries the certified server exposes.
+///
+/// Public so that an adapter which derives physical structures from query
+/// configuration — `meshql-dynamo` derives its secondary indexes — can certify
+/// against *this* config rather than a transcription of it. A transcription is
+/// exactly the drift such a derivation exists to remove.
+pub fn root_config() -> RootConfig {
+    RootConfig::builder()
+        .singleton("getById", r#"{"id": "{{id}}"}"#)
+        .vector("getByKind", r#"{"payload.kind": "{{kind}}"}"#)
+        .build()
+}
+
 /// Stand up the certified server on an ephemeral port and return its base URL.
 ///
 /// One entity ("widget"), one restlette, one graphlette — the smallest surface
 /// that still exercises the whole identity path: request header → `Auth` →
 /// envelope tokens → storage → searcher → response.
 pub async fn start_server(repo: Arc<dyn Repository>, searcher: Arc<dyn Searcher>) -> String {
-    let root_config = RootConfig::builder()
-        .singleton("getById", r#"{"id": "{{id}}"}"#)
-        .vector("getByKind", r#"{"payload.kind": "{{kind}}"}"#)
-        .build();
+    let root_config = root_config();
 
     let server_config = ServerConfig {
         port: 0,

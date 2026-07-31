@@ -1,11 +1,28 @@
 //! `Repository` over DynamoDB.
+//!
+//! # The write side of an index
+//!
+//! DynamoDB cannot index a nested attribute, so an indexed payload field is
+//! *promoted* to a top-level `ix_{field}` on the way into `PutItem`. That is
+//! the repository's only index-related job, and it is not optional: a
+//! repository that does not promote a field its searcher indexes writes
+//! versions the index cannot see, and the searches that use it return silently
+//! incomplete results — which is worse than the scan indexing replaced, because
+//! a scan is merely slow.
+//!
+//! Two things stop that being possible by accident.
+//! [`crate::DynamoCollection`] builds the repository and the searcher from one
+//! `RootConfig`, so they cannot hold different plans; and opening a table whose
+//! `meshql_ix_*` indexes disagree with this handle's plan is refused outright
+//! ([`store::ensure_indexed_table`]).
 
 use async_trait::async_trait;
 use aws_sdk_dynamodb::Client;
 use chrono::{DateTime, Utc};
-use meshql_core::{envelope_visible_to, Envelope, MeshqlError, Repository, Result};
+use meshql_core::{envelope_visible_to, Envelope, MeshqlError, Repository, Result, RootConfig};
 use std::collections::HashMap;
 
+use crate::index::IndexPlan;
 use crate::metering::{return_consumed_capacity, CapacityMeter, Op};
 use crate::store;
 
@@ -14,13 +31,18 @@ pub struct DynamoRepository {
     table: String,
     /// `None` unless an operator asked for metering. See [`crate::metering`].
     meter: Option<std::sync::Arc<CapacityMeter>>,
+    /// The payload fields promoted on write. Empty means the table has no
+    /// indexes — and opening a table that *does* have them with an empty plan
+    /// is an error, not a silent under-write.
+    plan: IndexPlan,
 }
 
 impl DynamoRepository {
     /// `endpoint: None` → real AWS from the ambient config. `endpoint:
     /// Some(url)` → DynamoDB Local (see [`store::make_client`]).
     ///
-    /// Creates the table if it is absent and waits for `ACTIVE`.
+    /// Creates the table if it is absent and waits for `ACTIVE`. No indexes;
+    /// see [`Self::indexed`].
     pub async fn new(endpoint: Option<&str>, table: &str) -> Result<Self> {
         let client = store::make_client(endpoint).await;
         Self::new_with_client(client, table).await
@@ -28,13 +50,47 @@ impl DynamoRepository {
 
     /// Share one client (and one table) between a repository and a searcher.
     pub async fn new_with_client(client: Client, table: &str) -> Result<Self> {
+        Self::build(client, table, IndexPlan::default()).await
+    }
+
+    /// A repository that promotes whatever the searcher over the same `config`
+    /// will index.
+    ///
+    /// Prefer [`crate::DynamoCollection`], which builds both from one config
+    /// and makes disagreement unrepresentable rather than merely detectable.
+    pub async fn indexed(endpoint: Option<&str>, table: &str, config: &RootConfig) -> Result<Self> {
+        let client = store::make_client(endpoint).await;
+        Self::indexed_with_client(client, table, config).await
+    }
+
+    /// [`Self::indexed`], sharing a client.
+    pub async fn indexed_with_client(
+        client: Client,
+        table: &str,
+        config: &RootConfig,
+    ) -> Result<Self> {
+        Self::build(client, table, IndexPlan::derive(config)?).await
+    }
+
+    /// A repository over an explicit plan. Prefer [`Self::indexed`].
+    pub async fn with_plan(client: Client, table: &str, plan: IndexPlan) -> Result<Self> {
+        Self::build(client, table, plan).await
+    }
+
+    async fn build(client: Client, table: &str, plan: IndexPlan) -> Result<Self> {
         let repo = Self {
             client,
             table: table.to_string(),
             meter: None,
+            plan,
         };
         repo.ensure_table().await?;
         Ok(repo)
+    }
+
+    /// The payload fields this repository promotes on write.
+    pub fn plan(&self) -> &IndexPlan {
+        &self.plan
     }
 
     /// Account every request this repository makes against `meter`.
@@ -58,7 +114,7 @@ impl DynamoRepository {
     }
 
     pub async fn ensure_table(&self) -> Result<()> {
-        store::ensure_table(&self.client, &self.table).await
+        store::ensure_indexed_table(&self.client, &self.table, &self.plan).await
     }
 
     pub fn client(&self) -> &Client {
@@ -83,7 +139,7 @@ impl Repository for DynamoRepository {
             .client
             .put_item()
             .table_name(&self.table)
-            .set_item(Some(store::envelope_to_item(&env)))
+            .set_item(Some(store::envelope_to_indexed_item(&env, &self.plan)))
             .set_return_consumed_capacity(return_consumed_capacity(self.meter_ref()))
             .send()
             .await

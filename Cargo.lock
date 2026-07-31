@@ -3565,6 +3565,7 @@ dependencies = [
  "futures",
  "merkql 0.2.0 (git+https://github.com/tailoredshapes/merkql?tag=v0.2.0)",
  "meshql-core",
+ "meshql-ksql",
  "meshql-merkql",
  "meshql-mongo",
  "meshql-postgres",

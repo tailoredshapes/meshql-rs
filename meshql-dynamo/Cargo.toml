@@ -52,8 +52,8 @@ harness = false
 name = "capacity_cost"
 harness = false
 
-# A *design probe*, not a certification: measures what an indexed-payload-field
-# GSI would cost. Nothing it exercises is shipped. Same opt-in gate.
+# Real-AWS cost validation of the shipped derived-index path: write
+# amplification, the sparse case, the projection, and the FK lookup. Same opt-in gate.
 [[test]]
-name = "gsi_cost"
+name = "index_cost"
 harness = false

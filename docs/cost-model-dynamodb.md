@@ -21,13 +21,16 @@ it says so.
 **The one-paragraph version.** Reads by id are excellent and essentially free:
 one round trip and half a read unit, no matter how many versions the record has.
 Writes are one unit per kilobyte. The cost risk is entirely in *search*: a query
-template with no `"id"` key becomes a full table scan whose price is proportional
+template with no `"id"` key would be a full table scan whose price is proportional
 to the total number of versions in the table — and because meshql is append-only,
-that number only ever grows. Left alone, that is a cliff. It is also almost
-entirely avoidable, because meshql query templates are static configuration, so
-the fields you search on are known before the service starts and can be indexed.
-What cannot be indexed is `getAll` / `list`, and that is the one operation to
-design around.
+that number only ever grows. Left alone, that is a cliff.
+
+**It is no longer left alone.** meshql query templates are static configuration,
+so the adapter derives the index set from the same `RootConfig` that generates
+the queries, provisions it, and refuses to start if a configured template would
+need a scan. A foreign-key search measured at **6.0 read units** against the
+**122,254** its scan cost at a million versions. What still cannot be indexed is
+`getAll` / `list`, and that is the one operation left to design around.
 
 ---
 
@@ -80,8 +83,13 @@ number of distinct ids, `k` the number of ids in a batch.
 | `read(id, tokens, at)` | 1 × `Query` | 1 | **0.5 RRU** | exact |
 | `read_many(k ids)` | k × `Query`, concurrent | k (parallel) | **0.5k RRU** | exact |
 | `find` / `find_all`, template **has** `"id"` | 1 × `Query` | 1 | **0.5 RRU** | exact |
-| `find` / `find_all`, template has **no** `"id"` | `Scan`, paginated | `ceil(V·S / 1 MiB)`, **serial** | `V·S / 8192` RRU | ±3% |
-| `list(tokens)` | `Scan`, paginated | `ceil(V·S / 1 MiB)`, **serial** | `V·S / 8192` RRU | ±3% |
+| `find` / `find_all`, **indexed** payload field | 1 × index `Query` + `Query` per candidate | 1 + candidates (bounded concurrency) | `f·V·G/8192 + f·M/2` RRU | exact |
+| `find` / `find_all`, unindexed and no `"id"` | `Scan`, paginated | `ceil(V·S / 1 MiB)`, **serial** | `V·S / 8192` RRU | ±3% |
+| `list(tokens)` / `{}` | `Scan`, paginated | `ceil(V·S / 1 MiB)`, **serial** | `V·S / 8192` RRU | ±3% |
+
+The indexed row is the one that changed: with a plan attached there is no
+unindexed non-`id` search, because a template naming a field with no index is
+refused at startup rather than served by a scan.
 
 Things worth reading twice, all of them measured rather than reasoned:
 
@@ -240,14 +248,30 @@ camelCase variants), plus `name`, `zone`, `date`.
 
 Two consequences follow, and they are the heart of this document.
 
-**The index set is derivable, not a tuning exercise.** Because templates are
-static, walking the configured `RootConfig`s at startup yields the complete,
-closed set of fields any deployment will ever filter on. An index set derived from
-the same configuration that generates the queries cannot drift out of sync with
-them — a strictly stronger property than a hand-maintained list. It also means an
-adapter can **fail at startup** if a configured template names an unindexed field,
-rather than silently degrading to an O(V) scan. Silent fallback is how a
-deployment comes to believe it is indexed when it is not.
+**The index set is derivable, not a tuning exercise — and it is now derived.**
+Because templates are static, walking the configured `RootConfig`s at startup
+yields the complete, closed set of fields any deployment will ever filter on. An
+index set derived from the same configuration that generates the queries cannot
+drift out of sync with them — a strictly stronger property than a hand-maintained
+list. It also means the adapter can **fail at startup** if a configured template
+names an unindexed field, rather than silently degrading to an O(V) scan. Silent
+fallback is how a deployment comes to believe it is indexed when it is not.
+
+This is what `meshql_dynamo::IndexPlan` does, and a deployment declares nothing
+beyond the config it already has:
+
+```rust
+use meshql_dynamo::DynamoCollection;
+
+let coops = DynamoCollection::open(None, "coops", &coop_config).await?;
+```
+
+`coop_config` is the same object the graphlette gets. `DynamoCollection` builds
+the repository and the searcher from one derived plan, so the half that writes
+the promoted attributes and the half that reads the index cannot disagree —
+which is the failure worth engineering against, because a repository that does
+not promote makes every indexed search return *nothing*, silently. §7a is what
+happens when someone builds the halves separately anyway.
 
 **`getAll` is different in kind**, not merely in degree, and no index can fix it.
 That is §8.
@@ -256,10 +280,15 @@ That is §8.
 
 ## 6. Indexing a payload field: the two-phase query
 
-The design is a construction-time list of indexed payload fields — a *physical*
-hint that changes cost and not semantics. A named field is promoted to a
-top-level `ix_{field}` attribute on write, and gets a global secondary index with
-hash key `ix_{field}` and range key `sk`.
+**Shipped.** The indexed fields are *derived* from the deployment's own query
+templates (§5) rather than listed — a physical consequence of the configuration
+that changes cost and not semantics. Each derived field is promoted to a
+top-level `ix_{field}` attribute on write, and gets a `KEYS_ONLY` global
+secondary index with hash key `ix_{field}` and range key `sk`. Only **string**
+payload values are promoted, which is a soundness condition rather than a
+shortcut: the matcher compares JSON values, so `"42"` never equals `42`, so a
+record holding a number at an indexed path can never match a string predicate and
+its absence from the index is correct.
 
 A query then runs in **two phases**:
 
@@ -278,7 +307,7 @@ records whose **resolved** version matches: a record that used to be
 The tempting shortcut is an `ALL`-projection index, resolving latest-per-id
 *inside* the index results and re-checking the predicate there — cost `f × scan`,
 no per-id floor. **It is unsound**, and the probe in
-`meshql-dynamo/tests/gsi_cost.rs` demonstrates it against real data rather than
+`meshql-dynamo/tests/index_cost.rs` demonstrates it against real data rather than
 arguing it:
 
 ```
@@ -290,15 +319,29 @@ group within the index          "mover" resolves to v1
 re-check predicate on v1        kind = tool — matches → RETURNED  ✗
 ```
 
-Measured output: the index-only shortcut returned `{stayer, mover}`; the
-two-phase path returned `{stayer}`. `mover`'s actual resolved version is `v2`,
+Measured output, reproduced against the **shipped** searcher in
+`tests/index_cost.rs`: phase 1 alone offers `{mover, stayer}` and the shipped
+two-phase search returns `{stayer}`. `mover`'s actual resolved version is `v2`,
 whose kind is `widget`. The index **cannot see v2** — v2 lives in the `widget`
 partition of the index — so no amount of re-checking inside the result set can
 detect the error. This is the same class of bug that
-`test_searcher_auth_latest_version_controls_visibility` exists to catch.
+`test_searcher_auth_latest_version_controls_visibility` exists to catch, and
+`tests/searcher_cert.rs::the_index_cannot_resurrect_a_superseded_version` pins
+it on DynamoDB Local as part of the ordinary suite.
 
-Since a projected index buys nothing, **`KEYS_ONLY` is the right projection**: it
-is the cheapest to write and the cheapest to store.
+Since a projected index buys nothing, **`KEYS_ONLY` is the right projection**.
+Both halves of that were checked rather than assumed:
+
+- *Buys nothing:* `store::query_index_candidates` reads exactly one attribute
+  out of an index response — `pk`, the base table's hash key — which
+  `KEYS_ONLY` projects. Every candidate is re-read from the base table in phase
+  2 regardless. There is nothing a wider projection could supply.
+- *Costs more:* at 1 KiB items an `ALL` index and a `KEYS_ONLY` one both round
+  to the same kilobyte and cost identically, which is what the earlier
+  measurement found and why it must not be generalised. **At 3 KiB items,
+  measured: a `KEYS_ONLY` index entry costs 1 WRU and an `ALL` entry costs 4 —
+  a second full copy of the item, four times the index capacity**, plus the
+  storage forever.
 
 ### What it costs
 
@@ -379,26 +422,33 @@ items are what make phase 2 expensive.
 **Write amplification.** Every index is a second item written on every write,
 rounded up to *its own* kilobyte. Measured:
 
-| Table | Metered WRU for one <1 KiB write |
+Re-measured through the shipped `DynamoRepository`, so these are what a
+deployment is billed and not what a hand-built imitation was billed:
+
+| Plan | Metered WRU for one <1 KiB write |
 |---|---|
-| no index | **1** |
-| one `KEYS_ONLY` index | **2** |
-| two `KEYS_ONLY` indexes | **3** |
-| one `ALL` index | **2** |
-| index defined, but the field is **absent** from the item | **1** |
-| two indexes, only one field present | **2** |
+| no indexes | **1** |
+| one field | **2** |
+| two fields | **3** |
+| two fields, one **absent** from the payload | **2** |
+| two fields, **both absent** | **1** |
 
 So at 1 KiB envelopes **each index adds exactly 1 WRU per write — one index
 doubles your write bill, two treble it**. In money: **+$1.62/month per sustained
 write/sec per index**, the same unit as the entire base write cost.
 
-At 1 KiB an `ALL` projection costs the same WRU as `KEYS_ONLY` (both round to the
-same kilobyte) but far more storage, and §6 shows it buys nothing. Use
-`KEYS_ONLY`.
+**Sparse indexes are free — confirmed.** A version whose payload lacks the
+indexed field writes no index entry and pays no index capacity at all, and the
+both-absent row shows this is a genuine zero rather than a rounding artefact.
+**Optional fields are free to index**, which matters because a derived index set
+indexes every field any template mentions, including the ones most records do
+not carry.
 
-**Sparse indexes are free.** A version whose payload lacks the indexed field
-writes no index entry and pays no index capacity. Optional fields are free to
-index — measured above.
+At 1 KiB an `ALL` projection costs the same WRU as `KEYS_ONLY` — both round to
+the same kilobyte — and that coincidence is the whole reason the earlier
+measurement showed no difference. At 3 KiB items the `ALL` entry costs **4 WRU
+against `KEYS_ONLY`'s 1**. Use `KEYS_ONLY`; §6 shows a wider projection is never
+even read.
 
 **A trap worth naming.** Promoting a field to `ix_{field}` adds bytes to the
 *base* item. Measured: an envelope sitting at exactly 1024 bytes cost 1 WRU
@@ -424,9 +474,34 @@ above.
 rescues a wide deployment is one-table-per-collection: the ten indexed fields
 across `examples/*` are spread over thirteen entities, so a typical table needs
 one or two indexes, not ten. But a single wide projection entity could exceed 20,
-and an adapter deriving indexes from configuration should **fail at startup with
-a clear message naming the fields**, not discover it at `CreateTable` time or, worse,
-silently scan.
+so `IndexPlan::derive` **fails at startup with a message naming every field**
+rather than discovering it at `CreateTable` time or, worse, silently scanning.
+
+---
+
+## 7a. The four ways an indexed deployment can be wrong, and what stops each
+
+Every one of these produces *silence* if unguarded — a search that returns fewer
+records than exist, with no error — which is why each is a refusal to start
+rather than a warning. Each was verified by breaking it and watching a test go
+red; a guard that cannot fail is decoration.
+
+| What goes wrong | What stops it |
+|---|---|
+| A template names a field with no index | Refused at query time, naming the field, the table and the template. Never a scan. |
+| More than 20 derived indexes | `IndexPlan::derive` fails at startup, naming the fields. |
+| The repository does not promote what the searcher indexes | `DynamoCollection` builds both from one config; and opening a table whose `meshql_ix_*` indexes disagree with the handle's plan is refused. |
+| An index is added to a table that already holds data | Refused: promotion happens on write, so stored versions carry no `ix_` attribute and the new index cannot see them. `meshql_dynamo::migrate_indexes` rewrites the promoted attributes and *then* creates the indexes, so there is never an interval in which a half-built index is queryable. |
+
+The migration is `O(V)` — one `Scan` plus one `PutItem` per stored version,
+about **$0.63 per million versions** — and it is paid once per new index, not
+per query. Compare that to `O(V)` on *every* search, which is what §4 is about.
+
+A template whose keys are neither `id` nor `payload.…` is refused at startup
+too, but for a different reason: it matches nothing on *every* meshql backend
+(see the matcher), so it is a configuration bug rather than a cost problem. At
+runtime the same shape returns empty with no request at all, which is exactly
+what the scan would have returned, for nothing.
 
 ---
 
@@ -570,7 +645,7 @@ This is something **merk-aws cannot do**: nothing deletes sealed segments, so a
 merkql log grows without bound by construction. It is a real and specific
 advantage of the DynamoDB backend.
 
-### (b) Parallel `Scan` — latency only, no cost change, ~half a day
+### (b) Parallel `Scan` — latency only, no cost change — **shipped, opt-in**
 
 `scan_latest` chains `LastEvaluatedKey`, so its pages are strictly **serial**.
 DynamoDB's `Segment` / `TotalSegments` partitions a scan so `n` workers can walk
@@ -578,23 +653,41 @@ disjoint slices concurrently. Because capacity is charged on bytes examined and
 the segments partition the same bytes, **RRU is unchanged — measured invariant to
 0.012% across a 64× segment range.**
 
-But the speedup is **~2.6×, not `n`×** (§11). It plateaus at four segments against
-a consumer-side bandwidth/CPU ceiling, so it turns a 45-second scan at V=1M into a
-17-second one and no further. Take the 2.6×, use four segments, and do not expect
-it to rescue a large table — that is what §10(c) is for.
+The expected caveat was that a *small* table would behave differently, since each
+segment's final page rounds up to its own 4 KB boundary and there the rounding is
+the whole bill. **Measured, it does not, at four segments.** A three-item table
+meters 2.0 RRU serially and 2.0 RRU at four segments — a serial `Scan` is already
+charged per partition, so four segments merely re-partition a rounding that was
+being paid anyway. Sixteen segments on the same table costs 9.5 RRU, so the
+penalty is real, but it starts above the table's own partition count and not at
+four.
 
-### (c) Indexed payload fields + GSI — fixes both, ~a day
+The speedup is **~2.6×, not `n`×** (§11). It plateaus at four segments against a
+consumer-side bandwidth/CPU ceiling, so it turns a 45-second scan at V=1M into a
+17-second one and no further.
 
-§6 and §7. This is the one that removes `V` from the search term. Given that the
-index set is *derivable* from configuration rather than hand-maintained (§5), it
-is more mechanical than the "day to a day and a half" previously estimated —
-the field extraction is a walk over `RootConfig`, and the correctness argument is
-the two-phase shape, which is already understood. The bulk of the effort is a
-parameterised cert runner that runs the suites twice, once unindexed and once
-fully indexed, to prove the paths agree.
+`DynamoSearcher::with_scan_segments(4)` turns it on for the paths that remain
+scans. **The default is one**, and the reason is not cost: on a table small
+enough to fit in a page four round trips buy nothing, and above that the win
+belongs to an export choosing it deliberately rather than to every request. Do
+not expect it to rescue a large table — that is what §10(c) is for.
 
-Keep it two-phase (§6). Keep it equality-only. Keep it `KEYS_ONLY`. Fail at
-startup on an unindexed configured field, and on more than 20 indexes.
+### (c) Derived indexes + GSI — **built**; fixes both
+
+§5, §6, §7 and §7a. This is the one that removes `V` from the search term. The
+index set is derived from the deployment's own `RootConfig`, so a deployment
+declares nothing: `DynamoCollection::open(endpoint, table, &config)`.
+
+It is two-phase (§6), equality-only, `KEYS_ONLY`, and it fails at startup on an
+unindexed configured field and on more than 20 indexes (§7a).
+
+The certification suites run **twice**, once unindexed and once with the indexes
+derived from the templates those very suites use — repository, repository
+authorization, searcher and the end-to-end authorization feature. Indexing is a
+change to what a search *costs* and it has to be no change at all to what a
+search *means*; running the certs against one path only would certify half an
+adapter, and the half left out is the half where a superseded version can leak
+back into a result set.
 
 ---
 
@@ -688,6 +781,13 @@ upward drift is exactly explicable — more segments means more partial final pa
 each rounding up to its own 4 KB boundary, visible in the page count climbing
 956 → 986 while RRU barely moves.
 
+**And it holds further down than expected.** The natural objection is that a
+small table is all rounding, so the invariance should break there. Measured on a
+three-item table: **2.0 RRU serial, 2.0 RRU at four segments**, 9.5 at sixteen. A
+serial `Scan` is already charged per partition — 2.0 RRU for 600 bytes is four
+roundings, not one — so four segments re-partition a cost that was being paid
+anyway. The penalty begins above the table's own partition count.
+
 **Linear speedup: refuted.** The wall clock falls 2.6× from one segment to four
 and then stops dead; sixteen and sixty-four are no faster than four. The plateau
 sits at ~58 MB/s at both V=100k and V=1M, which is a **consumer-side** ceiling,
@@ -749,7 +849,7 @@ A multi-tenant SaaS dashboard whose landing view is "everything in my workspace"
 
 | Approach | Monthly | Note |
 |---|---|---|
-| Shipped adapter — `Scan` per request | **$101,250,000** | 6.25M RRU per request |
+| Unindexed — `Scan` per request | **$101,250,000** | 6.25M RRU per request |
 | Tenant-scoped GSI, two-phase | **$9,720** | ~600 RRU/request; requires an authorization assumption the adapter cannot verify |
 | Postgres on RDS + 300 GB gp3 storage | **≈ $200–400** | one indexed query; reads are free once the instance is bought |
 
@@ -952,22 +1052,48 @@ results.
 
 `meshql-dynamo/tests/capacity_cost.rs` — **66 checks, all passing**, real AWS,
 comparing predicted capacity to `ConsumedCapacity`.
-`meshql-dynamo/tests/gsi_cost.rs` — **22 checks, all passing**: the GSI design
-probe of §6 and §7, measuring a design that is **not shipped**.
+`meshql-dynamo/tests/index_cost.rs` — **29 checks, all passing**, real AWS: what
+the **shipped** derived-index path costs. It replaces the design probe that
+preceded it, which built its tables and ran its two-phase query by hand because
+the design was then a recommendation. A cost model measured against a
+hand-rolled imitation of the code is a cost model for the imitation.
 
-**The assertions were verified to be capable of failing.** Removing the
-eventually-consistent halving from `metering::read_units` — a one-line mutation
-that makes every read prediction twice what DynamoDB charges — turned **ten**
-checks red across every read path (by-id at four cutoffs, `read_many` at k=1/10/100,
-the scan aggregate, the multi-page scan, and the `id` pushdown). A capacity
-assertion that cannot fail is decoration; these can.
+Two of that suite's predictions were **wrong and were corrected by the meter**,
+which is the reason for running it rather than reasoning about it: an `ALL`
+projection was expected to cost the same as `KEYS_ONLY` (it costs 4× the index
+capacity at 3 KiB items), and four parallel scan segments were expected to cost
+more than one on a small table (they cost exactly the same).
+
+**Every assertion was verified to be capable of failing**, by breaking what it
+guards and watching a test go red:
+
+| Mutation | What turned red |
+|---|---|
+| Remove the eventually-consistent halving from `metering::read_units` | **10** capacity checks, across every read path |
+| An unindexed field falls back to a `Scan` instead of erroring | 2 unit tests + 1 cert |
+| The repository stops promoting `ix_` attributes | **16** searcher certs — the `::indexed` half only — and 1 guard test |
+| Allow a table to carry indexes the handle does not maintain | 3 guard tests |
+| Allow an index on a populated table without migrating | 1 guard test |
+| Remove the 20-index limit | 1 unit test |
+| Version resolution returns the *oldest* version — the answer the index-only shortcut gives | 12 certs, including `the_index_cannot_resurrect_a_superseded_version` |
+
+Two things claimed here to be *cost* optimisations rather than correctness
+guards were checked the same way, by breaking them and confirming that
+**nothing** turned red: intersecting several conditions' candidate sets instead
+of unioning them, and bounding phase 1 by the temporal cutoff. Both are
+selectivity, and phase 2 is what makes the answer right either way. (The first
+attempt at the second of these turned 18 tests red and looked like a refutation.
+It was not: deleting `AND #sk < :hi` from the key condition leaves the
+expression's attribute names unused, which DynamoDB rejects outright. Widening
+the bound to infinity instead — the mutation that actually tests the claim —
+turned nothing red.)
 
 Both **skip and exit 0** without `MESHQL_DYNAMO_COST_TESTS=1` and usable
 credentials, and both refuse to run against `MESHQL_DYNAMO_ENDPOINT`. That last
-guard matters: the existing certification suites all point at DynamoDB Local by
-default, **and DynamoDB Local does not meter** — it returns no `ConsumedCapacity`
-at all. "Passes all certs" attests semantics and says nothing whatsoever about
-cost. That is the gap this document exists to close.
+guard matters: the certification suites all point at DynamoDB Local by default,
+**and DynamoDB Local does not meter** — it returns no `ConsumedCapacity` at all.
+"Passes all certs" attests semantics and says nothing whatsoever about cost.
+That is the gap this document exists to close.
 
 Run them:
 
@@ -975,8 +1101,18 @@ Run them:
 MESHQL_DYNAMO_COST_TESTS=1 AWS_REGION=us-east-1 \
   cargo test -p meshql-dynamo --test capacity_cost
 MESHQL_DYNAMO_COST_TESTS=1 AWS_REGION=us-east-1 \
-  cargo test -p meshql-dynamo --test gsi_cost
+  cargo test -p meshql-dynamo --test index_cost
 ```
 
 Both create only `dynamocost-*` tables, drop them, and verify by listing that
-none remain. Together they cost well under a cent to run.
+none remain — **waiting out `DELETING` first**, which the earlier version did
+not, so it once reported a leftover for a table that was already on its way out.
+Verifying that teardown was *requested* is not verifying that it happened.
+Together they cost well under a cent to run.
+
+The semantic suites need no AWS at all: they run against DynamoDB Local, twice
+each, indexed and not.
+
+```sh
+cargo test -p meshql-dynamo
+```
