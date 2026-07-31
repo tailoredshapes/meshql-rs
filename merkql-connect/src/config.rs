@@ -95,6 +95,63 @@ pub enum SourceConfig {
         /// Publication covering `table`. Created if absent.
         publication: String,
     },
+    /// A HubSpot portal, polled incrementally on the CRM search endpoint. See
+    /// the `hubspot` module for the full argument; the three things an operator
+    /// must know are:
+    ///
+    /// - **The token is never in this file.** `token_env` names an environment
+    ///   variable holding the private-app access token, and an unset variable
+    ///   is a startup error.
+    /// - **Hard deletes are not captured.** A deleted HubSpot object stops
+    ///   appearing in search results and leaves no tombstone, so a projection
+    ///   built from this source retains records the CRM no longer has.
+    /// - **`index_lag_ms` is a correctness knob, not a tuning one.** HubSpot's
+    ///   search index is eventually consistent and does not become searchable
+    ///   in timestamp order; the watermark is held this far behind the newest
+    ///   record so a late-indexed one is not filtered out below it.
+    Hubspot {
+        /// CRM object types to capture — `contacts`, `companies`, `deals`,
+        /// `tickets`, or a custom object's type name.
+        objects: Vec<String>,
+        entity: String,
+        /// Properties to request. Empty means HubSpot's default set; the
+        /// last-modified property is always added.
+        #[serde(default)]
+        properties: Vec<String>,
+        /// Copied onto every synthesised envelope. HubSpot has no notion of a
+        /// meshql token, so authorisation is a property of the connector.
+        #[serde(default)]
+        authorized_tokens: Vec<String>,
+        #[serde(default = "default_hubspot_base_url")]
+        base_url: String,
+        /// The environment variable holding the private-app access token.
+        /// Named rather than fixed so two connectors can serve two portals on
+        /// one host.
+        #[serde(default = "default_hubspot_token_env")]
+        token_env: String,
+        #[serde(default = "default_hubspot_poll_interval")]
+        poll_interval_ms: u64,
+        #[serde(default = "default_hubspot_page_size")]
+        page_size: u32,
+        #[serde(default = "default_hubspot_index_lag")]
+        index_lag_ms: u64,
+    },
+}
+
+fn default_hubspot_base_url() -> String {
+    "https://api.hubapi.com".to_string()
+}
+fn default_hubspot_token_env() -> String {
+    "HUBSPOT_PRIVATE_APP_TOKEN".to_string()
+}
+fn default_hubspot_poll_interval() -> u64 {
+    30_000
+}
+fn default_hubspot_page_size() -> u32 {
+    100
+}
+fn default_hubspot_index_lag() -> u64 {
+    5_000
 }
 
 fn default_table() -> String {
@@ -121,6 +178,7 @@ impl ConnectorConfig {
             SourceConfig::Sqlite { entity, .. } => entity,
             SourceConfig::Mongo { entity, .. } => entity,
             SourceConfig::Postgres { entity, .. } => entity,
+            SourceConfig::Hubspot { entity, .. } => entity,
         }
     }
 
@@ -129,6 +187,7 @@ impl ConnectorConfig {
             SourceConfig::Sqlite { .. } => "sqlite",
             SourceConfig::Mongo { .. } => "mongodb",
             SourceConfig::Postgres { .. } => "postgresql",
+            SourceConfig::Hubspot { .. } => "hubspot",
         }
     }
 
