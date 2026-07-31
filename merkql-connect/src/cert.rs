@@ -26,6 +26,32 @@ pub trait CertStore: Send + Sync {
 
     /// A freshly opened source over that store.
     async fn source(&self) -> Result<Box<dyn CommitSource>>;
+
+    /// The envelope id this store's source will *deliver* for the logical
+    /// record named `logical`.
+    ///
+    /// # Why this hook exists
+    ///
+    /// The database sources store an envelope and read back exactly that
+    /// envelope, so the id the suite writes is the id it expects — and every
+    /// assertion below could name a literal. An **ingress** connector cannot:
+    /// it derives its id from a foreign system's natural key, so writing
+    /// `live-1` yields `salesforce:Contact:live-1` or `contact:live-1` on the
+    /// topic. Three of the four sub-tests would then fail on the id comparison
+    /// before reaching the property they exist to check.
+    ///
+    /// Overriding this is what makes the suite's most valuable property — that
+    /// **the ids you derive are the ids that come back** — testable rather
+    /// than something a connector asserts about itself. The alternatives are
+    /// both worse: stubbing the derivation out certifies nothing, and editing
+    /// this shared file on a connector branch is exactly what must not happen
+    /// to a shared contract.
+    ///
+    /// Stores that deliver envelopes verbatim take the default and are
+    /// unaffected.
+    fn envelope_id(&self, logical: &str) -> String {
+        logical.to_string()
+    }
 }
 
 fn envelope(id: &str) -> Envelope {
@@ -120,8 +146,10 @@ pub async fn certify_snapshot_then_stream(store: &dyn CertStore) -> Result<()> {
     }
     let mut ids: Vec<String> = snapshot.iter().filter_map(|r| r.key()).collect();
     ids.sort();
-    if ids != vec!["pre-1".to_string(), "pre-2".to_string()] {
-        bail!("snapshot delivered {ids:?}, want the two pre-existing rows");
+    let mut want = vec![store.envelope_id("pre-1"), store.envelope_id("pre-2")];
+    want.sort();
+    if ids != want {
+        bail!("snapshot delivered {ids:?}, want the two pre-existing rows {want:?}");
     }
 
     store.write(envelope("live-1")).await?;
@@ -132,8 +160,9 @@ pub async fn certify_snapshot_then_stream(store: &dyn CertStore) -> Result<()> {
     if live[0].source.snapshot.is_snapshot() {
         bail!("a live record must not be flagged snapshot");
     }
-    if live[0].key().as_deref() != Some("live-1") {
-        bail!("live record is {:?}, want live-1", live[0].key());
+    let want_live = store.envelope_id("live-1");
+    if live[0].key().as_deref() != Some(want_live.as_str()) {
+        bail!("live record is {:?}, want {want_live}", live[0].key());
     }
 
     // The payload must survive intact — a connector that delivers ids but
@@ -212,10 +241,11 @@ pub async fn certify_resume_delivers_only_what_follows(store: &dyn CertStore) ->
         .map_err(anyhow::Error::from)?;
 
     let after = take(&mut stream, 1, PATIENCE).await?;
-    if after[0].key().as_deref() != Some("during-downtime") {
+    let want_downtime = store.envelope_id("during-downtime");
+    if after[0].key().as_deref() != Some(want_downtime.as_str()) {
         bail!(
-            "resuming from {position:?} delivered {:?}; want the write that happened \
-             while the connector was down, and nothing before it",
+            "resuming from {position:?} delivered {:?}; want {want_downtime} — the write \
+             that happened while the connector was down, and nothing before it",
             after[0].key()
         );
     }
@@ -239,8 +269,64 @@ pub async fn certify_never_mode_skips_history(store: &dyn CertStore) -> Result<(
     // delivers nothing at all would pass the assertion above.
     store.write(envelope("after-start")).await?;
     let live = take(&mut stream, 1, PATIENCE).await?;
-    if live[0].key().as_deref() != Some("after-start") {
-        bail!("expected the post-start write, got {:?}", live[0].key());
+    let want_after = store.envelope_id("after-start");
+    if live[0].key().as_deref() != Some(want_after.as_str()) {
+        bail!(
+            "expected the post-start write {want_after}, got {:?}",
+            live[0].key()
+        );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A store whose source derives ids the way an ingress connector does.
+    struct DerivingStore;
+
+    #[async_trait]
+    impl CertStore for DerivingStore {
+        async fn write(&self, _envelope: Envelope) -> Result<()> {
+            unreachable!("this test exercises the id hook, not the suite")
+        }
+        async fn source(&self) -> Result<Box<dyn CommitSource>> {
+            unreachable!("this test exercises the id hook, not the suite")
+        }
+        fn envelope_id(&self, logical: &str) -> String {
+            format!("salesforce:Contact:{logical}")
+        }
+    }
+
+    struct VerbatimStore;
+
+    #[async_trait]
+    impl CertStore for VerbatimStore {
+        async fn write(&self, _envelope: Envelope) -> Result<()> {
+            unreachable!("this test exercises the id hook, not the suite")
+        }
+        async fn source(&self) -> Result<Box<dyn CommitSource>> {
+            unreachable!("this test exercises the id hook, not the suite")
+        }
+    }
+
+    /// The three database sources must be entirely unaffected: the default is
+    /// the identity, so every literal the suite used before still holds.
+    #[test]
+    fn a_verbatim_store_gets_the_logical_id_unchanged() {
+        for logical in ["pre-1", "pre-2", "live-1", "during-downtime", "after-start"] {
+            assert_eq!(VerbatimStore.envelope_id(logical), logical);
+        }
+    }
+
+    /// An ingress connector derives, and the suite must compare against what
+    /// it will actually deliver rather than the literal it wrote.
+    #[test]
+    fn a_deriving_store_names_the_id_the_source_will_deliver() {
+        assert_eq!(
+            DerivingStore.envelope_id("live-1"),
+            "salesforce:Contact:live-1"
+        );
+    }
 }

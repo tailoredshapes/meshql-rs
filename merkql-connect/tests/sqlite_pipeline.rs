@@ -578,3 +578,86 @@ async fn a_malformed_position_is_reported_as_unusable() {
         );
     }
 }
+
+/// An interrupted snapshot resumes where it stopped instead of restarting.
+///
+/// This is the behaviour `Resume::Snapshotting` exists to make possible. Before
+/// it, `OffsetStore::resume` discarded a mid-snapshot position and returned
+/// `Cold`, so a backfill killed at 90% re-emitted everything — seconds for a
+/// table, hours for an enterprise SaaS backfill. The safety property is
+/// unchanged: the position is still never treated as a *streaming* position.
+#[tokio::test]
+async fn an_interrupted_sqlite_snapshot_resumes_rather_than_restarting() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("resume.db");
+    let repo = Arc::new(
+        SqliteRepository::new_with_pool(pool(&db).await)
+            .await
+            .unwrap(),
+    );
+
+    for i in 1..=5 {
+        let mut payload = meshql_core::Stash::new();
+        payload.insert("eggs".to_string(), json!(i));
+        repo.create(
+            Envelope::new(format!("hen-{i}"), payload, vec!["farm".to_string()]),
+            &["farm".to_string()],
+        )
+        .await
+        .unwrap();
+    }
+
+    // Take the first two records of the snapshot, then "crash".
+    let source = SqliteSource::open(&db, "envelopes", "hen").await.unwrap();
+    let mut stream = source
+        .changes(Resume::Cold, SnapshotMode::Initial)
+        .await
+        .unwrap();
+    let first = cert::take(&mut stream, 2, std::time::Duration::from_secs(20))
+        .await
+        .unwrap();
+    let interrupted_at = first[1].position().unwrap().to_string();
+    assert!(
+        first.iter().all(|r| r.source.snapshot.in_progress()),
+        "both records must be flagged mid-snapshot for this test to mean anything"
+    );
+    drop(stream);
+
+    // Resume from exactly that position, as the offset store would offer it.
+    let resumed = SqliteSource::open(&db, "envelopes", "hen").await.unwrap();
+    let mut stream = resumed
+        .changes(
+            Resume::Snapshotting(interrupted_at.clone()),
+            SnapshotMode::Initial,
+        )
+        .await
+        .unwrap();
+    let rest = cert::take(&mut stream, 3, std::time::Duration::from_secs(20))
+        .await
+        .unwrap();
+
+    let ids: Vec<String> = rest.iter().filter_map(|r| r.key()).collect();
+    assert_eq!(
+        ids,
+        vec!["hen-3", "hen-4", "hen-5"],
+        "the resumed snapshot must deliver only what had not been emitted"
+    );
+    assert!(
+        rest.iter().all(|r| r.op == merkql_connect::Op::Read),
+        "resumed snapshot records are still snapshot reads, not live creates"
+    );
+
+    // And the historical behaviour is still one call away.
+    let restarted = SqliteSource::open(&db, "envelopes", "hen").await.unwrap();
+    let mut stream = restarted
+        .changes(
+            Resume::Snapshotting(interrupted_at).without_snapshot_resume(),
+            SnapshotMode::Initial,
+        )
+        .await
+        .unwrap();
+    let all = cert::take(&mut stream, 5, std::time::Duration::from_secs(20))
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 5, "opting out must re-emit the whole snapshot");
+}

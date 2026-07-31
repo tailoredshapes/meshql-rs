@@ -562,8 +562,11 @@ mod tests {
 
     /// A snapshot-in-progress position must not be resumable as a streaming
     /// position, even after a clean shutdown mid-snapshot.
+    /// An interrupted snapshot offers its position back as `Snapshotting`, and
+    /// never as `At`. A source decides what to do with it; the loop's job is
+    /// only to keep the two kinds of position distinguishable.
     #[tokio::test]
-    async fn an_interrupted_snapshot_resumes_cold() {
+    async fn an_interrupted_snapshot_resumes_as_snapshotting() {
         let dir = tempfile::tempdir().unwrap();
         let broker = broker(dir.path());
         let writer = TopicWriter::claim(broker, "hen", dir.path()).unwrap();
@@ -577,7 +580,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(store.resume(), Resume::Cold);
+        assert_eq!(store.resume(), Resume::Snapshotting("1".to_string()));
+        // A source that cannot continue a partial snapshot still gets the
+        // pre-existing restart, unchanged.
+        assert_eq!(store.resume().without_snapshot_resume(), Resume::Cold);
     }
 
     /// `initial` and `never` must REFUSE TO START on an unusable position.

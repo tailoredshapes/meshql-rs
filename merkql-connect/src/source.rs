@@ -27,6 +27,63 @@ pub enum Resume {
     /// A position previously read out of a record's `source.position` and
     /// committed to the offset store.
     At(String),
+    /// A position committed **while an initial snapshot was still running**.
+    ///
+    /// # Why this is a variant rather than a discarded position
+    ///
+    /// This position names a row *inside* a snapshot, not a place in the live
+    /// stream. Resuming the live stream from it would begin at a point the
+    /// stream never reached and skip everything between — so it must never be
+    /// handled as [`Resume::At`]. [`crate::OffsetStore`] used to enforce that
+    /// by returning [`Resume::Cold`] and throwing the position away, which is
+    /// safe (duplicates, never a gap) and costs a **complete restart of the
+    /// snapshot**.
+    ///
+    /// For a table scan that is a few seconds. For an enterprise SaaS backfill
+    /// it can be hours, and a connector that cannot survive one restart during
+    /// its first backfill may never finish a large one at all.
+    ///
+    /// A source could not previously work around this even where its snapshot
+    /// was trivially resumable, because staging a snapshot cursor required
+    /// claiming `snapshot_in_progress == false` — the precise lie that flag
+    /// exists to prevent. Carrying the state in the *type* removes the
+    /// incentive to lie and lets each source decide honestly.
+    ///
+    /// # What an implementation must do
+    ///
+    /// Handling this is **optional**. A source that cannot resume a partial
+    /// snapshot must treat it exactly as [`Resume::Cold`] and start the
+    /// snapshot again — that is the pre-existing behaviour and it is always
+    /// correct. A source that *can* (an ordered keyset walk, a stored
+    /// server-issued next-link) may continue from it, and must still finish by
+    /// switching to the live stream, marking the final snapshot record
+    /// [`crate::Snapshot::Last`] as usual.
+    ///
+    /// What a source must **never** do is treat it as a live-stream position.
+    Snapshotting(String),
+}
+
+impl Resume {
+    /// The position this resumes from, whether mid-snapshot or live.
+    pub fn position(&self) -> Option<&str> {
+        match self {
+            Resume::Cold => None,
+            Resume::At(p) | Resume::Snapshotting(p) => Some(p),
+        }
+    }
+
+    /// Collapse a mid-snapshot resume to a cold start.
+    ///
+    /// The explicit opt-out for a source that cannot continue a partial
+    /// snapshot: `from.without_snapshot_resume()` restores the historical
+    /// behaviour in one call, and says at the call site that the choice was
+    /// made rather than overlooked.
+    pub fn without_snapshot_resume(self) -> Self {
+        match self {
+            Resume::Snapshotting(_) => Resume::Cold,
+            other => other,
+        }
+    }
 }
 
 /// Debezium's snapshot modes, and with them the unusable-position policy.

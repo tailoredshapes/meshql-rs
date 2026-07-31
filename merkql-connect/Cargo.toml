@@ -31,6 +31,16 @@ notify = { version = "6", optional = true }
 meshql-mongo = { version = "0.1.0", path = "../meshql-mongo", optional = true }
 mongodb = { version = "3", optional = true }
 bson = { version = "2", features = ["chrono-0_4"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"], optional = true }
+url = { version = "2", optional = true }
+base64 = { version = "0.22", optional = true }
+percent-encoding = { version = "2", optional = true }
+# OData **v2** delta responses represent deletions only as the Atom
+# `deleted-entry` element — SAP does not support them in JSON. A v2 source read
+# as JSON therefore never observes a deletion, ever, and says nothing about it.
+# That is the exact silent gap this crate exists to refuse, so the v2 path parses
+# Atom and this dependency is the price. See `sap.rs`.
+quick-xml = { version = "0.39", optional = true }
 
 # Queue backends. merkql is always available; every other queue is a
 # `meshql_core::Repository` reached through `RepositorySink`.
@@ -42,6 +52,17 @@ sqlite = ["dep:sqlx", "sqlx/sqlite", "dep:notify"]
 postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/chrono"]
 mongo = ["dep:mongodb", "dep:bson", "dep:meshql-mongo"]
 ksql = ["dep:meshql-ksql"]
+# Not in `default`: SAP is an ingress connector reaching out over the network to
+# a system the other three never touch, so a deployment opts into it.
+sap = ["dep:reqwest", "dep:url", "dep:base64", "dep:percent-encoding", "dep:quick-xml"]
+# Salesforce is an *ingress* connector to a SaaS, not a store this workspace
+# provisions, so it stays out of `default`: a build that never talks to
+# Salesforce should not carry an HTTP client it cannot use.
+salesforce = ["dep:reqwest"]
+# HubSpot CRM ingress. Off by default: it is an ingress connector against a
+# third-party SaaS, not one of the meshql envelope stores the default build is
+# for.
+hubspot = ["dep:reqwest"]
 
 [dev-dependencies]
 tempfile = "3"
@@ -57,6 +78,9 @@ tower = { version = "0.5", features = ["util"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "postgres"] }
 meshql-postgres = { version = "0.1.0", path = "../meshql-postgres" }
+wiremock = "0.6"
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["mongo", "postgres"] }
 uuid = { workspace = true }
+# The SAP tests never touch a network: wiremock stands in for the OData service.
+# Fakes HubSpot for the `hubspot` tests. Every one of them runs offline.

@@ -152,10 +152,270 @@ pub enum SourceConfig {
         /// Publication covering `table`. Created if absent.
         publication: String,
     },
+
+    /// An SAP S/4HANA entity set, replicated over OData delta. See the `sap`
+    /// module for the argument; the things an operator must know are:
+    ///
+    /// - **The service must be delta-enabled, and stock S/4HANA APIs are not.**
+    ///   v2 delta is something each application's data provider class has to
+    ///   implement; v4 delta is on-premise / private cloud only; no standard
+    ///   A2X OData API is documented as delta-enabled. Where there is no delta
+    ///   support the answer is CDS Change Data Capture over ODP (on-premise),
+    ///   the CDI API (public cloud), or business events — not this source.
+    /// - **`snapshot_mode = "when_needed"` is the intended pairing.** Nothing
+    ///   documents how long a v2 delta token lives; it survives until somebody
+    ///   schedules SAP's cleanup report. Losing the cursor and re-baselining is
+    ///   normal operation for this source, not an incident.
+    /// - **`key_properties` is required and is not discovered.** It decides the
+    ///   envelope id, and an id derived from a `$metadata` document SAP
+    ///   rewrites on upgrade is an id that can silently change and fork every
+    ///   aggregate carrying it.
+    /// - **No credentials live here.** The config names an auth *mode* and the
+    ///   environment variables holding the secrets.
+    /// - **This source polls**, because SAP OData has no notification edge at
+    ///   all. `poll_interval_ms` is how often the delta link is followed.
+    Sap {
+        /// The OData service root, e.g.
+        /// `https://s4.example.com/sap/opu/odata/sap/API_BUSINESS_PARTNER`.
+        service_root: String,
+        /// The entity set below that root, e.g. `A_BusinessPartner`.
+        entity_set: String,
+        #[serde(default = "default_odata_version")]
+        odata_version: SapODataVersion,
+        entity: String,
+        /// The entity's key properties, from `<Key><PropertyRef …>` in
+        /// `$metadata`. Order does not matter — the encoding sorts by name.
+        key_properties: Vec<String>,
+        /// An optional last-changed property. When set, `source.ts_ms` and the
+        /// envelope's `created_at` are the entity's own time rather than the
+        /// connector's observation time, and the payload says which.
+        #[serde(default)]
+        changed_at_property: Option<String>,
+        /// Stamped onto every envelope. SAP carries no meshql authorisation, so
+        /// this is a configured list rather than something per-record.
+        #[serde(default)]
+        authorized_tokens: Vec<String>,
+        auth: SapAuthConfig,
+        #[serde(default = "default_sap_poll_ms")]
+        poll_interval_ms: u64,
+    },
+    /// Salesforce, polled over REST/SOQL on `SystemModstamp`, with deletes
+    /// enumerated separately. See the `salesforce` module for the mechanism
+    /// argument and — more importantly — for what a watermark poller does not
+    /// capture. Three things an operator must know:
+    ///
+    /// - **Credentials never live in this file.** `auth` names the OAuth flow;
+    ///   `SALESFORCE_CLIENT_ID`, `SALESFORCE_CLIENT_SECRET` and (for
+    ///   `refresh_token`) `SALESFORCE_REFRESH_TOKEN` come from the
+    ///   environment. This file is version-controlled and copied to hosts.
+    /// - **`lag_seconds` is a latency floor, not a tuning knob.** It is the
+    ///   assumed worst case between Salesforce stamping `SystemModstamp` and
+    ///   the row becoming visible to a query; lowering it opens a gap that no
+    ///   downstream check can detect.
+    /// - **Delete tracking expires after about 30 days.** Unlike a PostgreSQL
+    ///   slot, nothing holds it for us — the window runs on wall-clock time,
+    ///   so a connector stopped for a month loses a month of deletions and its
+    ///   stored cursor stops being usable at all.
+    Salesforce {
+        /// Login or My Domain host, e.g. `https://acme.my.salesforce.com`.
+        /// Data calls go to whatever `instance_url` the token response names.
+        instance_url: String,
+        #[serde(default = "default_api_version")]
+        api_version: String,
+        /// One SObject per connector, matching one topic per meshlette. A
+        /// shared cursor across SObjects would let the slowest one throttle
+        /// every other.
+        sobject: String,
+        /// The fields to select. Required and explicit: SOQL has no
+        /// `SELECT *`, and describing the object instead would silently change
+        /// the payload shape the day an admin adds a custom field.
+        fields: Vec<String>,
+        entity: String,
+        /// Written onto every envelope. Required, with no default: an empty
+        /// token list means *public* in meshql, and CRM data should not become
+        /// public by omission.
+        authorized_tokens: Vec<String>,
+        #[serde(default)]
+        auth: SalesforceAuth,
+        #[serde(default = "default_salesforce_poll_interval")]
+        poll_interval_ms: u64,
+        #[serde(default = "default_salesforce_lag")]
+        lag_seconds: u64,
+        /// Caps one query's time span, so a connector restarted after a long
+        /// outage walks forward in bounded steps instead of issuing one query
+        /// spanning the outage.
+        #[serde(default = "default_salesforce_max_window")]
+        max_window_seconds: u64,
+        #[serde(default = "default_true")]
+        capture_deletes: bool,
+    },
+    /// A HubSpot portal, polled incrementally on the CRM search endpoint. See
+    /// the `hubspot` module for the full argument; the three things an operator
+    /// must know are:
+    ///
+    /// - **The token is never in this file.** `token_env` names an environment
+    ///   variable holding the private-app access token, and an unset variable
+    ///   is a startup error.
+    /// - **Hard deletes are not captured.** A deleted HubSpot object stops
+    ///   appearing in search results and leaves no tombstone, so a projection
+    ///   built from this source retains records the CRM no longer has.
+    ///   *Merges are the exception and are handled* — a merged-away record is
+    ///   retired with a `deleted: true` version, because HubSpot does leave a
+    ///   trace of a merge on the surviving record.
+    /// - **`index_lag_ms` is a correctness knob, not a tuning one.** HubSpot's
+    ///   search index is eventually consistent and does not become searchable
+    ///   in timestamp order; the watermark is held this far behind the newest
+    ///   record so a late-indexed one is not filtered out below it.
+    Hubspot {
+        /// CRM object types to capture — `contacts`, `companies`, `deals`,
+        /// `tickets`, or a custom object's type name.
+        objects: Vec<String>,
+        entity: String,
+        /// Properties to request.
+        ///
+        /// **Empty means every property defined on the object type**, read from
+        /// `GET /crm/v3/properties/{objectType}` when the stream opens. It does
+        /// *not* mean HubSpot's default set: that set is a small subset — for
+        /// contacts roughly `firstname`, `lastname`, `email`, `createdate`,
+        /// `lastmodifieddate`, `hs_object_id` — and every other property,
+        /// including every custom one, is dropped from the payload without an
+        /// error, a warning or any downstream sign that it existed.
+        ///
+        /// Naming properties here narrows the payload, and is then a
+        /// **deliberate truncation**: a property added in HubSpot later, or one
+        /// misspelled here, is silently absent forever — HubSpot ignores an
+        /// unknown property name rather than rejecting it. The last-modified
+        /// property and the merge properties are appended regardless, because
+        /// without them the connector cannot advance and cannot see a merge.
+        ///
+        /// Discovery needs the private app's `crm.schemas.{object}.read` scope;
+        /// without it the connector fails at startup naming the scope rather
+        /// than falling back to the truncated default.
+        #[serde(default)]
+        properties: Vec<String>,
+        /// Copied onto every synthesised envelope. HubSpot has no notion of a
+        /// meshql token, so authorisation is a property of the connector.
+        #[serde(default)]
+        authorized_tokens: Vec<String>,
+        #[serde(default = "default_hubspot_base_url")]
+        base_url: String,
+        /// The environment variable holding the private-app access token.
+        /// Named rather than fixed so two connectors can serve two portals on
+        /// one host.
+        #[serde(default = "default_hubspot_token_env")]
+        token_env: String,
+        #[serde(default = "default_hubspot_poll_interval")]
+        poll_interval_ms: u64,
+        #[serde(default = "default_hubspot_page_size")]
+        page_size: u32,
+        #[serde(default = "default_hubspot_index_lag")]
+        index_lag_ms: u64,
+    },
+}
+
+/// Which OData dialect the SAP service speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SapODataVersion {
+    V2,
+    V4,
+}
+
+fn default_odata_version() -> SapODataVersion {
+    SapODataVersion::V4
+}
+
+fn default_sap_poll_ms() -> u64 {
+    30_000
+}
+
+/// How the connector authenticates to SAP.
+///
+/// Every variant names **where a secret lives**, never the secret itself. A
+/// connector TOML is a file that gets copied into tickets, checked into
+/// configuration repositories and printed by support tooling; a password in it
+/// is a password that has leaked. Certificates are file paths for the same
+/// reason PEM does not belong in an environment variable — a private key in the
+/// environment is a private key in every child process's `/proc`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SapAuthConfig {
+    /// No credentials. Correct only when something else authenticates — an SLT
+    /// proxy on a private network, mTLS terminated ahead of the connector.
+    None,
+    Basic {
+        user_env: String,
+        pass_env: String,
+    },
+    Bearer {
+        token_env: String,
+    },
+    /// OAuth2 client credentials — the BTP destination-service shape.
+    Oauth2Cc {
+        token_url: String,
+        client_id_env: String,
+        client_secret_env: String,
+        #[serde(default)]
+        scope: Option<String>,
+    },
+    /// OAuth2 SAML bearer — principal propagation from an identity provider.
+    Oauth2SamlBearer {
+        token_url: String,
+        assertion_env: String,
+        client_id_env: String,
+    },
+    /// X.509 client certificates.
+    Mtls {
+        cert_path: PathBuf,
+        key_path: PathBuf,
+    },
+}
+
+/// Which OAuth flow the connected app is configured for. The secrets
+/// themselves come from the environment; this only names the shape of the
+/// exchange.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SalesforceAuth {
+    #[default]
+    ClientCredentials,
+    RefreshToken,
+}
+
+fn default_hubspot_base_url() -> String {
+    "https://api.hubapi.com".to_string()
+}
+fn default_hubspot_token_env() -> String {
+    "HUBSPOT_PRIVATE_APP_TOKEN".to_string()
+}
+fn default_hubspot_poll_interval() -> u64 {
+    30_000
+}
+fn default_hubspot_page_size() -> u32 {
+    100
+}
+fn default_hubspot_index_lag() -> u64 {
+    5_000
 }
 
 fn default_table() -> String {
     "envelopes".to_string()
+}
+
+fn default_api_version() -> String {
+    "v62.0".to_string()
+}
+fn default_salesforce_poll_interval() -> u64 {
+    5_000
+}
+fn default_salesforce_lag() -> u64 {
+    30
+}
+fn default_salesforce_max_window() -> u64 {
+    3_600
+}
+fn default_true() -> bool {
+    true
 }
 
 impl ConnectorConfig {
@@ -207,6 +467,9 @@ impl ConnectorConfig {
             SourceConfig::Sqlite { entity, .. } => entity,
             SourceConfig::Mongo { entity, .. } => entity,
             SourceConfig::Postgres { entity, .. } => entity,
+            SourceConfig::Sap { entity, .. } => entity,
+            SourceConfig::Salesforce { entity, .. } => entity,
+            SourceConfig::Hubspot { entity, .. } => entity,
         }
     }
 
@@ -215,6 +478,9 @@ impl ConnectorConfig {
             SourceConfig::Sqlite { .. } => "sqlite",
             SourceConfig::Mongo { .. } => "mongodb",
             SourceConfig::Postgres { .. } => "postgresql",
+            SourceConfig::Sap { .. } => "sap",
+            SourceConfig::Salesforce { .. } => "salesforce",
+            SourceConfig::Hubspot { .. } => "hubspot",
         }
     }
 
@@ -293,6 +559,81 @@ mod tests {
         assert_eq!(cfg.heartbeat_interval(), Duration::from_millis(5000));
     }
 
+    const SAP: &str = r#"
+        topic = "business_partner"
+        merkql_dir = "/m"
+        state_dir = "/s"
+        snapshot_mode = "when_needed"
+
+        [source]
+        type = "sap"
+        service_root = "https://s4.example.com/sap/opu/odata/sap/API_BUSINESS_PARTNER"
+        entity_set = "A_BusinessPartnerAddress"
+        odata_version = "v2"
+        entity = "business_partner_address"
+        key_properties = ["BusinessPartner", "AddressID"]
+        changed_at_property = "LastChangeDateTime"
+        authorized_tokens = ["sap"]
+        poll_interval_ms = 60000
+        auth = { kind = "oauth2_cc", token_url = "https://auth/token", client_id_env = "SAP_CID", client_secret_env = "SAP_SECRET" }
+    "#;
+
+    #[test]
+    fn a_sap_connector_parses() {
+        let cfg = ConnectorConfig::from_toml(SAP).unwrap();
+        assert_eq!(cfg.connector_name(), "sap");
+        assert_eq!(cfg.entity(), "business_partner_address");
+        match cfg.source {
+            SourceConfig::Sap {
+                odata_version,
+                key_properties,
+                poll_interval_ms,
+                auth,
+                ..
+            } => {
+                assert_eq!(odata_version, SapODataVersion::V2);
+                assert_eq!(key_properties, ["BusinessPartner", "AddressID"]);
+                assert_eq!(poll_interval_ms, 60_000);
+                assert!(matches!(auth, SapAuthConfig::Oauth2Cc { .. }));
+            }
+            other => panic!("expected a sap source, got {other:?}"),
+        }
+    }
+
+    /// A key that is not stated is a key that would have to be guessed, and a
+    /// guessed key is an envelope id that can silently merge distinct SAP
+    /// records. The parse must fail rather than default to something.
+    #[test]
+    fn a_sap_connector_without_key_properties_is_refused() {
+        let err = ConnectorConfig::from_toml(
+            r#"
+            topic = "t"
+            merkql_dir = "/m"
+            state_dir = "/s"
+            [source]
+            type = "sap"
+            service_root = "https://s4/api"
+            entity_set = "A_BusinessPartner"
+            entity = "bp"
+            auth = { kind = "none" }
+        "#,
+        )
+        .expect_err("key_properties has no safe default");
+        assert!(err.to_string().contains("key_properties"), "got: {err}");
+    }
+
+    /// The config may name where a secret lives; it may never hold one. If a
+    /// credential field ever gains a value-carrying variant, this fails.
+    #[test]
+    fn sap_auth_names_environment_variables_and_never_holds_a_secret() {
+        let cfg = ConnectorConfig::from_toml(SAP).unwrap();
+        let round_tripped = toml::to_string(&cfg.source).unwrap();
+        assert!(round_tripped.contains("client_secret_env"));
+        assert!(
+            !round_tripped.contains("client_secret = "),
+            "the config must not be able to carry a secret: {round_tripped}"
+        );
+    }
     #[test]
     fn a_queue_block_selects_the_backend() {
         let cfg = ConnectorConfig::from_toml(
@@ -390,6 +731,72 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("names no queue"), "got: {err}");
+    }
+    /// The Salesforce source names an org, an SObject and an auth *mode* — and
+    /// no credential. If a secret were ever accepted here it would be
+    /// version-controlled by construction.
+    #[test]
+    fn a_salesforce_connector_parses_and_carries_no_secret() {
+        let text = r#"
+            topic = "accounts"
+            merkql_dir = "/m"
+            state_dir = "/s"
+
+            [source]
+            type = "salesforce"
+            instance_url = "https://acme.my.salesforce.com"
+            sobject = "Account"
+            fields = ["Name", "AnnualRevenue"]
+            entity = "accounts"
+            authorized_tokens = ["farm"]
+            auth = "refresh_token"
+        "#;
+        let cfg = ConnectorConfig::from_toml(text).unwrap();
+        assert_eq!(cfg.connector_name(), "salesforce");
+        assert_eq!(cfg.entity(), "accounts");
+        match cfg.source {
+            SourceConfig::Salesforce {
+                api_version,
+                auth,
+                lag_seconds,
+                capture_deletes,
+                ..
+            } => {
+                assert_eq!(api_version, "v62.0", "a minimal config is a working config");
+                assert_eq!(auth, SalesforceAuth::RefreshToken);
+                assert_eq!(lag_seconds, 30);
+                assert!(capture_deletes, "deletes are captured unless refused");
+            }
+            other => panic!("expected a salesforce source, got {other:?}"),
+        }
+
+        assert!(
+            !text.contains("secret") && !text.contains("client_id"),
+            "credentials come from the environment, never from this file"
+        );
+    }
+
+    /// An empty `authorized_tokens` list means PUBLIC in meshql, so the field
+    /// has no default — omitting it must fail to parse rather than quietly
+    /// publish CRM data to every reader of the mesh.
+    #[test]
+    fn a_salesforce_source_without_authorized_tokens_does_not_parse() {
+        let err = ConnectorConfig::from_toml(
+            r#"
+            topic = "accounts"
+            merkql_dir = "/m"
+            state_dir = "/s"
+
+            [source]
+            type = "salesforce"
+            instance_url = "https://acme.my.salesforce.com"
+            sobject = "Account"
+            fields = ["Name"]
+            entity = "accounts"
+        "#,
+        )
+        .expect_err("authorized_tokens has no default, deliberately");
+        assert!(err.to_string().contains("authorized_tokens"), "got: {err}");
     }
 
     /// Two connectors sharing a state directory must not share an offset file.

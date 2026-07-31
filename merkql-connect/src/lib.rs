@@ -107,6 +107,13 @@ pub mod mongo;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 
+#[cfg(feature = "hubspot")]
+pub mod hubspot;
+#[cfg(feature = "salesforce")]
+pub mod salesforce;
+#[cfg(feature = "sap")]
+pub mod sap;
+
 pub mod cert;
 
 pub use config::{ConnectorConfig, QueueConfig, SourceConfig};

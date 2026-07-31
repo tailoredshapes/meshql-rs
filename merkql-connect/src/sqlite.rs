@@ -357,6 +357,41 @@ impl CommitSource for SqliteSource {
             Resume::Cold if mode.snapshots_on_cold_start() => (0, Some(max_rowid)),
             // `never`: start at the live tail, ignoring history.
             Resume::Cold => (max_rowid, None),
+
+            // An interrupted snapshot **is** resumable here, because the
+            // snapshot is an ordered walk of the primary key: the stored rowid
+            // was emitted, so everything after it is exactly what remains. The
+            // alternative — restarting at 0 — re-emits the whole table.
+            //
+            // `max_rowid` is re-read on this path rather than restored, so it
+            // may exceed the value the interrupted run captured. Rows written
+            // in between are then delivered as part of the *snapshot* (`op: r`)
+            // instead of the live stream (`op: c`). That is a deliberate
+            // trade: the alternative is a gap, and a consumer that treats `r`
+            // and `c` differently is only distinguishing backfill from live
+            // traffic, which is precisely what this record is.
+            Resume::Snapshotting(position) if mode.snapshots_on_cold_start() => {
+                let rowid: i64 = position.parse().map_err(|_| CdcError::UnusablePosition {
+                    connector: CONNECTOR,
+                    position: position.clone(),
+                    reason: "not a SQLite rowid".into(),
+                })?;
+                if rowid > max_rowid {
+                    return Err(CdcError::UnusablePosition {
+                        connector: CONNECTOR,
+                        position,
+                        reason: format!(
+                            "snapshot rowid is past the end of {} (max rowid {max_rowid}); the \
+                             table has been truncated, rebuilt or restored mid-snapshot",
+                            self.table
+                        ),
+                    });
+                }
+                (rowid, Some(max_rowid))
+            }
+            // A stored snapshot position under `never` is contradictory — that
+            // mode does not snapshot. Start at the tail, as `never` means.
+            Resume::Snapshotting(_) => (max_rowid, None),
         };
 
         let feed = Feed {
