@@ -107,6 +107,9 @@ pub mod mongo;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 
+#[cfg(feature = "salesforce")]
+pub mod salesforce;
+
 pub mod cert;
 
 pub use config::{ConnectorConfig, SourceConfig};

@@ -90,6 +90,41 @@ async fn open_source(config: &ConnectorConfig) -> Result<Box<dyn CommitSource>> 
             .await?,
         )),
 
+        // Credentials are read from the environment inside `open`, never from
+        // `config`: see `salesforce`'s module docs and the `SourceConfig`
+        // variant. Nothing in this arm can carry a secret from the TOML.
+        #[cfg(feature = "salesforce")]
+        SourceConfig::Salesforce {
+            instance_url,
+            api_version,
+            sobject,
+            fields,
+            entity,
+            authorized_tokens,
+            auth,
+            poll_interval_ms,
+            lag_seconds,
+            max_window_seconds,
+            capture_deletes,
+        } => Ok(Box::new(
+            merkql_connect::salesforce::SalesforceSource::open(
+                merkql_connect::salesforce::SalesforceOptions {
+                    instance_url: instance_url.clone(),
+                    api_version: api_version.clone(),
+                    sobject: sobject.clone(),
+                    fields: fields.clone(),
+                    entity: entity.clone(),
+                    authorized_tokens: authorized_tokens.clone(),
+                    auth: *auth,
+                    poll_interval: std::time::Duration::from_millis(*poll_interval_ms),
+                    lag: std::time::Duration::from_secs(*lag_seconds),
+                    max_window: std::time::Duration::from_secs(*max_window_seconds),
+                    capture_deletes: *capture_deletes,
+                },
+            )
+            .await?,
+        )),
+
         #[allow(unreachable_patterns)]
         other => anyhow::bail!(
             "this build of merkql-connect has no support for source {other:?}; \
