@@ -14,8 +14,17 @@
 //!   fetched at runtime, and a CDC entitlement on the org. There is no way to
 //!   test any of it offline: `wiremock` fakes HTTP, not gRPC bidi streams.
 //! - **CometD/Bayeux streaming** (the older `/cometd/` route). Same event
-//!   model, long-poll transport, no maintained Rust client, and Salesforce is
-//!   steering integrations off it.
+//!   model and the same replay-ID cursor, over ordinary HTTP/1.1 long polling
+//!   with JSON — so unlike Pub/Sub API it *would* be reachable without gRPC
+//!   and testable against a fake server. Two things rule it out here rather
+//!   than one: there is no maintained Rust Bayeux client, so the handshake,
+//!   subscribe and reconnect-advice state machine would be ours to write and
+//!   own; and it carries the same CDC entitlement requirement as Pub/Sub API,
+//!   because the entitlement is on the event stream, not the transport.
+//!   Salesforce has **not** deprecated it — the official comparison page
+//!   presents Streaming API and Pub/Sub API as coexisting options with no
+//!   retirement date — so "it is on the way out" is not a reason to avoid it,
+//!   and this module does not claim otherwise.
 //! - **REST/SOQL polling on `SystemModstamp`.** No extra entitlement, ordinary
 //!   HTTP, and every failure mode is reproducible against a fake server.
 //!
