@@ -36,11 +36,16 @@ url = { version = "2", optional = true }
 base64 = { version = "0.22", optional = true }
 percent-encoding = { version = "2", optional = true }
 
+# Queue backends. merkql is always available; every other queue is a
+# `meshql_core::Repository` reached through `RepositorySink`.
+meshql-ksql = { version = "0.1.0", path = "../meshql-ksql", optional = true }
+
 [features]
 default = ["sqlite", "mongo", "postgres"]
 sqlite = ["dep:sqlx", "sqlx/sqlite", "dep:notify"]
 postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/chrono"]
 mongo = ["dep:mongodb", "dep:bson", "dep:meshql-mongo"]
+ksql = ["dep:meshql-ksql"]
 # Not in `default`: SAP is an ingress connector reaching out over the network to
 # a system the other three never touch, so a deployment opts into it.
 sap = ["dep:reqwest", "dep:url", "dep:base64", "dep:percent-encoding"]

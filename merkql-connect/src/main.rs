@@ -10,8 +10,13 @@
 
 use anyhow::{Context, Result};
 use merkql::broker::{Broker, BrokerConfig};
-use merkql_connect::config::SourceConfig;
+use merkql_connect::config::{QueueConfig, SourceConfig};
+#[cfg(feature = "ksql")]
+use merkql_connect::sink::RepositorySink;
+use merkql_connect::sink::TopicSink;
 use merkql_connect::{run_connector, CommitSource, ConnectorConfig, OffsetStore, TopicWriter};
+#[cfg(feature = "ksql")]
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,13 +28,9 @@ async fn main() -> Result<()> {
     let config = ConnectorConfig::from_toml(&text)
         .with_context(|| format!("parsing connector config {path}"))?;
 
-    let broker = Broker::open(BrokerConfig::new(&config.merkql_dir)).map_err(|e| {
-        anyhow::anyhow!("opening merkql store {}: {e}", config.merkql_dir.display())
-    })?;
-
     // Claim the topic BEFORE opening the source. If another connector already
     // owns it, failing here means we never read a change we cannot write.
-    let writer = TopicWriter::claim(broker, &config.topic, &config.state_dir)?;
+    let writer = open_sink(&config)?;
 
     let mut offsets = OffsetStore::open(
         config.offset_path(),
@@ -41,13 +42,63 @@ async fn main() -> Result<()> {
     let source = open_source(&config).await?;
 
     eprintln!(
-        "[merkql-connect] {} -> topic '{}' (snapshot_mode = {:?})",
+        "[merkql-connect] {} -> {} topic '{}' (snapshot_mode = {:?})",
         config.connector_name(),
+        writer.backend(),
         config.topic,
         config.snapshot_mode
     );
 
-    run_connector(source.as_ref(), &writer, &mut offsets, config.snapshot_mode).await
+    run_connector(
+        source.as_ref(),
+        writer.as_ref(),
+        &mut offsets,
+        config.snapshot_mode,
+    )
+    .await
+}
+
+/// Build the configured queue sink.
+///
+/// merkql is constructed here rather than behind a `Repository` because it
+/// needs the single-writer lock and the single-partition check that only
+/// merkql requires. Every other queue is a `Repository` and goes through
+/// [`RepositorySink`] unchanged.
+fn open_sink(config: &ConnectorConfig) -> Result<Box<dyn TopicSink>> {
+    match config.queue()? {
+        QueueConfig::Merkql { dir } => {
+            let broker = Broker::open(BrokerConfig::new(&dir))
+                .map_err(|e| anyhow::anyhow!("opening merkql store {}: {e}", dir.display()))?;
+            Ok(Box::new(TopicWriter::claim(
+                broker,
+                &config.topic,
+                &config.state_dir,
+            )?))
+        }
+
+        #[cfg(feature = "ksql")]
+        QueueConfig::Ksql { entity } => {
+            use meshql_ksql::{client::ConfluentClient, config::KsqlConfig, KsqlRepository};
+
+            let ksql_config = KsqlConfig::from_env().context(
+                "reading Confluent credentials from the environment for [queue] type = \"ksql\"; \
+                 set CONFLUENT_KAFKA_REST_URL, CONFLUENT_KAFKA_CLUSTER_ID, \
+                 CONFLUENT_KAFKA_API_KEY, CONFLUENT_KAFKA_API_SECRET, CONFLUENT_KSQLDB_URL, \
+                 CONFLUENT_KSQLDB_API_KEY and CONFLUENT_KSQLDB_API_SECRET",
+            )?;
+            let entity = entity.unwrap_or_else(|| config.topic.clone());
+            let client = Arc::new(ConfluentClient::new(&ksql_config));
+            let repository = Arc::new(KsqlRepository::new(client, &entity, &ksql_config));
+            Ok(Box::new(RepositorySink::new(&config.topic, repository)))
+        }
+
+        #[allow(unreachable_patterns)]
+        other => anyhow::bail!(
+            "this build of merkql-connect has no support for queue backend '{}'; \
+             rebuild with the matching cargo feature",
+            other.backend()
+        ),
+    }
 }
 
 async fn open_source(config: &ConnectorConfig) -> Result<Box<dyn CommitSource>> {
