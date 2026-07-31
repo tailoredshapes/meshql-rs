@@ -93,15 +93,177 @@
 //! `connector()` reports `"hubspot"` so nothing downstream can mistake this for
 //! a log-based capture.
 //!
+//! # Merges, and why a poller has to synthesise the tombstone itself
+//!
+//! A HubSpot merge is not an update. Since 2025-01-14, merging two CRM records
+//! **creates a third record with a third id**; the two originals keep resolving
+//! to it when fetched by their old ids, but as records of their own they are
+//! gone.
+//!
+//! A connector that only forwards what search returns therefore emits
+//! `contacts:A`, later `contacts:B`, and later still `contacts:C` — and `A` and
+//! `B` are then never updated again, never archived, and never superseded.
+//! They sit on the topic as live aggregates for records that no longer exist,
+//! and every projection folded from the topic counts all three. Nothing
+//! downstream can detect that: the log itself is wrong, so a replay reproduces
+//! the corruption faithfully. This is the one failure mode in this module that
+//! no consumer can repair, which is why it is handled here.
+//!
+//! ## How the merge is detected, and what was rejected
+//!
+//! The surviving record names its sources. [`MERGED_IDS_PROPERTY`] is defined
+//! on every CRM object as a read-only `enumeration` — "the list of record IDs
+//! that have been merged into this record, set automatically by HubSpot" —
+//! rendered as a semicolon-delimited string of bare ids (`"51;1;1551"`).
+//! Contacts additionally carry [`MERGED_VIDS_PROPERTY`], a hidden calculated
+//! property holding `vid:merged_at_ms` pairs.
+//!
+//! Only the first is treated as the source of truth for *which* ids merged.
+//! The contacts-only one is read for its **timestamps alone**, because it is
+//! documented to miss chained merges (A into B, then B into C) that
+//! [`MERGED_IDS_PROPERTY`] does record.
+//!
+//! Both are ordinary properties, so they arrive in the search page already
+//! being read: no second request, no id-aliasing probe, and no webhook endpoint
+//! this connector could not host anyway. They are appended to every query's
+//! property list the same way the timestamp property is, and for the same
+//! reason — an operator's hand-written list will not contain them.
+//!
+//! Crucially the merge **modifies the surviving record**: HubSpot restamps
+//! `lastmodifieddate` at merge time, so the ordinary filter delivers the
+//! survivor within one poll interval. Detection costs nothing beyond the
+//! property. A record can take part in at most 250 merges, so the tombstone
+//! burst from one survivor is bounded.
+//!
+//! The alternatives were considered and are worse:
+//!
+//! - **`*.merge` webhook subscriptions** carry `primaryObjectId`,
+//!   `mergedObjectIds`, `newObjectId` and `numberOfPropertiesMoved` — everything
+//!   needed, first-hand. They require a publicly reachable HTTPS endpoint, which
+//!   is the reason this connector polls at all. Unavailable here by construction.
+//! - **A merge audit endpoint.** There is none in v3. Contacts v1 had
+//!   `?includeMergeAudits=true` and it has no successor.
+//! - **Id aliasing as a probe.** Fetching a merged-away id returns the survivor,
+//!   so a `hs_object_id` that differs from the id requested is a reliable
+//!   signal. It costs a read per suspect id, and the set of suspects is every
+//!   id ever emitted — an unbounded, permanently growing re-read of the whole
+//!   portal. Rejected on cost, not on correctness.
+//! - **`?propertiesWithHistory=`** on a GET gives per-value change times, which
+//!   would date each merge exactly. Also a read per record, and the tombstone
+//!   does not need the merge time to be ordered correctly. Rejected.
+//!
+//! ## The tombstone, and the millisecond that makes it win
+//!
+//! Each merged-away id becomes a **new version of that id carrying
+//! `deleted: true`** — meshql's deletion model, per [`crate::record`], where a
+//! deletion is a `Create` of a deleted version rather than an [`Op::Delete`]
+//! with a pre-image nobody holds.
+//!
+//! `created_at` is what resolves an id to a version, and
+//! `meshql_core::envelope_order` breaks a same-millisecond tie **per adapter**
+//! — merkql by log offset, SQLite by rowid, and Postgres, Mongo and ksql by
+//! nothing at all. A tombstone stamped at exactly the surviving record's
+//! modification time could therefore lose that tie and leave the dead record
+//! live, which is precisely the failure it exists to prevent. So the tombstone
+//! is stamped at **the surviving record's modification time plus one
+//! millisecond** — see [`merge_tombstone_ts`].
+//!
+//! That one millisecond is the only invented time in this module. It is
+//! bounded, it is deterministic — the same surviving revision always yields the
+//! same tombstone, so an at-least-once re-delivery produces a byte-identical
+//! envelope rather than a competing one — and it beats every version the
+//! retired id can have: HubSpot stamps the survivor at merge time, which is at
+//! or after the last modification either source record ever had.
+//!
+//! ## What merge handling does NOT catch — read this before trusting it
+//!
+//! - **A search response that omits the property.** HubSpot documents
+//!   [`MERGED_IDS_PROPERTY`] on the object and documents that any property may
+//!   be named in a search's `properties` array, but it does not document the
+//!   two together, and no public first-hand capture of a *search* response
+//!   carrying it exists — every confirmed example is a GET by id. There is a
+//!   standing community report, unverified, that it comes back null on contacts
+//!   while working on deals and tickets. **If that is true for a portal, merges
+//!   of that object type go undetected there and this connector cannot tell**:
+//!   an absent property and a record that has never been merged look identical.
+//!   What can be checked is checked — [`HubspotSource::changes`] warns if the
+//!   property is not even defined on the object type — but the gap between
+//!   "defined" and "returned by search" is not observable from here, and
+//!   claiming otherwise would be the second lie in a module written to remove
+//!   the first. Verify it once against the portal.
+//! - **A merge HubSpot does not record on the survivor at all.** A custom object
+//!   type that does not populate the property leaves the merge invisible to any
+//!   poller. The property is the ceiling, and the connector says so at startup
+//!   rather than leaving an operator to infer it from a projection that quietly
+//!   does not add up.
+//! - **A merged-away id the topic never carried.** The tombstone is emitted
+//!   anyway, producing an aggregate whose only version is a deletion. Harmless,
+//!   and far cheaper than the read-per-suspect-id it would take to find out.
+//! - **Merges that predate the topic.** A record merged away before this
+//!   connector's first poll was never on the topic, so there is nothing to
+//!   retire. One merged away *while the connector was stopped* is caught on
+//!   resume, because the merge bumped the survivor's timestamp and the `>=`
+//!   filter returns it.
+//! - **Merges before 2025-01-14.** HubSpot's older behaviour kept the primary
+//!   record and its id, so there was no third aggregate and nothing to retire.
+//!   A survivor listing itself is filtered out; see [`merged_away_ids`].
+//!
+//! ## The crash window, which is where this nearly went wrong
+//!
+//! The survivor goes on the topic **before** the records it consumed. Each
+//! record carries the cursor including itself, so a position naming the survivor
+//! as delivered never rides on a record that precedes it — the reverse order
+//! would lose the survivor outright on a crash in between.
+//!
+//! That ordering creates the window this has to survive: the survivor's position
+//! can be committed while its tombstones are still unappended. A resumed
+//! connector then finds the survivor in its `seen` set, and if merges were only
+//! inspected for records `seen` accepts as new, **nothing would ever look at
+//! that record again** and the ids it consumed would stay live forever. So the
+//! two questions are kept apart — `seen` dedupes the record,
+//! [`TypeCursor::retire`] dedupes the tombstone — and the merge check runs on
+//! every result, new or not.
+//!
+//! # `properties`: HubSpot's default set is a truncation, so it is not used
+//!
+//! An empty `properties` list used to mean "HubSpot's default set". That set is
+//! a *small* subset — for contacts roughly `firstname`, `lastname`, `email`,
+//! `createdate`, `lastmodifieddate`, `hs_object_id` — and every other property,
+//! including every custom one a domain actually models on, is omitted in
+//! silence. Not an error and not a warning: the payload simply lacks them, and
+//! a projection folded from it is missing fields nobody can see are missing. A
+//! property added in HubSpot next week stays invisible until somebody widens a
+//! TOML by hand.
+//!
+//! So an empty `properties` now means **all of them**:
+//! `GET /crm/v3/properties/{objectType}` is read once per object type when the
+//! stream opens, and every name it returns is requested. Replicating a sixth of
+//! a record while reporting success is the kind of quiet lie this crate does
+//! not ship.
+//!
+//! The trade is real, and is stated here rather than discovered: a portal with
+//! several hundred properties per object makes every search page
+//! correspondingly larger. Naming properties explicitly narrows it — and an
+//! explicit list is then a **deliberate** truncation whose omissions are still
+//! invisible downstream. The timestamp and merge properties are appended to any
+//! list regardless, because without them the connector cannot advance and
+//! cannot see a merge.
+//!
+//! Discovery needs the private app's `crm.schemas.{object}.read` scope. Without
+//! it the connector fails at startup naming the scope and the alternative,
+//! rather than falling back to the truncated default — a silent fallback is the
+//! exact failure this removes.
+//!
 //! # What this connector does NOT capture
 //!
 //! - **Hard deletes and archives.** A deleted HubSpot object simply stops
-//!   appearing in search results; there is no tombstone to poll for. This
-//!   source therefore never emits [`Op::Delete`], and a projection built from
-//!   it will retain records that no longer exist in the CRM. A domain that
-//!   needs deletions needs webhooks (`*.deletion` subscriptions) or a periodic
-//!   reconciliation pass; it cannot get them from here, and pretending
-//!   otherwise is how a projection quietly drifts.
+//!   appearing in search results; there is no tombstone to poll for. Merges are
+//!   handled (above) precisely because HubSpot *does* leave a trace of those;
+//!   an ordinary delete leaves none. So a projection built from this source
+//!   retains records the CRM has deleted outright. A domain that needs those
+//!   needs webhooks (`*.deletion` subscriptions) or a periodic reconciliation
+//!   pass; it cannot get them from here, and pretending otherwise is how a
+//!   projection quietly drifts.
 //! - **Property-level history.** Only the current value of each property is
 //!   read, so two modifications inside one poll interval arrive as one record.
 //!   The `_source.lastmodified_ms` is the later of the two.
@@ -178,6 +340,31 @@ const RETRY_CAP: Duration = Duration::from_secs(60);
 /// shrink the set would skip them. See [`TypeCursor::accept`].
 const MAX_SEEN_IDS: usize = 50_000;
 
+/// Hard ceiling on the retired-id set carried in the cursor. Same direction of
+/// failure as [`MAX_SEEN_IDS`]: evicting the oldest costs a re-emitted
+/// tombstone, and a tombstone is idempotent — `deleted: true` is `deleted: true`
+/// however many times it lands. See [`TypeCursor::retire`].
+const MAX_RETIRED_IDS: usize = 10_000;
+
+/// The multi-valued property naming every record merged **into** this one.
+///
+/// This is the connector's only polling-visible evidence that a merge happened.
+/// See the module docs: HubSpot creates a new record for a merge and leaves the
+/// consumed ones resolving to it, so without this property the consumed ids stay
+/// live on the topic forever.
+pub const MERGED_IDS_PROPERTY: &str = "hs_merged_object_ids";
+
+/// Contacts only: `vid:merged_at_ms` pairs for every contact merged into this
+/// one. Read in addition to [`MERGED_IDS_PROPERTY`] because it carries the
+/// merge *time*, which the tombstone reports as provenance.
+pub const MERGED_VIDS_PROPERTY: &str = "hs_calculated_merged_vids";
+
+/// Contacts are the odd one out for both the timestamp property and the merge
+/// properties, so the test is written once.
+fn is_contact(object_type: &str) -> bool {
+    matches!(object_type, "contacts" | "contact")
+}
+
 /// The property carrying an object's last-modified timestamp.
 ///
 /// This is not uniform across HubSpot, and the inconsistency is a trap:
@@ -187,10 +374,106 @@ const MAX_SEEN_IDS: usize = 50_000;
 /// an empty result set for an unknown property — so the wrong name here
 /// produces a connector that runs forever and delivers nothing.
 fn timestamp_property(object_type: &str) -> &'static str {
-    match object_type {
-        "contacts" | "contact" => "lastmodifieddate",
-        _ => "hs_lastmodifieddate",
+    if is_contact(object_type) {
+        "lastmodifieddate"
+    } else {
+        "hs_lastmodifieddate"
     }
+}
+
+/// Properties appended to every query whatever the operator listed.
+///
+/// Two different silent failures live here, and HubSpot reports neither:
+/// without the timestamp property the response carries no watermark, the cursor
+/// cannot advance and the connector re-reads one page forever; without the
+/// merge properties a merge is undetectable and the records it consumed stay
+/// live on the topic for good. An unrequested property is simply absent from
+/// the response, so both look exactly like a healthy connector.
+fn required_properties(object_type: &str) -> Vec<&'static str> {
+    let mut required = vec![timestamp_property(object_type), MERGED_IDS_PROPERTY];
+    if is_contact(object_type) {
+        required.push(MERGED_VIDS_PROPERTY);
+    }
+    required
+}
+
+/// The ids a surviving record names as having been merged into it, paired with
+/// the merge time where HubSpot records one.
+///
+/// The time is **provenance only** — it is written into the tombstone's payload
+/// and deliberately not used to order it. Ordering comes from the survivor's own
+/// modification time; see [`merge_tombstone_ts`].
+fn merged_away_ids(properties: &Stash, surviving_id: &str) -> Vec<(String, Option<i64>)> {
+    // A map, not a Vec: the same id appears in both properties for a contact,
+    // and the emission order has to be reproducible across a replay or the
+    // duplicate a restart produces is a *different* record rather than the same
+    // one again.
+    let mut merged: BTreeMap<String, Option<i64>> = BTreeMap::new();
+
+    for id in multi_value(properties.get(MERGED_IDS_PROPERTY)) {
+        merged.entry(id).or_insert(None);
+    }
+    for pair in multi_value(properties.get(MERGED_VIDS_PROPERTY)) {
+        // `vid:merged_at_ms`. A pair carrying no parseable time is still a vid,
+        // and dropping it because the timestamp half was unreadable would lose
+        // the merge over a field we only use for provenance.
+        let (vid, at) = match pair.split_once(':') {
+            Some((vid, at)) => (vid.trim().to_string(), at.trim().parse::<i64>().ok()),
+            None => (pair, None),
+        };
+        let slot = merged.entry(vid).or_insert(None);
+        if slot.is_none() {
+            *slot = at;
+        }
+    }
+
+    merged
+        .into_iter()
+        // A survivor naming itself is ordinary — a merge that preserves the
+        // primary record's id lists it — and retiring it would tombstone the
+        // very record being emitted alongside.
+        .filter(|(id, _)| !id.is_empty() && id != surviving_id)
+        .collect()
+}
+
+/// HubSpot renders a multi-valued property as a semicolon-delimited string.
+/// Arrays and bare numbers are accepted too: a merge that goes undetected
+/// because the encoding was not the one guessed here is exactly the silent
+/// corruption this module exists to remove, and the cost of being liberal is
+/// nothing.
+fn multi_value(value: Option<&Value>) -> Vec<String> {
+    let parts: Vec<String> = match value {
+        Some(Value::String(s)) => s.split(';').map(|p| p.trim().to_string()).collect(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(|item| match item {
+                Value::String(s) => Some(s.trim().to_string()),
+                Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+            .collect(),
+        Some(Value::Number(n)) => vec![n.to_string()],
+        _ => Vec::new(),
+    };
+    parts.into_iter().filter(|p| !p.is_empty()).collect()
+}
+
+/// When a merge tombstone is filed, given the surviving record's own
+/// modification time.
+///
+/// **One millisecond later, and the millisecond is the whole point.** meshql
+/// resolves an id to the version with the greatest `created_at`, and
+/// `meshql_core::envelope_order` breaks a tie at the same millisecond using the
+/// adapter's own sequence — which merkql and SQLite have and Postgres, Mongo and
+/// ksql do not. A tombstone stamped at the survivor's exact modification time
+/// would tie with any version of the retired record written in that same
+/// millisecond and could lose, leaving a record HubSpot has deleted live in the
+/// mesh with nothing downstream able to notice.
+///
+/// It is deterministic, so an at-least-once re-delivery re-derives the identical
+/// timestamp rather than minting a competing version.
+fn merge_tombstone_ts(surviving_ts_ms: i64) -> i64 {
+    surviving_ts_ms.saturating_add(1)
 }
 
 // ── configuration ────────────────────────────────────────────────────────
@@ -213,7 +496,10 @@ pub struct Settings {
     /// meshql token, so authorisation is a property of the *connector*, not of
     /// the record — see [`HubspotSource`]'s docs.
     pub authorized_tokens: Vec<String>,
-    /// Properties to request. Empty means HubSpot's default set.
+    /// Properties to request. **Empty means every property defined on the
+    /// object type**, discovered at `changes()` — never HubSpot's default set,
+    /// which is a small subset that omits every custom property in silence. See
+    /// the module docs.
     pub properties: Vec<String>,
     pub page_size: u32,
     pub poll_interval: Duration,
@@ -318,6 +604,21 @@ struct TypeCursor {
     /// order — an unstable cursor string rewrites the offset file on every
     /// commit and makes a resume unreproducible.
     seen: BTreeMap<String, i64>,
+    /// `id -> tombstone_ms` for every id already retired by a merge.
+    ///
+    /// [`MERGED_IDS_PROPERTY`] is *cumulative*: a surviving record names every
+    /// record ever merged into it, on every poll that returns it. Without this
+    /// set, a record merged once and then edited daily would mint a fresh
+    /// tombstone for each of its sources every day, forever. The tombstones
+    /// would all be correct and all be redundant.
+    ///
+    /// `#[serde(default)]` rather than a [`CURSOR_VERSION`] bump: an offset file
+    /// written by an older build still names a valid position, and routing every
+    /// deployment through [`CdcError::UnusablePosition`] to re-snapshot a portal
+    /// would cost far more than the duplicate tombstones an empty set produces
+    /// once.
+    #[serde(default)]
+    retired: BTreeMap<String, i64>,
 }
 
 impl TypeCursor {
@@ -374,6 +675,34 @@ impl TypeCursor {
         }
 
         Ok(fresh)
+    }
+
+    /// Note that `id` has been retired by a merge. `true` means emit the
+    /// tombstone.
+    ///
+    /// Unlike [`Self::accept`] this set is never pruned by the watermark: a
+    /// retired id is gone from HubSpot for good, so its timestamp says nothing
+    /// about whether it can still be re-fetched. It is bounded by eviction
+    /// alone, oldest first — which costs a re-emitted tombstone for a record
+    /// that is already dead, and re-asserting a deletion changes nothing.
+    fn retire(&mut self, id: &str, ts: i64) -> bool {
+        if self.retired.contains_key(id) {
+            return false;
+        }
+        self.retired.insert(id.to_string(), ts);
+
+        while self.retired.len() > MAX_RETIRED_IDS {
+            let Some(oldest) = self
+                .retired
+                .iter()
+                .min_by_key(|(_, ts)| **ts)
+                .map(|(id, _)| id.clone())
+            else {
+                break;
+            };
+            self.retired.remove(&oldest);
+        }
+        true
     }
 }
 
@@ -504,16 +833,18 @@ impl Http {
             "sorts": [{ "propertyName": property, "direction": "ASCENDING" }],
             "limit": limit,
         });
-        if !properties.is_empty() {
-            // Always request the timestamp property, whatever the operator
-            // listed. Without it the response carries no watermark, the cursor
-            // cannot advance, and the connector re-reads the same page forever.
-            let mut requested: Vec<String> = properties.to_vec();
-            if !requested.iter().any(|p| p == property) {
-                requested.push(property.to_string());
+        // `properties` is resolved before the first query and is never empty —
+        // see [`HubspotSource::changes`]. Sending it unconditionally is what
+        // makes [`required_properties`] unconditional too, and those are the
+        // names whose absence HubSpot reports by returning a healthy-looking
+        // page that quietly cannot advance or cannot see a merge.
+        let mut requested: Vec<String> = properties.to_vec();
+        for required in required_properties(object_type) {
+            if !requested.iter().any(|p| p == required) {
+                requested.push(required.to_string());
             }
-            body["properties"] = json!(requested);
         }
+        body["properties"] = json!(requested);
         if let Some(after) = after {
             body["after"] = json!(after);
         }
@@ -607,21 +938,80 @@ impl Http {
         )))
     }
 
+    /// Every property defined on an object type.
+    ///
+    /// Read once per type when the stream opens, so that an empty `properties`
+    /// config means *all of them* rather than HubSpot's default set. See the
+    /// module docs: the default set is a small subset and drops every custom
+    /// property in silence, which is a projection missing fields nobody can see
+    /// are missing.
+    async fn discover_properties(&self, object_type: &str) -> Result<Vec<String>, CdcError> {
+        let url = format!(
+            "{}/crm/v3/properties/{object_type}",
+            self.base_url.trim_end_matches('/')
+        );
+        let value = self.get(&url).await?;
+        let names: Vec<String> = value
+            .get("results")
+            .and_then(|results| results.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.get("name").and_then(|n| n.as_str()))
+                    .map(|n| n.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Falling back to HubSpot's default property set here would be the exact
+        // silent truncation this call exists to remove, and it would be invisible
+        // — the connector would run, deliver records, and simply omit most of
+        // each one.
+        if names.is_empty() {
+            return Err(CdcError::Backend(anyhow::anyhow!(
+                "GET {url} named no properties for '{object_type}', so the connector cannot \
+                 tell what a record of that type contains. Either the object type does not \
+                 exist in this portal, or the private app lacks the \
+                 `crm.schemas.{object_type}.read` scope. Grant the scope, or list the \
+                 properties explicitly in the source's `properties` — and note that an \
+                 explicit list is a deliberate truncation: anything absent from it is \
+                 invisible downstream forever."
+            )));
+        }
+        Ok(names)
+    }
+
     /// POST, with the rate-limit and transient-failure policy.
+    async fn send(&self, url: &str, body: &Value) -> Result<Value, CdcError> {
+        self.request(reqwest::Method::POST, url, Some(body)).await
+    }
+
+    /// GET, with the same policy. Only the properties endpoint uses it; the
+    /// search endpoint is a POST.
+    async fn get(&self, url: &str) -> Result<Value, CdcError> {
+        self.request(reqwest::Method::GET, url, None).await
+    }
+
+    /// One request, with the rate-limit and transient-failure policy.
     ///
     /// Every non-success path resolves one of two ways: retry, or return an
     /// error. Neither ends the stream, which is what keeps a throttled portal
     /// from looking like a portal with nothing left to say.
-    async fn send(&self, url: &str, body: &Value) -> Result<Value, CdcError> {
+    async fn request(
+        &self,
+        method: reqwest::Method,
+        url: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, CdcError> {
         let mut attempt = 0u32;
         loop {
-            let response = self
+            let mut request = self
                 .client
-                .post(url)
-                .bearer_auth(&self.token)
-                .json(body)
-                .send()
-                .await;
+                .request(method.clone(), url)
+                .bearer_auth(&self.token);
+            if let Some(body) = body {
+                request = request.json(body);
+            }
+            let response = request.send().await;
 
             let wait = match response {
                 Ok(response) => {
@@ -778,6 +1168,61 @@ impl Inner {
         }
     }
 
+    /// A record merged away, retired.
+    ///
+    /// The envelope is a **new version of the retired id** carrying
+    /// `deleted: true`, which is meshql's deletion — see [`crate::record`]. It
+    /// is not an [`Op::Delete`] with an empty `after`: that produces a record
+    /// [`ChangeRecord::key`] cannot key and a fold cannot read, and the domain
+    /// fact ("this id is now that id") would have nowhere to live.
+    ///
+    /// `surviving_ts_ms` is the **survivor's** modification time, and the
+    /// tombstone is filed one millisecond later. [`merge_tombstone_ts`] is where
+    /// that argument lives; it is the difference between a dead record retiring
+    /// and a dead record staying live.
+    fn merge_tombstone(
+        &self,
+        object_type: &str,
+        retired_id: &str,
+        surviving_id: &str,
+        surviving_ts_ms: i64,
+        merged_at_ms: Option<i64>,
+    ) -> Envelope {
+        let ts_ms = merge_tombstone_ts(surviving_ts_ms);
+        let mut payload = Stash::new();
+        // `_merged_into` is the marker: a consumer that wants to repoint
+        // references rather than merely drop them needs the surviving id, and
+        // the `deleted` flag alone cannot carry it.
+        payload.insert(
+            "_merged_into".to_string(),
+            json!(format!("{object_type}:{surviving_id}")),
+        );
+        payload.insert("_merged_into_object_id".to_string(), json!(surviving_id));
+        // HubSpot records the merge time for contacts only. Absent rather than
+        // guessed everywhere else: a guessed timestamp in a provenance field is
+        // worse than a missing one.
+        if let Some(at) = merged_at_ms {
+            payload.insert("_merged_at_ms".to_string(), json!(at));
+        }
+        payload.insert(
+            "_source".to_string(),
+            json!({
+                "connector": CONNECTOR,
+                "object_type": object_type,
+                "object_id": retired_id,
+                "lastmodified_ms": ts_ms,
+            }),
+        );
+
+        Envelope {
+            id: format!("{object_type}:{retired_id}"),
+            payload,
+            created_at: chrono::DateTime::from_timestamp_millis(ts_ms).unwrap_or_default(),
+            deleted: true,
+            authorized_tokens: self.settings.authorized_tokens.clone(),
+        }
+    }
+
     fn record(
         &self,
         object_type: &str,
@@ -787,9 +1232,26 @@ impl Inner {
         snapshot: Snapshot,
         position: Option<String>,
     ) -> ChangeRecord {
+        self.wrap(
+            self.envelope(object_type, result, ts_ms),
+            ts_ms,
+            op,
+            snapshot,
+            position,
+        )
+    }
+
+    fn wrap(
+        &self,
+        envelope: Envelope,
+        ts_ms: i64,
+        op: Op,
+        snapshot: Snapshot,
+        position: Option<String>,
+    ) -> ChangeRecord {
         ChangeRecord::new(
             op,
-            self.envelope(object_type, result, ts_ms),
+            envelope,
             SourceInfo {
                 connector: CONNECTOR.to_string(),
                 entity: self.settings.entity.clone(),
@@ -925,6 +1387,11 @@ enum NextStep {
 
 struct Feed {
     inner: Arc<Inner>,
+    /// The property set to request, per object type, resolved once when the
+    /// stream opened. Never empty — see [`HubspotSource::changes`]; an empty
+    /// list would fall back to HubSpot's truncated default set, which is the
+    /// silent omission the module docs refuse.
+    properties: BTreeMap<String, Vec<String>>,
     cursor: Cursor,
     phase: Phase,
     /// Which object type the current pass is over.
@@ -1068,6 +1535,11 @@ impl Feed {
 
         let object_type = self.object_type().to_string();
         let since = self.cursor.watermark(&object_type);
+        let properties = self
+            .properties
+            .get(&object_type)
+            .map(|p| p.as_slice())
+            .unwrap_or(&[]);
         let page = self
             .inner
             .http
@@ -1075,7 +1547,7 @@ impl Feed {
                 &object_type,
                 since,
                 self.after.as_deref(),
-                &self.inner.settings.properties,
+                properties,
                 self.inner.settings.page_size,
             )
             .await?;
@@ -1084,30 +1556,69 @@ impl Feed {
         for result in &page.results {
             let ts = Http::watermark_of(result, &object_type)?;
             let lag = self.lag_ms();
-            if !self
+            let fresh = self
                 .cursor
                 .entry(&object_type)
-                .accept(&result.id, ts, lag)?
-            {
-                continue;
-            }
+                .accept(&result.id, ts, lag)?;
             let (op, snapshot) = match self.phase {
                 Phase::Snapshot => (Op::Read, Snapshot::True),
                 Phase::Live => (Op::Create, Snapshot::False),
             };
-            // The position is the cursor *including* this record, so a crash
-            // after the append and the commit resumes without re-delivering it
-            // and without skipping the ones beside it in the same millisecond.
-            let position = Some(self.cursor.encode());
-            self.buffer.push_back(self.inner.record(
-                &object_type,
-                result,
-                ts,
-                op,
-                snapshot,
-                position,
-            ));
-            self.produced_in_round = true;
+            if fresh {
+                // The position is the cursor *including* this record, so a crash
+                // after the append and the commit resumes without re-delivering
+                // it and without skipping the ones beside it in the same
+                // millisecond.
+                let position = Some(self.cursor.encode());
+                self.buffer.push_back(self.inner.record(
+                    &object_type,
+                    result,
+                    ts,
+                    op,
+                    snapshot,
+                    position,
+                ));
+                self.produced_in_round = true;
+            }
+
+            // Merges are checked even for a record the cursor has already
+            // emitted, and that is not an oversight. `seen` dedupes the
+            // *record*; `retired` dedupes the *tombstone*; they answer different
+            // questions and conflating them loses a retirement for good. The
+            // survivor's own position is committed before its tombstones are
+            // appended, so a crash in between leaves the survivor in `seen` with
+            // its sources still live — and if this were inside the `fresh`
+            // branch, nothing would ever look at that record again.
+            //
+            // Order within the fresh case still matters: the survivor is pushed
+            // first, so a position naming it as delivered never rides on a
+            // record that precedes it.
+            for (retired_id, merged_at) in merged_away_ids(&result.properties, &result.id) {
+                let tombstone_ts = merge_tombstone_ts(ts);
+                if !self
+                    .cursor
+                    .entry(&object_type)
+                    .retire(&retired_id, tombstone_ts)
+                {
+                    continue;
+                }
+                let tombstone = self.inner.merge_tombstone(
+                    &object_type,
+                    &retired_id,
+                    &result.id,
+                    ts,
+                    merged_at,
+                );
+                let position = Some(self.cursor.encode());
+                self.buffer.push_back(self.inner.wrap(
+                    tombstone,
+                    tombstone_ts,
+                    op,
+                    snapshot,
+                    position,
+                ));
+                self.produced_in_round = true;
+            }
         }
         self.consumed_in_pass = self.consumed_in_pass.saturating_add(count);
 
@@ -1179,9 +1690,61 @@ impl CommitSource for HubspotSource {
             }
         }
 
+        // The property set is resolved before the first query, because an empty
+        // `properties` means *every* property rather than HubSpot's default
+        // set — see the module docs. Doing it here rather than in
+        // `with_token` keeps the constructor free of I/O and gives a restart a
+        // fresh view of a portal whose schema changed while it was down.
+        let mut properties: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for object_type in &self.inner.settings.objects {
+            let resolved = if self.inner.settings.properties.is_empty() {
+                let discovered = self.inner.http.discover_properties(object_type).await?;
+                eprintln!(
+                    "[merkql-connect hubspot] {object_type}: requesting all {} properties \
+                     defined on the object. Name them in `properties` to narrow it — and \
+                     note that anything left out of an explicit list is invisible \
+                     downstream, silently, forever.",
+                    discovered.len()
+                );
+                // The one thing about merge detection that *can* be checked from
+                // here. A type without the property cannot report a merge at
+                // all, and an undetected merge and a portal where nothing has
+                // been merged look exactly alike from a poll — so if this is
+                // ever going to be said, it has to be said now.
+                if !discovered.iter().any(|p| p == MERGED_IDS_PROPERTY) {
+                    eprintln!(
+                        "[merkql-connect hubspot] WARNING: {object_type} does not define \
+                         `{MERGED_IDS_PROPERTY}`, so a merge of this type is invisible to \
+                         this connector. Records merged away will stay live on the topic \
+                         and every projection folded from it will count them. Nothing \
+                         downstream can detect this."
+                    );
+                }
+                discovered
+            } else {
+                self.inner.settings.properties.clone()
+            };
+            properties.insert(object_type.clone(), resolved);
+        }
+
+        // Said out loud once per start, because the ceiling is real and an
+        // operator cannot infer it from anything the connector does later. A
+        // merge the survivor does not record is a merge no poller can see, and
+        // discovering that from a projection whose counts do not add up is the
+        // outcome this line exists to prevent.
+        eprintln!(
+            "[merkql-connect hubspot] merge handling is on: a record naming others in \
+             `{MERGED_IDS_PROPERTY}` retires each of them with a `deleted: true` version \
+             stamped one millisecond after its own. A merge HubSpot does not record there \
+             is not visible to a poller — that needs a `*.merge` webhook subscription and \
+             a public endpoint this connector does not have — and would leave a dead \
+             aggregate live on the topic."
+        );
+
         let pass_start_ms = cursor.watermark(&self.inner.settings.objects[0]);
         let feed = Feed {
             inner: self.inner.clone(),
+            properties,
             cursor,
             phase,
             type_ix: 0,
@@ -1290,6 +1853,195 @@ mod tests {
         let mut archived = result("1", "1");
         archived.archived = true;
         assert!(inner.envelope("deals", &archived, 1).deleted);
+    }
+
+    // ── merges ──────────────────────────────────────────────────────────
+
+    /// The surviving record is the only place a poller can learn a merge
+    /// happened. Everything the connector does about merges rests on reading
+    /// this list correctly.
+    #[test]
+    fn a_survivor_names_the_records_merged_into_it() {
+        let mut properties = Stash::new();
+        properties.insert(MERGED_IDS_PROPERTY.to_string(), json!("11;22; 33 "));
+
+        let merged = merged_away_ids(&properties, "99");
+        assert_eq!(
+            merged.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            vec!["11", "22", "33"]
+        );
+        assert!(
+            merged.iter().all(|(_, at)| at.is_none()),
+            "only contacts carry a merge time"
+        );
+    }
+
+    /// Contacts carry `vid:merged_at_ms` pairs as well, and the two properties
+    /// overlap. A merge counted twice would emit the tombstone twice — harmless
+    /// — but an id present only in the pairs must not be missed, which would
+    /// not be.
+    #[test]
+    fn a_contacts_merge_history_is_read_from_both_properties_without_duplication() {
+        let mut properties = Stash::new();
+        properties.insert(MERGED_IDS_PROPERTY.to_string(), json!("11"));
+        properties.insert(
+            MERGED_VIDS_PROPERTY.to_string(),
+            json!("11:1751892000000;22:1751892345123;33"),
+        );
+
+        let merged = merged_away_ids(&properties, "99");
+        assert_eq!(
+            merged,
+            vec![
+                ("11".to_string(), Some(1751892000000)),
+                ("22".to_string(), Some(1751892345123)),
+                // A pair with no parseable time is still a merged id. Dropping
+                // it over a provenance field would lose the merge itself.
+                ("33".to_string(), None),
+            ]
+        );
+    }
+
+    /// A merge that preserves the primary record's id lists that id among the
+    /// merged ones. Retiring it would tombstone the very record being emitted
+    /// alongside — the connector would delete the survivor.
+    #[test]
+    fn a_survivor_naming_itself_is_not_retired() {
+        let mut properties = Stash::new();
+        properties.insert(MERGED_IDS_PROPERTY.to_string(), json!("99;11"));
+        let merged = merged_away_ids(&properties, "99");
+        assert_eq!(
+            merged.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            vec!["11"]
+        );
+    }
+
+    /// HubSpot renders multi-valued properties as semicolon-delimited strings,
+    /// but a guess about an encoding is not a correctness argument. A merge
+    /// missed because the shape was an array is silent corruption.
+    #[test]
+    fn a_multi_valued_property_is_read_however_hubspot_encodes_it() {
+        assert_eq!(multi_value(Some(&json!("11;22"))), vec!["11", "22"]);
+        assert_eq!(multi_value(Some(&json!(["11", "22"]))), vec!["11", "22"]);
+        assert_eq!(multi_value(Some(&json!([11, 22]))), vec!["11", "22"]);
+        assert_eq!(multi_value(Some(&json!(11))), vec!["11"]);
+        for empty in [json!(""), json!(";;"), json!([]), json!(null)] {
+            assert!(multi_value(Some(&empty)).is_empty(), "{empty:?}");
+        }
+        assert!(multi_value(None).is_empty());
+    }
+
+    /// **The ordering guarantee.** `created_at` resolves an id to a version, and
+    /// `meshql_core::envelope_order` breaks a same-millisecond tie with a
+    /// sequence Postgres, Mongo and ksql do not have. A tombstone stamped at the
+    /// survivor's own modification time could therefore tie and lose, leaving a
+    /// record HubSpot deleted live in the mesh.
+    #[test]
+    fn a_merge_tombstone_is_stamped_after_the_record_that_caused_it() {
+        assert_eq!(merge_tombstone_ts(1751892345123), 1751892345124);
+        assert!(merge_tombstone_ts(0) > 0);
+        // Deterministic, so an at-least-once re-delivery re-derives the same
+        // envelope rather than minting a competing version of a dead record.
+        assert_eq!(merge_tombstone_ts(7), merge_tombstone_ts(7));
+    }
+
+    /// meshql has no `DELETE`: a deletion is a new version carrying
+    /// `deleted: true`. The retired id keeps its identity so the new version
+    /// supersedes the live one rather than landing beside it.
+    #[test]
+    fn a_merged_away_record_is_retired_as_a_deleted_version_of_its_own_id() {
+        let inner = inner(&["contacts"]);
+        let tombstone = inner.merge_tombstone("contacts", "11", "99", 1_000, Some(900));
+
+        assert_eq!(tombstone.id, "contacts:11");
+        assert!(tombstone.deleted);
+        assert_eq!(
+            tombstone.created_at.timestamp_millis(),
+            1_001,
+            "one millisecond past the survivor, so it cannot tie and lose"
+        );
+        assert_eq!(tombstone.payload["_merged_into"], json!("contacts:99"));
+        assert_eq!(tombstone.payload["_merged_into_object_id"], json!("99"));
+        assert_eq!(tombstone.payload["_merged_at_ms"], json!(900));
+        assert_eq!(tombstone.payload["_source"]["object_id"], json!("11"));
+        assert_eq!(
+            tombstone.payload["_source"]["object_type"],
+            json!("contacts")
+        );
+        assert_eq!(tombstone.authorized_tokens, vec!["farm".to_string()]);
+
+        // No merge time outside contacts: an absent provenance field is better
+        // than a guessed one.
+        let deal = inner.merge_tombstone("deals", "11", "99", 1_000, None);
+        assert!(deal.payload.get("_merged_at_ms").is_none());
+    }
+
+    /// `hs_merged_object_ids` is cumulative, so the survivor names every record
+    /// ever merged into it on every poll that returns it. Without the retired
+    /// set, a record merged once and edited daily would mint a tombstone a day
+    /// for each of its sources, forever.
+    #[test]
+    fn an_id_is_retired_once_however_often_its_survivor_comes_round() {
+        let mut cursor = Cursor::default();
+        assert!(cursor.entry("deals").retire("11", 1_001));
+        assert!(!cursor.entry("deals").retire("11", 5_001));
+        assert!(cursor.entry("deals").retire("22", 5_001));
+
+        // And it survives the offset file, which is the only place it can do
+        // its job — the whole point is the *next* run.
+        let resumed = Cursor::decode(&cursor.encode()).unwrap();
+        assert_eq!(resumed, cursor);
+    }
+
+    /// A cursor written before merge handling shipped is still a valid position.
+    /// Rejecting it would route every running deployment through
+    /// `UnusablePosition` and re-snapshot a portal to gain nothing.
+    #[test]
+    fn a_cursor_from_before_merge_handling_still_resumes() {
+        let old = r#"{"v":1,"types":{"deals":{"ms":100,"high":100,"seen":{"1":100}}}}"#;
+        let cursor = Cursor::decode(old).expect("an older cursor still names a position");
+        assert_eq!(cursor.watermark("deals"), 100);
+        assert!(cursor.types["deals"].retired.is_empty());
+    }
+
+    /// Evicting the oldest costs a re-emitted tombstone for a record that is
+    /// already dead; letting the set grow costs an offset file that grows
+    /// without bound. Re-asserting a deletion changes nothing, so the choice is
+    /// not close.
+    #[test]
+    fn an_oversized_retired_set_evicts_oldest_first() {
+        let mut cursor = TypeCursor::default();
+        for i in 0..(MAX_RETIRED_IDS + 5) {
+            assert!(cursor.retire(&format!("id-{i}"), i as i64));
+        }
+        assert_eq!(cursor.retired.len(), MAX_RETIRED_IDS);
+        assert!(
+            !cursor.retired.contains_key("id-0"),
+            "the oldest retirement is the one it is safe to forget"
+        );
+        assert!(cursor
+            .retired
+            .contains_key(&format!("id-{}", MAX_RETIRED_IDS + 4)));
+    }
+
+    /// The merge properties are appended to every query the way the timestamp
+    /// property is. HubSpot answers an unrequested property with silence, so an
+    /// operator's hand-written `properties` list would otherwise turn merge
+    /// detection off while the connector kept looking healthy.
+    #[test]
+    fn every_query_asks_for_the_properties_that_reveal_a_merge() {
+        assert_eq!(
+            required_properties("contacts"),
+            vec![
+                "lastmodifieddate",
+                MERGED_IDS_PROPERTY,
+                MERGED_VIDS_PROPERTY
+            ]
+        );
+        assert_eq!(
+            required_properties("deals"),
+            vec!["hs_lastmodifieddate", MERGED_IDS_PROPERTY]
+        );
     }
 
     // ── the watermark boundary ──────────────────────────────────────────
