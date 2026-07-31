@@ -113,6 +113,13 @@ pub mod hubspot;
 pub mod salesforce;
 #[cfg(feature = "sap")]
 pub mod sap;
+#[cfg(feature = "sap-odp")]
+pub mod sap_odp;
+
+/// The six SAP auth modes, shared by [`sap`] and [`sap_odp`]. Private: it holds
+/// live credentials.
+#[cfg(any(feature = "sap", feature = "sap-odp"))]
+mod sap_auth;
 
 pub mod cert;
 

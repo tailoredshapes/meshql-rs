@@ -92,12 +92,13 @@
 //!
 //! # Where this logic came from, and why it is duplicated rather than shared
 //!
-//! The OData v2/v4 delta walk and all of the SAP auth modes below are
-//! **deliberately duplicated from `tailoredshapes/sap-cdc-mcp`**
-//! (`crates/sap-cdc/src/source/odata.rs` and `crates/sap-cdc/src/auth.rs`),
-//! which already solved them for a different sink. Extracting them into a
-//! crate both repos depend on is the architecturally cleaner move and it was
-//! considered and rejected for this first cut:
+//! The OData v2/v4 delta walk here, and the six auth modes now in
+//! [`crate::sap_auth`], are **deliberately duplicated from
+//! `tailoredshapes/sap-cdc-mcp`** (`crates/sap-cdc/src/source/odata.rs` and
+//! `crates/sap-cdc/src/auth.rs`), which already solved them for a different
+//! sink. Extracting them into a crate both repos depend on is the
+//! architecturally cleaner move and it was considered and rejected for this
+//! first cut:
 //!
 //! - `sap-cdc-mcp` is a **separate git repository**, so a shared crate becomes
 //!   a GitHub-git-dep pinned to a tag — the convention the workspace already
@@ -116,6 +117,12 @@
 //! When a third consumer of SAP OData appears, extract then. Until then this
 //! note is the pointer: **a fix to the delta walk or to auth probably belongs
 //! in both places.**
+//!
+//! That reasoning is about *another repository*, and it does not extend to
+//! another module of this crate. [`crate::sap_odp`] speaks to the same gateways
+//! with the same credentials, so the auth modes were lifted out into
+//! [`crate::sap_auth`] the moment there were two callers — a second copy of
+//! credential handling in one `src/` directory is a copy that gets fixed once.
 //!
 //! # This source is a poller, on purpose, and that is not a silent degradation
 //!
@@ -184,6 +191,7 @@
 
 use crate::config::{SapAuthConfig, SapODataVersion};
 use crate::record::{ChangeRecord, Op, Snapshot, SourceInfo};
+use crate::sap_auth::{AuthedClient, SapAuth};
 use crate::source::{CdcError, ChangeStream, CommitSource, Resume, SnapshotMode};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -192,12 +200,11 @@ use meshql_core::{Envelope, Stash};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::QName;
 use quick_xml::Reader;
-use reqwest::{Client, ClientBuilder, RequestBuilder, StatusCode};
+use reqwest::StatusCode;
 use serde_json::{json, Value as Json};
 use std::collections::{BTreeMap, VecDeque};
-use std::path::Path;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 use url::Url;
 
 const CONNECTOR: &str = "sap";
@@ -210,317 +217,6 @@ pub const ENVELOPE_META_KEY: &str = "_sap";
 /// How long to wait before asking the delta link again when a cycle produced
 /// nothing. Configurable; this is only the default.
 pub const DEFAULT_POLL_INTERVAL_MS: u64 = 30_000;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Secrets
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A string that does not print itself.
-///
-/// Credentials reach this module from the environment and then sit inside a
-/// long-lived struct that participates in `{:?}` error context. `SecretString`
-/// from the `secrecy` crate does the same job; a ten-line newtype does it
-/// without a dependency the workspace does not otherwise carry.
-#[derive(Clone)]
-struct Secret(String);
-
-impl Secret {
-    fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for Secret {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("<redacted>")
-    }
-}
-
-fn env_var(name: &str) -> Result<String, CdcError> {
-    std::env::var(name).map_err(|_| {
-        CdcError::Backend(anyhow::anyhow!(
-            "SAP auth needs environment variable {name}, which is unset. Credentials are \
-             deliberately not readable from the connector TOML — the config names the \
-             variable, the deployment supplies the value."
-        ))
-    })
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Auth
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// A resolved SAP auth strategy, with the secret material already pulled out of
-/// the environment.
-///
-/// Ported from `sap-cdc-mcp`'s `auth.rs`; the four modes SAP deployments
-/// actually use are Basic (on-prem gateway), OAuth2 client-credentials (BTP
-/// destination service), OAuth2 SAML-bearer (principal propagation) and X.509
-/// mTLS (BTP mTLS destinations). `Bearer` and `None` are here because an SLT
-/// proxy in front of a private network is a real deployment and because the
-/// tests need a mode with no ceremony.
-///
-/// Not `pub`: it holds live credentials, and a type holding live credentials
-/// that anything outside this module can pattern-match is a credential one
-/// `{:?}` away from a log file.
-#[derive(Debug, Clone)]
-enum SapAuth {
-    /// No credentials. Only correct when something else — mTLS at a proxy, a
-    /// private network — is doing the authenticating.
-    None,
-    Basic {
-        user: String,
-        pass: Secret,
-    },
-    Bearer {
-        token: Secret,
-    },
-    Oauth2ClientCredentials {
-        token_url: String,
-        client_id: String,
-        client_secret: Secret,
-        scope: Option<String>,
-    },
-    Oauth2SamlBearer {
-        token_url: String,
-        assertion: Secret,
-        client_id: String,
-    },
-    /// A PEM cert + key pair on disk. Not an env var, because a certificate is
-    /// a file and stuffing PEM into the environment is how a private key ends
-    /// up in a process listing.
-    MTls {
-        cert_pem: Vec<u8>,
-    },
-}
-
-impl SapAuth {
-    /// Resolve a config-declared mode into live credentials.
-    fn resolve(config: &SapAuthConfig) -> Result<Self, CdcError> {
-        Ok(match config {
-            SapAuthConfig::None => SapAuth::None,
-            SapAuthConfig::Basic { user_env, pass_env } => SapAuth::Basic {
-                user: env_var(user_env)?,
-                pass: Secret(env_var(pass_env)?),
-            },
-            SapAuthConfig::Bearer { token_env } => SapAuth::Bearer {
-                token: Secret(env_var(token_env)?),
-            },
-            SapAuthConfig::Oauth2Cc {
-                token_url,
-                client_id_env,
-                client_secret_env,
-                scope,
-            } => SapAuth::Oauth2ClientCredentials {
-                token_url: token_url.clone(),
-                client_id: env_var(client_id_env)?,
-                client_secret: Secret(env_var(client_secret_env)?),
-                scope: scope.clone(),
-            },
-            SapAuthConfig::Oauth2SamlBearer {
-                token_url,
-                assertion_env,
-                client_id_env,
-            } => SapAuth::Oauth2SamlBearer {
-                token_url: token_url.clone(),
-                assertion: Secret(env_var(assertion_env)?),
-                client_id: env_var(client_id_env)?,
-            },
-            SapAuthConfig::Mtls {
-                cert_path,
-                key_path,
-            } => SapAuth::MTls {
-                cert_pem: read_identity_pem(cert_path, key_path)?,
-            },
-        })
-    }
-}
-
-/// `reqwest::Identity::from_pem` wants the certificate and the key in one blob.
-/// Read them at *startup* rather than at first request: a deployment with an
-/// unreadable key should fail before it claims a merkql topic, not an hour
-/// later on the first poll.
-fn read_identity_pem(cert_path: &Path, key_path: &Path) -> Result<Vec<u8>, CdcError> {
-    let mut pem = std::fs::read(cert_path).map_err(|e| {
-        CdcError::Backend(anyhow::anyhow!(
-            "reading mTLS certificate {}: {e}",
-            cert_path.display()
-        ))
-    })?;
-    let key = std::fs::read(key_path).map_err(|e| {
-        CdcError::Backend(anyhow::anyhow!(
-            "reading mTLS private key {}: {e}",
-            key_path.display()
-        ))
-    })?;
-    pem.push(b'\n');
-    pem.extend_from_slice(&key);
-    Ok(pem)
-}
-
-#[derive(Clone)]
-struct CachedToken {
-    bearer: Secret,
-    expires_at: Instant,
-}
-
-/// A `reqwest::Client` that knows how to authenticate to SAP, and caches an
-/// OAuth token until a minute before it expires.
-struct AuthedClient {
-    client: Client,
-    auth: SapAuth,
-    token: Mutex<Option<CachedToken>>,
-}
-
-impl AuthedClient {
-    fn new(auth: SapAuth) -> Result<Self, CdcError> {
-        let mut builder = ClientBuilder::new()
-            .user_agent(concat!("merkql-connect/", env!("CARGO_PKG_VERSION")))
-            .timeout(Duration::from_secs(120));
-
-        if let SapAuth::MTls { cert_pem } = &auth {
-            let identity = reqwest::Identity::from_pem(cert_pem).map_err(|e| {
-                CdcError::Backend(anyhow::anyhow!(
-                    "the configured mTLS certificate and key are not a usable identity: {e}"
-                ))
-            })?;
-            builder = builder.identity(identity);
-        }
-
-        let client = builder
-            .build()
-            .map_err(|e| CdcError::Backend(anyhow::anyhow!("building the SAP HTTP client: {e}")))?;
-
-        Ok(Self {
-            client,
-            auth,
-            token: Mutex::new(None),
-        })
-    }
-
-    /// Attach whatever this strategy needs to a request.
-    async fn authorize(&self, request: RequestBuilder) -> Result<RequestBuilder, CdcError> {
-        use base64::Engine;
-        Ok(match &self.auth {
-            // mTLS authenticates at the TLS handshake; there is no header.
-            SapAuth::None | SapAuth::MTls { .. } => request,
-            SapAuth::Basic { user, pass } => {
-                let creds = base64::engine::general_purpose::STANDARD
-                    .encode(format!("{user}:{}", pass.expose()));
-                request.header(reqwest::header::AUTHORIZATION, format!("Basic {creds}"))
-            }
-            SapAuth::Bearer { token } => request.header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {}", token.expose()),
-            ),
-            SapAuth::Oauth2ClientCredentials { .. } | SapAuth::Oauth2SamlBearer { .. } => {
-                let bearer = self.oauth_token().await?;
-                request.header(
-                    reqwest::header::AUTHORIZATION,
-                    format!("Bearer {}", bearer.expose()),
-                )
-            }
-        })
-    }
-
-    async fn oauth_token(&self) -> Result<Secret, CdcError> {
-        // Refresh a minute early. A token that expires between the check and
-        // the request comes back as a 401 that this module would classify as a
-        // backend error, so the margin is what keeps a long-running connector
-        // from a periodic self-inflicted outage.
-        //
-        // The guard is dropped before the await deliberately: holding a
-        // `std::sync::Mutex` across an await point is how a runtime deadlocks.
-        {
-            let cached = self.token.lock().expect("token cache poisoned").clone();
-            if let Some(cached) = cached {
-                if cached.expires_at > Instant::now() + Duration::from_secs(60) {
-                    return Ok(cached.bearer);
-                }
-            }
-        }
-
-        let (token_url, form): (&str, Vec<(&str, String)>) = match &self.auth {
-            SapAuth::Oauth2ClientCredentials {
-                token_url,
-                client_id,
-                client_secret,
-                scope,
-            } => {
-                let mut form = vec![
-                    ("grant_type", "client_credentials".to_string()),
-                    ("client_id", client_id.clone()),
-                    ("client_secret", client_secret.expose().to_string()),
-                ];
-                if let Some(scope) = scope.as_deref().filter(|s| !s.is_empty()) {
-                    form.push(("scope", scope.to_string()));
-                }
-                (token_url, form)
-            }
-            SapAuth::Oauth2SamlBearer {
-                token_url,
-                assertion,
-                client_id,
-            } => (
-                token_url,
-                vec![
-                    (
-                        "grant_type",
-                        "urn:ietf:params:oauth:grant-type:saml2-bearer".to_string(),
-                    ),
-                    ("assertion", assertion.expose().to_string()),
-                    ("client_id", client_id.clone()),
-                ],
-            ),
-            _ => {
-                return Err(CdcError::Backend(anyhow::anyhow!(
-                    "oauth_token called for a non-OAuth strategy"
-                )))
-            }
-        };
-
-        let response = self
-            .client
-            .post(token_url)
-            .form(&form)
-            .send()
-            .await
-            .map_err(|e| CdcError::Backend(anyhow::anyhow!("requesting an OAuth token: {e}")))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            // Never include the body: an OAuth error response can echo the
-            // assertion back.
-            return Err(CdcError::Backend(anyhow::anyhow!(
-                "the OAuth token endpoint {token_url} answered {status}"
-            )));
-        }
-
-        let body: Json = response
-            .json()
-            .await
-            .map_err(|e| CdcError::Backend(anyhow::anyhow!("parsing the OAuth token: {e}")))?;
-        let access = body
-            .get("access_token")
-            .and_then(Json::as_str)
-            .ok_or_else(|| {
-                CdcError::Backend(anyhow::anyhow!(
-                    "the OAuth token endpoint returned no access_token"
-                ))
-            })?;
-        let ttl = body
-            .get("expires_in")
-            .and_then(Json::as_u64)
-            .unwrap_or(3_600);
-
-        let bearer = Secret(access.to_string());
-        *self.token.lock().expect("token cache poisoned") = Some(CachedToken {
-            bearer: bearer.clone(),
-            expires_at: Instant::now() + Duration::from_secs(ttl),
-        });
-        Ok(bearer)
-    }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The composite-key encoding
@@ -2476,7 +2172,7 @@ mod tests {
 
     #[test]
     fn secrets_do_not_print_themselves() {
-        let secret = Secret("hunter2".into());
+        let secret = crate::sap_auth::Secret::new("hunter2");
         assert!(!format!("{secret:?}").contains("hunter2"));
     }
 }

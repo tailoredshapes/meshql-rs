@@ -199,6 +199,114 @@ pub enum SourceConfig {
         #[serde(default = "default_sap_poll_ms")]
         poll_interval_ms: u64,
     },
+    /// An SAP **Operational Delta Queue**, consumed over the ODP OData
+    /// interface. See the `sap_odp` module for the argument. Where the `sap`
+    /// source needs an application service someone built delta support into,
+    /// this one needs an ODP — a CDS view with Change Data Capture, a classic
+    /// extractor, a BW object — and gets a genuine server-maintained queue with
+    /// per-subscriber cursors and recovery. Six things an operator must know:
+    ///
+    /// - **Licensing is unresolved.** SAP Note 3255746 ("Unpermitted usage of
+    ///   ODP Data Replication APIs") is understood to restrict third-party
+    ///   consumption of ODP. Its body needs an S-user and has not been read, so
+    ///   nothing here asserts what it says — confirm your own position before
+    ///   pointing this at a customer system.
+    /// - **The subscription is identified by the OData service and the logon
+    ///   user, and nothing else.** No subscriber id is sent on the wire; change
+    ///   the credentials and SAP hands back a *new* queue starting from a fresh
+    ///   full load, silently. `subscriber_identity` is the operator's
+    ///   declaration of which pair a stored cursor belongs to, and a mismatch on
+    ///   restart is an unusable position rather than a quiet re-baseline. It
+    ///   also means **two connectors sharing one service and one user fight over
+    ///   one queue** — separate topics do not separate them.
+    /// - **The retention window is the connector's MTTR budget.** ODQ keeps
+    ///   already-retrieved data for **24 hours** by default (confirmed);
+    ///   un-retrieved data is not deleted at all. `snapshot_mode =
+    ///   "when_needed"` is the intended pairing.
+    /// - **`client` is part of the envelope id.** MANDT is part of a SAP
+    ///   record's database identity and is invisible in an OData payload, so
+    ///   without it two clients' records collide on one topic.
+    /// - **`key_properties` is required and is not discovered.** It decides the
+    ///   envelope id, which is a permanent identity; an ODP's projection list is
+    ///   not.
+    /// - **No credentials live here.** `auth` names a mode and the environment
+    ///   variables holding the secrets.
+    #[serde(rename = "sap_odp")]
+    SapOdp {
+        /// The ODP OData service root, e.g.
+        /// `https://s4.example.com/sap/opu/odata/SAP/ZODP_SRV`.
+        service_root: String,
+        /// The ODP being consumed, as it is named in the service — the CDS view,
+        /// extractor or BW object. The entity set read is
+        /// `FactsOf<odp_name>` unless `entity_set` overrides it.
+        odp_name: String,
+        /// The entity set below the service root. Defaults to
+        /// `FactsOf{odp_name}` — an ODP OData service generated in SEGW
+        /// publishes `FactsOf<ODP>` for transaction data, and also `AttrOf`,
+        /// `TextsOf` and `TimeDepAOf` sets for master data. Name it explicitly
+        /// to read one of those.
+        #[serde(default)]
+        entity_set: Option<String>,
+        /// The SAP client (MANDT) this connector replicates. **Part of the
+        /// envelope id**, because MANDT is part of the record's database
+        /// identity and never appears in an ODP OData payload — so a connector
+        /// that omitted it would let client 100 and client 200 become versions
+        /// of each other on one topic.
+        client: String,
+        /// Whether to send `sap-client=<client>` on every request. Default on.
+        /// Turn it off for a destination that already pins the client and
+        /// rejects a second one — `client` still declares which client the ids
+        /// belong to, which is the part that cannot be inferred later.
+        #[serde(default = "default_true")]
+        send_sap_client: bool,
+        /// Which ODP subscription a stored cursor belongs to, as a label the
+        /// operator writes.
+        ///
+        /// **This is not sent to SAP.** ODP identifies a subscriber by the
+        /// OData *service* plus the *user the client logs on as* — there is no
+        /// subscriber parameter in the protocol. So the connector cannot ask
+        /// which queue it is reading, and swapping the credentials in the
+        /// environment silently swaps the queue: SAP performs a fresh delta
+        /// initialisation, which is a full load, and the old queue is left
+        /// behind.
+        ///
+        /// Writing the pair down here is the only defence available. Convention:
+        /// `"<service name>/<SAP user>"`, e.g. `"ZODP_SO_SRV/MERKQL_CDC"`.
+        /// Change it and the stored cursor becomes an unusable position, which
+        /// is a decision with a diff attached instead of a silent re-baseline.
+        subscriber_identity: String,
+        /// The OData dialect. **v2 by default, because that is what an ODP
+        /// OData service is** — SEGW generates a Gateway V2 service and the
+        /// delta link is the `!deltatoken` custom query option. `v4` is
+        /// supported for a service that speaks it, but no ODP-backed V4 service
+        /// is confirmed to return `@odata.deltaLink`.
+        #[serde(default = "default_odp_odata_version")]
+        odata_version: SapODataVersion,
+        entity: String,
+        /// The ODP's semantic key — the fields that identify a business record,
+        /// not ODP's own `ODQ_*` control columns. Order does not matter; the
+        /// encoding sorts by name.
+        key_properties: Vec<String>,
+        /// An optional last-changed property, used as `created_at` for a
+        /// current-image row. A deletion or a before-image never uses it
+        /// unadjusted — see the `sap_odp` module docs on why a row that
+        /// describes the *past* must not be stamped with a timestamp that lets
+        /// it win a read.
+        #[serde(default)]
+        changed_at_property: Option<String>,
+        /// Stamped onto every envelope. SAP carries no meshql authorisation.
+        #[serde(default)]
+        authorized_tokens: Vec<String>,
+        /// `Prefer: odata.maxpagesize`. SAP documents this as starting a
+        /// background job that computes and caches the whole page set in the
+        /// delta queue, so it is a server-side workload knob, not just a
+        /// response size.
+        #[serde(default = "default_odp_page_size")]
+        page_size: u32,
+        auth: SapAuthConfig,
+        #[serde(default = "default_sap_poll_ms")]
+        poll_interval_ms: u64,
+    },
     /// Salesforce, polled over REST/SOQL on `SystemModstamp`, with deletes
     /// enumerated separately. See the `salesforce` module for the mechanism
     /// argument and — more importantly — for what a watermark poller does not
@@ -327,6 +435,18 @@ fn default_odata_version() -> SapODataVersion {
 
 fn default_sap_poll_ms() -> u64 {
     30_000
+}
+
+/// An ODP OData service is a SEGW-generated SAP Gateway **v2** service.
+fn default_odp_odata_version() -> SapODataVersion {
+    SapODataVersion::V2
+}
+
+/// A page size, not a result cap. Small enough that one page is a reasonable
+/// unit of server-side work and large enough that a busy ODP is not walked one
+/// HTTP round trip per handful of rows.
+fn default_odp_page_size() -> u32 {
+    5_000
 }
 
 /// How the connector authenticates to SAP.
@@ -468,6 +588,7 @@ impl ConnectorConfig {
             SourceConfig::Mongo { entity, .. } => entity,
             SourceConfig::Postgres { entity, .. } => entity,
             SourceConfig::Sap { entity, .. } => entity,
+            SourceConfig::SapOdp { entity, .. } => entity,
             SourceConfig::Salesforce { entity, .. } => entity,
             SourceConfig::Hubspot { entity, .. } => entity,
         }
@@ -479,6 +600,7 @@ impl ConnectorConfig {
             SourceConfig::Mongo { .. } => "mongodb",
             SourceConfig::Postgres { .. } => "postgresql",
             SourceConfig::Sap { .. } => "sap",
+            SourceConfig::SapOdp { .. } => "sap_odp",
             SourceConfig::Salesforce { .. } => "salesforce",
             SourceConfig::Hubspot { .. } => "hubspot",
         }
@@ -620,6 +742,92 @@ mod tests {
         )
         .expect_err("key_properties has no safe default");
         assert!(err.to_string().contains("key_properties"), "got: {err}");
+    }
+
+    const SAP_ODP: &str = r#"
+        topic = "sales_order"
+        merkql_dir = "/m"
+        state_dir = "/s"
+        snapshot_mode = "when_needed"
+
+        [source]
+        type = "sap_odp"
+        service_root = "https://s4.example.com/sap/opu/odata/SAP/ZODP_SO_SRV"
+        odp_name = "SEPM_SO"
+        client = "100"
+        subscriber_identity = "ZODP_SO_SRV/MERKQL_CDC"
+        entity = "sales_order"
+        key_properties = ["SalesOrder"]
+        changed_at_property = "LastChangeDateTime"
+        authorized_tokens = ["sap"]
+        page_size = 1000
+        auth = { kind = "basic", user_env = "SAP_USER", pass_env = "SAP_PASS" }
+    "#;
+
+    #[test]
+    fn a_sap_odp_connector_parses() {
+        let cfg = ConnectorConfig::from_toml(SAP_ODP).unwrap();
+        assert_eq!(cfg.connector_name(), "sap_odp");
+        assert_eq!(cfg.entity(), "sales_order");
+        match cfg.source {
+            SourceConfig::SapOdp {
+                odp_name,
+                entity_set,
+                client,
+                send_sap_client,
+                subscriber_identity,
+                odata_version,
+                page_size,
+                poll_interval_ms,
+                auth,
+                ..
+            } => {
+                assert_eq!(odp_name, "SEPM_SO");
+                assert_eq!(
+                    entity_set, None,
+                    "the entity set defaults to FactsOf<ODP> in the source, not here"
+                );
+                assert_eq!(client, "100");
+                assert!(send_sap_client);
+                assert_eq!(subscriber_identity, "ZODP_SO_SRV/MERKQL_CDC");
+                // An ODP OData service is a SEGW-generated Gateway **v2**
+                // service. Defaulting to v4 as the `sap` source does would ask
+                // every ODP deployment for a dialect it does not speak.
+                assert_eq!(odata_version, SapODataVersion::V2);
+                assert_eq!(page_size, 1_000);
+                assert_eq!(poll_interval_ms, 30_000);
+                assert!(matches!(auth, SapAuthConfig::Basic { .. }));
+            }
+            other => panic!("expected a sap_odp source, got {other:?}"),
+        }
+    }
+
+    /// The subscription identity has no default. ODP sends no subscriber on the
+    /// wire, so this label is the only record of which queue a stored cursor
+    /// belongs to — a connector that invented one would make the cursor's meaning
+    /// depend on a constant nobody chose.
+    #[test]
+    fn a_sap_odp_connector_without_a_subscriber_identity_is_refused() {
+        let err = ConnectorConfig::from_toml(
+            r#"
+            topic = "t"
+            merkql_dir = "/m"
+            state_dir = "/s"
+            [source]
+            type = "sap_odp"
+            service_root = "https://s4/sap/opu/odata/SAP/ZODP"
+            odp_name = "SEPM_SO"
+            client = "100"
+            entity = "so"
+            key_properties = ["SalesOrder"]
+            auth = { kind = "none" }
+        "#,
+        )
+        .expect_err("subscriber_identity has no safe default");
+        assert!(
+            err.to_string().contains("subscriber_identity"),
+            "got: {err}"
+        );
     }
 
     /// The config may name where a secret lives; it may never hold one. If a
