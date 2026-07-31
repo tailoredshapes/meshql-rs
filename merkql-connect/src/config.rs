@@ -69,49 +69,22 @@ pub enum SourceConfig {
         collection: String,
         entity: String,
     },
-    /// **Not implemented in this build.** The configuration shape is settled
-    /// so an operator's file and the eventual connector agree, and
-    /// `open_source` fails loudly rather than starting something that captures
-    /// nothing.
+    /// A logical replication slot, woken by a trigger-emitted `NOTIFY`. See
+    /// the `postgres` module for the full argument; the two things an operator
+    /// must know are:
     ///
-    /// The blocker is client-side, not design-side. Streaming logical
-    /// replication requires issuing `START_REPLICATION … LOGICAL` over a
-    /// CopyBoth duplex on a connection opened with `replication=database`, and
-    /// **no released Rust PostgreSQL crate exposes that**: `tokio-postgres`
-    /// 0.7.18 has neither `copy_both_simple` nor a replication connection
-    /// mode, and `sqlx` has no equivalent. `postgres-protocol` ships the
-    /// pgoutput message parsers but nothing that can obtain the stream to feed
-    /// them.
-    ///
-    /// Two implementable designs, both slot-based and neither lossy — note
-    /// that `LISTEN`/`NOTIFY` **alone** is not one of them, because
-    /// notifications are dropped when no one is listening and a connector
-    /// restarting would silently lose every change in the gap:
-    ///
-    /// 1. **Consume the slot through SQL.**
-    ///    `pg_logical_slot_get_binary_changes(slot, NULL, NULL,
-    ///    'proto_version', '1', 'publication_names', pub)` reads pgoutput out
-    ///    of a real replication slot over an ordinary connection. The slot
-    ///    retains WAL until consumed, so nothing is lost, positions are real
-    ///    LSNs, and calling it while idle is exactly the heartbeat that
-    ///    advances `confirmed_flush_lsn` and releases WAL. The cost: the feed
-    ///    is driven by repeated calls rather than a socket the server pushes
-    ///    down.
-    /// 2. **A trigger-emitted `NOTIFY` as the wake-up edge, with the slot
-    ///    still the source of truth** — the same arrangement the SQLite source
-    ///    uses with inotify. A dropped notification then costs latency, not
-    ///    data, because the slot still holds everything. The cost: a trigger
-    ///    on the envelope table.
-    ///
-    /// Whichever is chosen, the WAL trap is the thing to design around: an
-    /// unconsumed slot pins WAL indefinitely and fills the disk, so a
-    /// connector down over a weekend takes the database with it. That is why
-    /// `heartbeat_interval_ms` exists — the connector must advance the slot on
-    /// a timer even when the watched table is completely idle, which is
-    /// counterintuitively the *dangerous* case.
+    /// - **The server needs `wal_level = logical`.** It is not runtime-settable,
+    ///   and `open` refuses to start without it.
+    /// - **An unconsumed slot pins WAL indefinitely and fills the disk**, so a
+    ///   connector down over a weekend takes the database with it. That is why
+    ///   `heartbeat_interval_ms` exists — the connector advances the slot on a
+    ///   timer even when the watched table is completely idle, which is
+    ///   counterintuitively the *dangerous* case. Retiring a connector means
+    ///   dropping its slot; leaving the config file behind is not enough.
     Postgres {
-        /// A libpq connection string. The connector opens it a second time in
-        /// replication mode, so the role needs the `REPLICATION` attribute.
+        /// A libpq connection string. The connector opens it a second time for
+        /// `LISTEN`, and the role needs rights to create a publication and a
+        /// logical replication slot.
         conn: String,
         #[serde(default = "default_table")]
         table: String,

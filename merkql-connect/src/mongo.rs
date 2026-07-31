@@ -161,10 +161,10 @@ impl CommitSource for MongoSource {
     }
 
     async fn changes(&self, from: Resume, mode: SnapshotMode) -> Result<ChangeStream, CdcError> {
-        // Open the stream FIRST — see the module docs. `full_document: Always`
-        // so an event carries the document itself rather than only its key;
-        // envelopes are immutable, so the "look it up afterwards" alternative
-        // would be a needless second round trip.
+        // Open the stream FIRST — see the module docs. `full_document:
+        // updateLookup` so an event carries the document itself rather than
+        // only its key; envelopes are immutable, so the "look it up
+        // afterwards" alternative would be a needless second round trip.
         let mut watch = self
             .collection
             .watch()
