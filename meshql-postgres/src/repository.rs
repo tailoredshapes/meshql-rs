@@ -4,9 +4,40 @@ use meshql_core::{envelope_visible_to, Envelope, MeshqlError, Repository, Result
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
 
+/// Columns written per envelope row by `create` and `create_many`.
+///
+/// `MAX_ROWS_PER_INSERT` is derived from this rather than guessed, so adding a
+/// column to the envelope table re-chunks the batch insert automatically
+/// instead of silently pushing it past the bind-parameter ceiling.
+const INSERT_COLUMNS: usize = 5;
+
+/// PostgreSQL's extended query protocol carries the parameter count as an
+/// unsigned 16-bit integer, so one statement can bind at most 65535 values.
+/// Exceeding it fails the whole statement.
+const MAX_BIND_PARAMS: usize = 65535;
+
+/// Rows a single multi-row `INSERT` may carry before it must be split.
+///
+/// Public so tests can size a batch that provably crosses the boundary from
+/// the same constant the implementation uses — a hard-coded number in a test
+/// stops proving anything the moment the column count changes.
+pub const MAX_ROWS_PER_INSERT: usize = MAX_BIND_PARAMS / INSERT_COLUMNS;
+
 pub struct PostgresRepository {
     pub pool: PgPool,
     pub table: String,
+}
+
+/// An envelope with its columns already rendered.
+///
+/// `create_many` assigns and serializes every envelope before it writes any of
+/// them, so the rows it binds and the envelopes it hands back cannot drift
+/// apart, and a serialization failure aborts before touching the database.
+struct PreparedRow {
+    envelope: Envelope,
+    created_at_ms: i64,
+    tokens_json: String,
+    payload_json: String,
 }
 
 impl PostgresRepository {
@@ -208,16 +239,72 @@ impl Repository for PostgresRepository {
         }
     }
 
+    /// Writes the whole batch with one multi-row `INSERT` per chunk instead of
+    /// one round trip per envelope. A bulk load of millions of rows over a
+    /// network pays for those round trips and nothing else.
+    ///
+    /// Deliberately not wrapped in a transaction. The caller's ordering rule is
+    /// append-then-commit-the-position, so a partial batch replays in full: a
+    /// duplicate row is cheap, a gap is permanent. Atomicity would buy nothing
+    /// and would hold a write transaction open across a multi-megabyte load.
+    /// What the caller *does* need, and what this guarantees, is that a failure
+    /// surfaces as `Err` — never as a short success.
     async fn create_many(
         &self,
         envelopes: Vec<Envelope>,
         tokens: &[String],
     ) -> Result<Vec<Envelope>> {
-        let mut results = Vec::new();
-        for env in envelopes {
-            results.push(self.create(env, tokens).await?);
+        // `push_values` with no rows emits `INSERT INTO t (..) VALUES` and
+        // nothing else — a syntax error. An empty batch is a no-op.
+        if envelopes.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(results)
+
+        // Same assignments `create` makes, in the same order: a generated id
+        // for an empty one, and the caller's tokens replacing whatever the
+        // envelope arrived with.
+        let mut prepared: Vec<PreparedRow> = Vec::with_capacity(envelopes.len());
+        for mut env in envelopes {
+            if env.id.is_empty() {
+                env.id = uuid::Uuid::new_v4().to_string();
+            }
+            env.authorized_tokens = tokens.to_vec();
+
+            let created_at_ms = env.created_at.timestamp_millis();
+            let tokens_json = serde_json::to_string(&env.authorized_tokens)
+                .map_err(|e| MeshqlError::Parse(e.to_string()))?;
+            let payload_json = serde_json::to_string(&env.payload)
+                .map_err(|e| MeshqlError::Parse(e.to_string()))?;
+
+            prepared.push(PreparedRow {
+                envelope: env,
+                created_at_ms,
+                tokens_json,
+                payload_json,
+            });
+        }
+
+        for chunk in prepared.chunks(MAX_ROWS_PER_INSERT) {
+            let mut builder = sqlx::QueryBuilder::new(format!(
+                "INSERT INTO {} (id, created_at_ms, deleted, authorized_tokens, payload) ",
+                self.table
+            ));
+            builder.push_values(chunk, |mut row, prepared: &PreparedRow| {
+                row.push_bind(prepared.envelope.id.as_str())
+                    .push_bind(prepared.created_at_ms)
+                    .push_bind(prepared.envelope.deleted)
+                    .push_bind(prepared.tokens_json.as_str())
+                    .push_bind(prepared.payload_json.as_str());
+            });
+            builder
+                .build()
+                .execute(&self.pool)
+                .await
+                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+        }
+
+        // Input order, with the assignments the rows were written with.
+        Ok(prepared.into_iter().map(|p| p.envelope).collect())
     }
 
     async fn read_many(&self, ids: &[String], tokens: &[String]) -> Result<Vec<Envelope>> {

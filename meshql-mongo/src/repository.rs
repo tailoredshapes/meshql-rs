@@ -153,16 +153,70 @@ impl Repository for MongoRepository {
         }
     }
 
+    /// Writes the whole batch with `insert_many` instead of one round trip per
+    /// envelope. A bulk load of millions of rows over a network pays for those
+    /// round trips and nothing else. No manual chunking: the driver already
+    /// splits a run past the server's `maxWriteBatchSize` / message-size limits.
+    ///
+    /// **Unordered.** A meshql collection is an append-only log with no unique
+    /// index, so the documents in a batch are independent — stopping at the
+    /// first failure buys nothing, because the caller's rule is
+    /// append-then-commit-the-position and the whole batch replays either way.
+    /// Unordered lets the server keep going and report *every* offending
+    /// document rather than only the first, which is the difference between one
+    /// diagnosable failure and a queue of them. It does not affect reads:
+    /// `read` and `list` resolve versions by `createdAt`, never by insertion
+    /// order, so ordered inserts would not make a same-millisecond tie
+    /// deterministic anyway.
+    ///
+    /// No transaction: atomicity is not required (see above) and a session
+    /// would restrict this to replica sets for nothing.
     async fn create_many(
         &self,
         envelopes: Vec<Envelope>,
         tokens: &[String],
     ) -> Result<Vec<Envelope>> {
-        let mut results = Vec::with_capacity(envelopes.len());
-        for env in envelopes {
-            results.push(self.create(env, tokens).await?);
+        // `insert_many` rejects an empty document list outright. An empty batch
+        // is a no-op, not a failure.
+        if envelopes.is_empty() {
+            return Ok(Vec::new());
         }
-        Ok(results)
+
+        // Same assignments `create` makes: a generated id for an empty one, and
+        // the caller's tokens replacing whatever the envelope arrived with.
+        let mut prepared = Vec::with_capacity(envelopes.len());
+        for mut env in envelopes {
+            if env.id.is_empty() {
+                env.id = uuid::Uuid::new_v4().to_string();
+            }
+            env.authorized_tokens = tokens.to_vec();
+            prepared.push(env);
+        }
+
+        let docs: Vec<Document> = prepared.iter().map(envelope_to_document).collect();
+
+        let result = self
+            .collection
+            .insert_many(docs)
+            .ordered(false)
+            .await
+            .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+
+        // The driver already turns per-document write errors into an `Err`, so
+        // this only fires if a future driver ever reports a short write as
+        // success. Reporting a partial batch as complete is the one failure
+        // mode the caller cannot recover from: the position commits, and the
+        // missing envelopes are a permanent gap.
+        if result.inserted_ids.len() != prepared.len() {
+            return Err(MeshqlError::Storage(format!(
+                "insert_many reported {} of {} documents inserted",
+                result.inserted_ids.len(),
+                prepared.len()
+            )));
+        }
+
+        // Input order, with the assignments the documents were written with.
+        Ok(prepared)
     }
 
     async fn read_many(&self, ids: &[String], tokens: &[String]) -> Result<Vec<Envelope>> {
