@@ -1,0 +1,22 @@
+[package]
+name = "dynamocost-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Throwaway latency/cost benchmark harness for meshql-dynamo against real DynamoDB"
+
+[[bin]]
+name = "bootstrap"
+path = "src/main.rs"
+
+[dependencies]
+meshql-core = { version = "0.1.0", path = "../meshql-core" }
+meshql-dynamo = { version = "0.1.0", path = "../meshql-dynamo" }
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-dynamodb = { version = "1", features = ["behavior-version-latest"] }
+lambda_runtime = "0.13"
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+futures = "0.3"
