@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use meshql_core::versions::{version_order, version_token, VersionRef};
 use meshql_core::{envelope_visible_to, Envelope, MeshqlError, Repository, Result};
 use sqlx::{PgPool, Row};
 use std::collections::HashMap;
@@ -328,5 +329,65 @@ impl Repository for PostgresRepository {
             results.insert(id.clone(), deleted);
         }
         Ok(results)
+    }
+    async fn list_versions(&self, id: &str, tokens: &[String]) -> Result<Vec<VersionRef>> {
+        let sql = format!(
+            "SELECT id, created_at_ms, deleted, authorized_tokens, payload
+             FROM {} WHERE id = $1",
+            self.table
+        );
+        let rows = sqlx::query(&sql)
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+
+        let mut envelopes: Vec<Envelope> = rows
+            .iter()
+            .map(Self::row_to_envelope)
+            .collect::<Result<Vec<_>>>()?;
+        envelopes.sort_by(version_order);
+
+        Ok(envelopes
+            .iter()
+            .map(|e| {
+                if envelope_visible_to(e, tokens) {
+                    VersionRef::visible(e)
+                } else {
+                    VersionRef::tombstone(e)
+                }
+            })
+            .collect())
+    }
+
+    async fn read_version(
+        &self,
+        id: &str,
+        token: &str,
+        tokens: &[String],
+    ) -> Result<Option<Envelope>> {
+        let sql = format!(
+            "SELECT id, created_at_ms, deleted, authorized_tokens, payload
+             FROM {} WHERE id = $1",
+            self.table
+        );
+        let rows = sqlx::query(&sql)
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+
+        for row in &rows {
+            let env = Self::row_to_envelope(row)?;
+            if version_token(&env) != token {
+                continue;
+            }
+            // Unauthorized is not absent: the listing already reported it.
+            if !envelope_visible_to(&env, tokens) {
+                return Err(MeshqlError::Unauthorized);
+            }
+            return Ok(Some(env));
+        }
+        Ok(None)
     }
 }

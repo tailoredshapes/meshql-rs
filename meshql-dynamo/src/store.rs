@@ -760,6 +760,56 @@ pub async fn query_latest(
     }
 }
 
+/// Every version of one document.
+///
+/// `pk` is the envelope id, so this is a single `query` over one partition —
+/// the access pattern the key model was chosen for. The sort key already orders
+/// the partition temporally, but the result is re-sorted by `version_order`
+/// anyway, so this adapter agrees with every other one when two versions share
+/// a millisecond.
+pub async fn query_all_versions(
+    client: &Client,
+    table: &str,
+    id: &str,
+    meter: Option<&CapacityMeter>,
+) -> Result<Vec<Envelope>> {
+    let mut out_envelopes = Vec::new();
+    let mut start_key = None;
+
+    loop {
+        let mut req = client
+            .query()
+            .table_name(table)
+            .key_condition_expression("#pk = :pk")
+            .expression_attribute_names("#pk", PK)
+            .expression_attribute_values(":pk", AttributeValue::S(id.to_string()))
+            .set_return_consumed_capacity(return_consumed_capacity(meter));
+        if let Some(k) = start_key.take() {
+            req = req.set_exclusive_start_key(Some(k));
+        }
+        let out = req.send().await.map_err(|e| {
+            MeshqlError::Storage(format!(
+                "query all versions {table} pk={id}: {}",
+                describe_sdk_error(&e)
+            ))
+        })?;
+
+        if let Some(m) = meter {
+            m.record(Op::Query, out.consumed_capacity());
+        }
+        for item in out.items() {
+            out_envelopes.push(item_to_envelope(item)?);
+        }
+        match out.last_evaluated_key() {
+            Some(k) if !k.is_empty() => start_key = Some(k.clone()),
+            _ => break,
+        }
+    }
+
+    out_envelopes.sort_by(meshql_core::versions::version_order);
+    Ok(out_envelopes)
+}
+
 /// Resolve *every* id to its latest version at-or-before `cutoff_nanos`, drop
 /// the ones whose resolved version is a tombstone, and return the survivors in
 /// canonical order (`meshql_core::envelope_order`).

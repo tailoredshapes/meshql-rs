@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use meshql_core::versions::{version_order, version_token, VersionRef};
 use meshql_core::{envelope_visible_to, Envelope, MeshqlError, Repository, Result, Stash};
 use sqlx::MySqlPool;
 use sqlx::Row;
@@ -41,6 +42,51 @@ impl MysqlRepository {
             pool,
             table: table.to_string(),
         })
+    }
+
+    /// Every version of one document, ordered by the shared `version_order`.
+    /// MySQL cannot sort on the token, which is derived from content, so the
+    /// order is applied in memory — the same way every other adapter does it,
+    /// which is what makes them agree.
+    async fn all_versions(&self, id: &str) -> Result<Vec<Envelope>> {
+        let table = &self.table;
+        let sql = format!(
+            r#"SELECT id, created_at_ms, deleted, authorized_tokens, payload
+               FROM `{table}` WHERE id = ?"#
+        );
+        let rows = sqlx::query(&sql)
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let env_id: String = r
+                .try_get("id")
+                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+            let created_at_ms: i64 = r
+                .try_get("created_at_ms")
+                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+            let deleted_flag: i8 = r
+                .try_get("deleted")
+                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+            let tokens_json: String = r
+                .try_get("authorized_tokens")
+                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+            let payload_json: String = r
+                .try_get("payload")
+                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+            out.push(Self::row_to_envelope(
+                env_id,
+                created_at_ms,
+                deleted_flag,
+                tokens_json,
+                payload_json,
+            )?);
+        }
+        out.sort_by(version_order);
+        Ok(out)
     }
 
     fn row_to_envelope(
@@ -280,5 +326,37 @@ impl Repository for MysqlRepository {
             results.insert(id.clone(), deleted);
         }
         Ok(results)
+    }
+    async fn list_versions(&self, id: &str, tokens: &[String]) -> Result<Vec<VersionRef>> {
+        let envelopes = self.all_versions(id).await?;
+        Ok(envelopes
+            .iter()
+            .map(|e| {
+                if envelope_visible_to(e, tokens) {
+                    VersionRef::visible(e)
+                } else {
+                    VersionRef::tombstone(e)
+                }
+            })
+            .collect())
+    }
+
+    async fn read_version(
+        &self,
+        id: &str,
+        token: &str,
+        tokens: &[String],
+    ) -> Result<Option<Envelope>> {
+        for env in self.all_versions(id).await? {
+            if version_token(&env) != token {
+                continue;
+            }
+            // Unauthorized is not absent: the listing already reported it.
+            if !envelope_visible_to(&env, tokens) {
+                return Err(MeshqlError::Unauthorized);
+            }
+            return Ok(Some(env));
+        }
+        Ok(None)
     }
 }

@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use merk_object::backend::Backend;
 use merk_object::broker::BrokerRef;
+use meshql_core::versions::VersionRef;
 use meshql_core::{Envelope, MeshqlError, Repository, Result};
 use std::collections::HashMap;
 
@@ -165,5 +166,20 @@ impl<B: Backend> Repository for MerkRepository<B> {
         _tokens: &[String],
     ) -> Result<HashMap<String, bool>> {
         Err(refuse("remove_many"))
+    }
+    /// Refused, like every other read. merk-cloud is an append-only log with no
+    /// index, so answering this would mean replaying every partition — and this
+    /// crate exists precisely to forbid the scan `meshql-merkql` allows.
+    async fn list_versions(&self, _id: &str, _tokens: &[String]) -> Result<Vec<VersionRef>> {
+        Err(refuse("list_versions"))
+    }
+
+    async fn read_version(
+        &self,
+        _id: &str,
+        _token: &str,
+        _tokens: &[String],
+    ) -> Result<Option<Envelope>> {
+        Err(refuse("read_version"))
     }
 }

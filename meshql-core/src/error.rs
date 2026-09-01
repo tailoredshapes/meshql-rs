@@ -12,11 +12,6 @@ pub enum MeshqlError {
     Template(String),
     #[error("Parse error: {0}")]
     Parse(String),
-    /// The adapter does not implement this capability. Returned rather than a
-    /// silent empty result, so a caller can tell "nothing to report" from
-    /// "this store cannot answer".
-    #[error("Unsupported: {0}")]
-    Unsupported(String),
 }
 
 pub type Result<T> = std::result::Result<T, MeshqlError>;

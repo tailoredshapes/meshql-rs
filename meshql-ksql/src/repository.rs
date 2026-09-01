@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use meshql_core::versions::{version_token, VersionRef};
 use meshql_core::{envelope_visible_to, Envelope, MeshqlError, Repository, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,6 +20,27 @@ pub struct KsqlRepository {
 }
 
 impl KsqlRepository {
+    /// Every version of one document, from the STREAM, ordered by the shared
+    /// `version_order` so this adapter agrees with the others.
+    async fn all_versions(&self, id: &str) -> Result<Vec<Envelope>> {
+        let escaped_id = Self::escape_id(id);
+        let query = format!(
+            "SELECT * FROM {} WHERE id = '{}';",
+            self.stream_name, escaped_id
+        );
+        let rows = self
+            .client
+            .pull_query(&query)
+            .await
+            .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            out.push(row_to_envelope(row).map_err(|e| MeshqlError::Parse(e.to_string()))?);
+        }
+        out.sort_by(meshql_core::versions::version_order);
+        Ok(out)
+    }
     pub fn new(client: Arc<ConfluentClient>, entity: &str, config: &KsqlConfig) -> Self {
         Self {
             client,
@@ -266,5 +288,43 @@ impl Repository for KsqlRepository {
             results.insert(id.clone(), ok);
         }
         Ok(results)
+    }
+    /// Every version of one document.
+    ///
+    /// This queries the STREAM rather than the TABLE. The TABLE is a
+    /// latest-per-id materialization, so it can never answer a question about
+    /// history — a distinction `read`'s temporal branch currently gets wrong,
+    /// since its comment says STREAM and its code says TABLE.
+    async fn list_versions(&self, id: &str, tokens: &[String]) -> Result<Vec<VersionRef>> {
+        let envelopes = self.all_versions(id).await?;
+        Ok(envelopes
+            .iter()
+            .map(|e| {
+                if envelope_visible_to(e, tokens) {
+                    VersionRef::visible(e)
+                } else {
+                    VersionRef::tombstone(e)
+                }
+            })
+            .collect())
+    }
+
+    async fn read_version(
+        &self,
+        id: &str,
+        token: &str,
+        tokens: &[String],
+    ) -> Result<Option<Envelope>> {
+        for env in self.all_versions(id).await? {
+            if version_token(&env) != token {
+                continue;
+            }
+            // Unauthorized is not absent: the listing already reported it.
+            if !envelope_visible_to(&env, tokens) {
+                return Err(MeshqlError::Unauthorized);
+            }
+            return Ok(Some(env));
+        }
+        Ok(None)
     }
 }

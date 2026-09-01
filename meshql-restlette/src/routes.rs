@@ -208,11 +208,6 @@ async fn list_versions_handler(
                 .collect();
             Json(serde_json::json!({ "id": id, "versions": items })).into_response()
         }
-        Err(meshql_core::MeshqlError::Unsupported(msg)) => (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(serde_json::json!({ "error": msg })),
-        )
-            .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -245,11 +240,6 @@ async fn read_version_handler(
         Err(meshql_core::MeshqlError::Unauthorized) => (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({ "error": "not authorized to read this version" })),
-        )
-            .into_response(),
-        Err(meshql_core::MeshqlError::Unsupported(msg)) => (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(serde_json::json!({ "error": msg })),
         )
             .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),

@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use merkql::broker::BrokerRef;
 use merkql::consumer::{ConsumerConfig, OffsetReset};
 use merkql::record::ProducerRecord;
+use meshql_core::versions::{version_order, version_token, VersionRef};
 use meshql_core::{envelope_visible_to, Envelope, MeshqlError, Repository, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -177,5 +178,46 @@ impl Repository for MerkqlRepository {
             results.insert(id.clone(), ok);
         }
         Ok(results)
+    }
+    async fn list_versions(&self, id: &str, tokens: &[String]) -> Result<Vec<VersionRef>> {
+        let mut mine: Vec<Envelope> = self
+            .read_all_envelopes()?
+            .into_iter()
+            .filter(|e| e.id == id)
+            .collect();
+        mine.sort_by(version_order);
+        Ok(mine
+            .iter()
+            .map(|e| {
+                if envelope_visible_to(e, tokens) {
+                    VersionRef::visible(e)
+                } else {
+                    VersionRef::tombstone(e)
+                }
+            })
+            .collect())
+    }
+
+    async fn read_version(
+        &self,
+        id: &str,
+        token: &str,
+        tokens: &[String],
+    ) -> Result<Option<Envelope>> {
+        for env in self
+            .read_all_envelopes()?
+            .into_iter()
+            .filter(|e| e.id == id)
+        {
+            if version_token(&env) != token {
+                continue;
+            }
+            // Unauthorized is not absent: the listing already reported it.
+            if !envelope_visible_to(&env, tokens) {
+                return Err(MeshqlError::Unauthorized);
+            }
+            return Ok(Some(env));
+        }
+        Ok(None)
     }
 }

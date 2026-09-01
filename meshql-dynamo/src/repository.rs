@@ -19,6 +19,7 @@
 use async_trait::async_trait;
 use aws_sdk_dynamodb::Client;
 use chrono::{DateTime, Utc};
+use meshql_core::versions::{version_token, VersionRef};
 use meshql_core::{envelope_visible_to, Envelope, MeshqlError, Repository, Result, RootConfig};
 use std::collections::HashMap;
 
@@ -262,5 +263,40 @@ impl Repository for DynamoRepository {
             results.insert(id.clone(), self.remove(id, tokens).await?);
         }
         Ok(results)
+    }
+    async fn list_versions(&self, id: &str, tokens: &[String]) -> Result<Vec<VersionRef>> {
+        let envelopes =
+            store::query_all_versions(&self.client, &self.table, id, self.meter.as_deref()).await?;
+        Ok(envelopes
+            .iter()
+            .map(|e| {
+                if envelope_visible_to(e, tokens) {
+                    VersionRef::visible(e)
+                } else {
+                    VersionRef::tombstone(e)
+                }
+            })
+            .collect())
+    }
+
+    async fn read_version(
+        &self,
+        id: &str,
+        token: &str,
+        tokens: &[String],
+    ) -> Result<Option<Envelope>> {
+        let envelopes =
+            store::query_all_versions(&self.client, &self.table, id, self.meter.as_deref()).await?;
+        for env in envelopes {
+            if version_token(&env) != token {
+                continue;
+            }
+            // Unauthorized is not absent: the listing already reported it.
+            if !envelope_visible_to(&env, tokens) {
+                return Err(MeshqlError::Unauthorized);
+            }
+            return Ok(Some(env));
+        }
+        Ok(None)
     }
 }

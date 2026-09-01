@@ -96,26 +96,19 @@ pub trait Repository: Send + Sync {
     /// tombstone carrying its timestamp and deletion flag but no token.
     /// Omitting it would make the history look continuous when it is not.
     ///
-    /// The default refuses rather than returning an empty list, so a caller can
-    /// tell "this document has no history" from "this adapter cannot answer".
-    async fn list_versions(&self, _id: &str, _tokens: &[String]) -> Result<Vec<VersionRef>> {
-        Err(MeshqlError::Unsupported(
-            "this adapter does not implement version listing".into(),
-        ))
-    }
+    /// Required. An adapter that cannot answer this fails its certification,
+    /// which is the signal — a default returning "unsupported" would let an
+    /// adapter fall out of conformance without anything saying so.
+    async fn list_versions(&self, id: &str, tokens: &[String]) -> Result<Vec<VersionRef>>;
 
     /// Resolve one version by its token. Applies the same authorization as
     /// `read`.
     async fn read_version(
         &self,
-        _id: &str,
-        _token: &str,
-        _tokens: &[String],
-    ) -> Result<Option<Envelope>> {
-        Err(MeshqlError::Unsupported(
-            "this adapter does not implement version reads".into(),
-        ))
-    }
+        id: &str,
+        token: &str,
+        tokens: &[String],
+    ) -> Result<Option<Envelope>>;
 }
 
 #[async_trait::async_trait]

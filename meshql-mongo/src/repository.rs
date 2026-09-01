@@ -1,6 +1,7 @@
 use crate::converters::{document_to_envelope, envelope_to_document};
 use bson::{doc, Bson, Document};
 use chrono::{DateTime, Utc};
+use meshql_core::versions::{version_order, version_token, VersionRef};
 use meshql_core::{envelope_visible_to, Auth, Envelope, MeshqlError, Repository, Result};
 use mongodb::Collection;
 use std::collections::HashMap;
@@ -13,6 +14,34 @@ pub struct MongoRepository {
 }
 
 impl MongoRepository {
+    /// Every version of one document, ordered by the shared `version_order`.
+    ///
+    /// Sorting happens in Rust rather than in the pipeline. `createdAt` is
+    /// millisecond precision, so a `$sort` on it alone leaves ties in an order
+    /// Mongo does not define — which is the bug this ordering exists to fix.
+    async fn all_versions(&self, id: &str) -> Result<Vec<Envelope>> {
+        let mut cursor = self
+            .collection
+            .aggregate(vec![doc! { "$match": { "id": id } }])
+            .await
+            .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+
+        let mut out = Vec::new();
+        while cursor
+            .advance()
+            .await
+            .map_err(|e| MeshqlError::Storage(e.to_string()))?
+        {
+            let doc = cursor
+                .deserialize_current()
+                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+            if let Some(env) = document_to_envelope(&doc) {
+                out.push(env);
+            }
+        }
+        out.sort_by(version_order);
+        Ok(out)
+    }
     pub async fn new(
         uri: &str,
         db_name: &str,
@@ -278,5 +307,37 @@ impl Repository for MongoRepository {
             results.insert(id.clone(), deleted);
         }
         Ok(results)
+    }
+    async fn list_versions(&self, id: &str, tokens: &[String]) -> Result<Vec<VersionRef>> {
+        let envelopes = self.all_versions(id).await?;
+        Ok(envelopes
+            .iter()
+            .map(|e| {
+                if envelope_visible_to(e, tokens) {
+                    VersionRef::visible(e)
+                } else {
+                    VersionRef::tombstone(e)
+                }
+            })
+            .collect())
+    }
+
+    async fn read_version(
+        &self,
+        id: &str,
+        token: &str,
+        tokens: &[String],
+    ) -> Result<Option<Envelope>> {
+        for env in self.all_versions(id).await? {
+            if version_token(&env) != token {
+                continue;
+            }
+            // Unauthorized is not absent: the listing already reported it.
+            if !envelope_visible_to(&env, tokens) {
+                return Err(MeshqlError::Unauthorized);
+            }
+            return Ok(Some(env));
+        }
+        Ok(None)
     }
 }

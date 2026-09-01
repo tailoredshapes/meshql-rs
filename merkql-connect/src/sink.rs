@@ -942,6 +942,24 @@ mod tests {
         ) -> meshql_core::Result<std::collections::HashMap<String, bool>> {
             unreachable!("a sink never removes")
         }
+        /// A test double for the sink. It records what it was handed; it has no
+        /// history to enumerate.
+        async fn list_versions(
+            &self,
+            _id: &str,
+            _tokens: &[String],
+        ) -> meshql_core::Result<Vec<meshql_core::versions::VersionRef>> {
+            Ok(Vec::new())
+        }
+
+        async fn read_version(
+            &self,
+            _id: &str,
+            _token: &str,
+            _tokens: &[String],
+        ) -> meshql_core::Result<Option<meshql_core::Envelope>> {
+            Ok(None)
+        }
     }
 
     /// The whole point of the seam: the same connector loop drives a queue

@@ -279,6 +279,24 @@ mod tests {
         ) -> CoreResult<std::collections::HashMap<String, bool>> {
             unimplemented!()
         }
+        /// A test double for the change tail. Version listing is not part of what it
+        /// fakes, so it reports an empty history rather than pretending to one.
+        async fn list_versions(
+            &self,
+            _id: &str,
+            _tokens: &[String],
+        ) -> meshql_core::Result<Vec<meshql_core::versions::VersionRef>> {
+            Ok(Vec::new())
+        }
+
+        async fn read_version(
+            &self,
+            _id: &str,
+            _token: &str,
+            _tokens: &[String],
+        ) -> meshql_core::Result<Option<meshql_core::Envelope>> {
+            Ok(None)
+        }
     }
 
     #[tokio::test]
