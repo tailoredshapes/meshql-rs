@@ -1,0 +1,25 @@
+scalar Date
+
+type Query {
+  getById(id: ID, at: Float): Farm
+}
+
+type Farm {
+  name: String!
+  id: ID
+  coops: [Coop]
+}
+
+type Coop {
+  name: String!
+  id: ID
+  hens: [Hen]
+}
+
+type Hen {
+  name: String!
+  coop: Coop
+  eggs: Int
+  dob: Date
+  id: ID
+}

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "meshql-config",
     "meshql-core",
     "meshql-mongo",
     "meshql-graphlette",

@@ -1,0 +1,143 @@
+{
+    "meshql": 1,
+    "entities": {
+        "coop": {
+            "surfaces": {
+                "graph": {
+                    "kind": "graphql",
+                    "path": "/coop/graph",
+                    "schema": "scalar Date\n\ntype Farm {\n  name: String!\n  id: ID\n}\n\ntype Query {\n  getByName(name: String, at: Float): Coop\n  getById(id: ID, at: Float): Coop\n  getByFarm(id: ID, at: Float): [Coop]\n}\n\ntype Coop {\n  name: String!\n  farm: Farm!\n  id: ID\n  hens: [Hen]\n}\n\ntype Hen {\n  name: String!\n  eggs: Int\n  dob: Date\n  id: ID\n  layReports: [LayReport]\n}\n\ntype LayReport {\n  time_of_day: String!\n  eggs: Int!\n  id: ID\n}"
+                },
+                "api": {
+                    "kind": "rest",
+                    "path": "/coop/api",
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["name", "farm_id"],
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "format": "uuid"
+                            },
+                            "name": {
+                                "type": "string",
+                                "faker": "location.country"
+                            },
+                            "farm_id": {
+                                "type": "string",
+                                "format": "uuid"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "farm": {
+            "surfaces": {
+                "graph": {
+                    "kind": "graphql",
+                    "path": "/farm/graph",
+                    "schema": "scalar Date\n\ntype Query {\n  getById(id: ID, at: Float): Farm\n}\n\ntype Farm {\n  name: String!\n  id: ID\n  coops: [Coop]\n}\n\ntype Coop {\n  name: String!\n  id: ID\n  hens: [Hen]\n}\n\ntype Hen {\n  name: String!\n  coop: Coop\n  eggs: Int\n  dob: Date\n  id: ID\n}"
+                },
+                "api": {
+                    "kind": "rest",
+                    "path": "/farm/api",
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["name"],
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "format": "uuid"
+                            },
+                            "name": {
+                                "type": "string"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "hen": {
+            "surfaces": {
+                "graph": {
+                    "kind": "graphql",
+                    "path": "/hen/graph",
+                    "schema": "scalar Date\n\ntype Farm {\n  name: String!\n  id: ID\n  coops: [Coop]\n}\n\ntype Coop {\n  name: String!\n  farm: Farm!\n  id: ID\n}\n\ntype Query {\n  getByName(name: String, at: Float): [Hen]\n  getById(id: ID, at: Float): Hen\n  getByCoop(id: ID, at: Float): [Hen]\n}\n\ntype Hen {\n  name: String!\n  coop: Coop\n  eggs: Int\n  dob: Date\n  id: ID\n  layReports: [LayReport]\n}\n\ntype LayReport {\n  time_of_day: String!\n  eggs: Int!\n  id: ID\n}"
+                },
+                "api": {
+                    "kind": "rest",
+                    "path": "/hen/api",
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["name"],
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "format": "uuid"
+                            },
+                            "name": {
+                                "type": "string",
+                                "faker": "person.firstName"
+                            },
+                            "coop_id": {
+                                "type": "string",
+                                "format": "uuid"
+                            },
+                            "eggs": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 10
+                            },
+                            "dob": {
+                                "type": "string",
+                                "format": "date"
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "lay_report": {
+            "surfaces": {
+                "graph": {
+                    "kind": "graphql",
+                    "path": "/lay_report/graph",
+                    "schema": "scalar Date\n\ntype Hen {\n  name: String!\n  id: ID\n  eggs: Int\n  dob: Date\n}\n\ntype Query {\n  getById(id: ID, at: Float): LayReport\n  getByHen(id: ID, at: Float): [LayReport]\n}\n\ntype LayReport {\n  time_of_day: String!\n  eggs: Int!\n  hen: Hen\n  id: ID\n}\n"
+                },
+                "api": {
+                    "kind": "rest",
+                    "path": "/lay_report/api",
+                    "schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["time_of_day", "eggs", "hen_id"],
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "format": "uuid"
+                            },
+                            "time_of_day": {
+                                "type": "string",
+                                "enum": ["morning", "afternoon", "evening"]
+                            },
+                            "hen_id": {
+                                "type": "string",
+                                "format": "uuid"
+                            },
+                            "eggs": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 3
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    },
+    "surfaces": {}
+}

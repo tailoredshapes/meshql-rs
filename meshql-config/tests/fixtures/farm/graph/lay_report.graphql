@@ -1,0 +1,20 @@
+scalar Date
+
+type Hen {
+  name: String!
+  id: ID
+  eggs: Int
+  dob: Date
+}
+
+type Query {
+  getById(id: ID, at: Float): LayReport
+  getByHen(id: ID, at: Float): [LayReport]
+}
+
+type LayReport {
+  time_of_day: String!
+  eggs: Int!
+  hen: Hen
+  id: ID
+}

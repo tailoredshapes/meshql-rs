@@ -1,0 +1,34 @@
+scalar Date
+
+type Farm {
+  name: String!
+  id: ID
+  coops: [Coop]
+}
+
+type Coop {
+  name: String!
+  farm: Farm!
+  id: ID
+}
+
+type Query {
+  getByName(name: String, at: Float): [Hen]
+  getById(id: ID, at: Float): Hen
+  getByCoop(id: ID, at: Float): [Hen]
+}
+
+type Hen {
+  name: String!
+  coop: Coop
+  eggs: Int
+  dob: Date
+  id: ID
+  layReports: [LayReport]
+}
+
+type LayReport {
+  time_of_day: String!
+  eggs: Int!
+  id: ID
+}

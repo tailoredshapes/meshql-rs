@@ -1,0 +1,24 @@
+{
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["time_of_day", "eggs", "hen_id"],
+    "properties": {
+        "id": {
+            "type": "string",
+            "format": "uuid"
+        },
+        "time_of_day": {
+            "type": "string",
+            "enum": ["morning", "afternoon", "evening"]
+        },
+        "hen_id": {
+            "type": "string",
+            "format": "uuid"
+        },
+        "eggs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+        }
+    }
+}

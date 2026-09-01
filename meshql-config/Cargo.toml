@@ -1,0 +1,22 @@
+[package]
+name = "meshql-config"
+version = "0.1.0"
+edition = "2021"
+description = "Load a meshql deployment from the HOCON config the TypeScript and Java implementations already share"
+
+[dependencies]
+meshql-core  = { path = "../meshql-core" }
+hocon-parser = { version = "1.13", features = ["include-package"] }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = "2"
+meshql-sqlite = { path = "../meshql-sqlite", optional = true }
+meshql-mongo  = { path = "../meshql-mongo", optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[features]
+default = ["sqlite"]
+sqlite  = ["dep:meshql-sqlite"]
+mongo   = ["dep:meshql-mongo"]

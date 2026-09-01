@@ -2643,6 +2643,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hocon-parser"
+version = "1.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2553e44ac15ca5ec0e77331b869901b144b29dc3448bb39efb5cb049232f2b2c"
+dependencies = [
+ "indexmap 2.14.0",
+]
+
+[[package]]
 name = "home"
 version = "0.5.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3683,6 +3692,20 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tower 0.5.3",
+]
+
+[[package]]
+name = "meshql-config"
+version = "0.1.0"
+dependencies = [
+ "hocon-parser",
+ "meshql-core",
+ "meshql-mongo",
+ "meshql-sqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
 ]
 
 [[package]]
