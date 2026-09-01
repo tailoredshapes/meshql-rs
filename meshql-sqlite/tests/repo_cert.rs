@@ -64,3 +64,41 @@ async fn should_not_list_deleted_envelope_with_prior_version() {
     let repo = create_repo().await;
     cert::test_list_excludes_deleted_envelope_with_prior_version(&repo).await;
 }
+
+// ---- Versions ----
+
+#[tokio::test]
+async fn lists_every_version_oldest_first() {
+    let repo = create_repo().await;
+    cert::test_lists_every_version_oldest_first(&repo).await;
+}
+
+#[tokio::test]
+async fn versions_in_one_millisecond_are_distinct() {
+    let repo = create_repo().await;
+    cert::test_versions_in_one_millisecond_are_distinct(&repo).await;
+}
+
+#[tokio::test]
+async fn version_listing_is_stable() {
+    let repo = create_repo().await;
+    cert::test_version_listing_is_stable(&repo).await;
+}
+
+#[tokio::test]
+async fn a_deletion_appears_in_the_history() {
+    let repo = create_repo().await;
+    cert::test_a_deletion_appears_in_the_history(&repo).await;
+}
+
+#[tokio::test]
+async fn an_unreadable_version_is_a_tombstone() {
+    let repo = create_repo().await;
+    cert::test_an_unreadable_version_is_a_tombstone(&repo).await;
+}
+
+#[tokio::test]
+async fn unknown_token_absent_unreadable_refused() {
+    let repo = create_repo().await;
+    cert::test_unknown_token_absent_unreadable_refused(&repo).await;
+}

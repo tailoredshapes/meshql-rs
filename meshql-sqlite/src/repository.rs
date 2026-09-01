@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use meshql_core::versions::{version_order, version_token, VersionRef};
 use meshql_core::{envelope_visible_to, Envelope, MeshqlError, Repository, Result};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
@@ -119,21 +120,35 @@ impl Repository for SqliteRepository {
             None => Utc::now().timestamp_millis() + 1,
         };
 
-        let row = sqlx::query(
+        // Ordering cannot be left to SQL. The tiebreak used to be `rowid DESC`,
+        // which lets a storage engine's physical row id decide which version
+        // resolves. It has no equivalent on Postgres or Mongo, which is why
+        // those two break ties not at all and resolve nondeterministically when
+        // two versions share a millisecond. The version token is derived from
+        // content, so every adapter can apply the same second key and agree.
+        //
+        // `id` is indexed, so this reads one document's history rather than the
+        // table.
+        let rows = sqlx::query(
             "SELECT id, created_at_ms, deleted, authorized_tokens, payload
-             FROM envelopes WHERE id = ? AND created_at_ms <= ?
-             ORDER BY created_at_ms DESC, rowid DESC LIMIT 1",
+             FROM envelopes WHERE id = ? AND created_at_ms <= ?",
         )
         .bind(id)
         .bind(cutoff_ms)
-        .fetch_optional(&self.pool)
+        .fetch_all(&self.pool)
         .await
         .map_err(|e| MeshqlError::Storage(e.to_string()))?;
 
-        match row {
+        let newest = rows
+            .iter()
+            .map(Self::row_to_envelope)
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .max_by(version_order);
+
+        match newest {
             None => Ok(None),
-            Some(r) => {
-                let env = Self::row_to_envelope(&r)?;
+            Some(env) => {
                 if env.deleted || !envelope_visible_to(&env, tokens) {
                     Ok(None)
                 } else {
@@ -218,5 +233,69 @@ impl Repository for SqliteRepository {
             results.insert(id.clone(), deleted);
         }
         Ok(results)
+    }
+    /// Every version of one document, oldest first.
+    ///
+    /// Ordering does not use `rowid`. That is what `read` does today, and it is
+    /// a storage engine's physical row id leaking into a resolution rule — it
+    /// cannot port to Postgres or Mongo, which is why those two break ties not
+    /// at all. Sorting in memory by `version_order` gives every adapter the
+    /// same answer.
+    async fn list_versions(&self, id: &str, tokens: &[String]) -> Result<Vec<VersionRef>> {
+        let rows = sqlx::query(
+            "SELECT id, created_at_ms, deleted, authorized_tokens, payload
+             FROM envelopes WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+
+        let mut envelopes: Vec<Envelope> = rows
+            .iter()
+            .map(Self::row_to_envelope)
+            .collect::<Result<Vec<_>>>()?;
+        envelopes.sort_by(version_order);
+
+        Ok(envelopes
+            .iter()
+            .map(|e| {
+                if envelope_visible_to(e, tokens) {
+                    VersionRef::visible(e)
+                } else {
+                    VersionRef::tombstone(e)
+                }
+            })
+            .collect())
+    }
+
+    async fn read_version(
+        &self,
+        id: &str,
+        token: &str,
+        tokens: &[String],
+    ) -> Result<Option<Envelope>> {
+        let rows = sqlx::query(
+            "SELECT id, created_at_ms, deleted, authorized_tokens, payload
+             FROM envelopes WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+
+        for row in &rows {
+            let env = Self::row_to_envelope(row)?;
+            if version_token(&env) != token {
+                continue;
+            }
+            // Unauthorized is not the same as absent: the listing already told
+            // the caller this version exists.
+            if !envelope_visible_to(&env, tokens) {
+                return Err(MeshqlError::Unauthorized);
+            }
+            return Ok(Some(env));
+        }
+        Ok(None)
     }
 }

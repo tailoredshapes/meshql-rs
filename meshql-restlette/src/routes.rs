@@ -94,7 +94,10 @@ pub fn build_restlette_router_ext(
         post_create,
         side_effect_ctx,
     };
-    let item_path = format!("{}/:id", path.trim_end_matches('/'));
+    let base = path.trim_end_matches('/').to_string();
+    let item_path = format!("{base}/:id");
+    let versions_path = format!("{base}/:id/versions");
+    let version_path = format!("{base}/:id/versions/:token");
 
     Router::new()
         .route(path, post(create_handler).get(list_handler))
@@ -102,6 +105,9 @@ pub fn build_restlette_router_ext(
             &item_path,
             get(read_handler).put(update_handler).delete(delete_handler),
         )
+        .route(&versions_path, get(list_versions_handler))
+        .route(&version_path, get(read_version_handler))
+        .layer(axum::Extension(RestlettePath(base)))
         .with_state(state)
 }
 
@@ -161,6 +167,91 @@ async fn create_handler(
 
             (StatusCode::CREATED, headers, Json(result)).into_response()
         }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// The path this restlette is mounted at, so a version listing can build URLs a
+/// caller follows rather than constructs.
+#[derive(Clone)]
+struct RestlettePath(String);
+
+/// Every version of one document, oldest first.
+///
+/// A version the caller cannot read appears without a URL. Omitting it would
+/// make the history look continuous when it is not.
+async fn list_versions_handler(
+    State(state): State<RestletteState>,
+    auth_ctx: Option<Extension<AuthContext>>,
+    base: Extension<RestlettePath>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let stash = extract_stash(auth_ctx);
+    let tokens = state.auth.get_auth_token(&stash);
+
+    match state.repo.list_versions(&id, &tokens).await {
+        Ok(versions) => {
+            let items: Vec<serde_json::Value> = versions
+                .iter()
+                .map(|v| match &v.token {
+                    Some(token) => serde_json::json!({
+                        "url": format!("{}/{}/versions/{}", base.0 .0, id, token),
+                        "created_at": v.created_at,
+                        "deleted": v.deleted,
+                    }),
+                    None => serde_json::json!({
+                        "created_at": v.created_at,
+                        "deleted": v.deleted,
+                        "unauthorized": true,
+                    }),
+                })
+                .collect();
+            Json(serde_json::json!({ "id": id, "versions": items })).into_response()
+        }
+        Err(meshql_core::MeshqlError::Unsupported(msg)) => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// One version, in the same shape as reading the document itself.
+///
+/// An unknown token is a 404. A version the caller cannot read is a 403, not a
+/// 404 — the listing already told them it exists, and pretending otherwise
+/// would contradict the answer they were just given.
+async fn read_version_handler(
+    State(state): State<RestletteState>,
+    auth_ctx: Option<Extension<AuthContext>>,
+    Path((id, token)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let stash = extract_stash(auth_ctx);
+    let tokens = state.auth.get_auth_token(&stash);
+
+    match state.repo.read_version(&id, &token, &tokens).await {
+        Ok(Some(env)) => {
+            let headers = envelope_headers(&env);
+            let mut payload = env.payload;
+            payload.insert("id".to_string(), serde_json::Value::String(env.id));
+            (headers, Json(serde_json::Value::Object(payload))).into_response()
+        }
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "no such version" })),
+        )
+            .into_response(),
+        Err(meshql_core::MeshqlError::Unauthorized) => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "not authorized to read this version" })),
+        )
+            .into_response(),
+        Err(meshql_core::MeshqlError::Unsupported(msg)) => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(serde_json::json!({ "error": msg })),
+        )
+            .into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

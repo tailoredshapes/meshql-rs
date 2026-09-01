@@ -1308,3 +1308,125 @@ pub async fn test_searcher_result_carries_id_and_created_at(searcher: &dyn Searc
         "find: `id` and `createdAt` are merged into the payload, not substituted for it"
     );
 }
+
+// ---- Version Certification Tests ----
+//
+// Behaviour, never token format. An implementation is free to derive a token
+// however it likes, as long as these hold. See
+// docs/superpowers/specs/2026-09-01-document-versions-design.md.
+
+async fn write_n(repo: &dyn Repository, id: &str, n: i64) {
+    for i in 1..=n {
+        let mut p = Stash::new();
+        p.insert("n".to_string(), json!(i));
+        repo.create(Envelope::new(id, p, star()), &star())
+            .await
+            .unwrap();
+    }
+}
+
+pub async fn test_lists_every_version_oldest_first(repo: &dyn Repository) {
+    write_n(repo, "ver-order", 3).await;
+    let versions = repo.list_versions("ver-order", &star()).await.unwrap();
+
+    assert_eq!(versions.len(), 3, "one entry per write");
+    assert!(
+        versions
+            .windows(2)
+            .all(|w| w[0].created_at <= w[1].created_at),
+        "oldest first"
+    );
+
+    let mut seen = std::collections::BTreeSet::new();
+    for v in &versions {
+        let token = v
+            .token
+            .clone()
+            .expect("an authorized version carries a token");
+        assert!(seen.insert(token.clone()), "tokens are distinct");
+        assert!(
+            repo.read_version("ver-order", &token, &star())
+                .await
+                .unwrap()
+                .is_some(),
+            "every token dereferences"
+        );
+    }
+}
+
+/// The case a timestamp cannot address. Writes inside one millisecond must
+/// still be separately addressable, which is the whole reason the token exists.
+pub async fn test_versions_in_one_millisecond_are_distinct(repo: &dyn Repository) {
+    write_n(repo, "ver-burst", 3).await;
+    let versions = repo.list_versions("ver-burst", &star()).await.unwrap();
+    let distinct: std::collections::BTreeSet<_> =
+        versions.iter().filter_map(|v| v.token.clone()).collect();
+    assert_eq!(
+        distinct.len(),
+        versions.len(),
+        "no two versions share a token, however close together they were written"
+    );
+}
+
+/// Listing twice gives the same answer in the same order. An adapter leaning on
+/// insertion order or a physical row id fails here once its rows move.
+pub async fn test_version_listing_is_stable(repo: &dyn Repository) {
+    write_n(repo, "ver-stable", 4).await;
+    let first = repo.list_versions("ver-stable", &star()).await.unwrap();
+    let second = repo.list_versions("ver-stable", &star()).await.unwrap();
+    assert_eq!(first, second);
+}
+
+/// A deletion is a version. A history that hides them misreports what happened,
+/// and "when did this go away" is one of the questions versions answer.
+pub async fn test_a_deletion_appears_in_the_history(repo: &dyn Repository) {
+    write_n(repo, "ver-deleted", 1).await;
+    repo.remove("ver-deleted", &star()).await.unwrap();
+
+    let versions = repo.list_versions("ver-deleted", &star()).await.unwrap();
+    assert!(versions.len() >= 2, "the deletion is a version of its own");
+    assert!(versions.iter().any(|v| v.deleted), "and is marked deleted");
+}
+
+/// A version the caller cannot read still appears, without a token. Omitting it
+/// would make the history look continuous when it is not.
+pub async fn test_an_unreadable_version_is_a_tombstone(repo: &dyn Repository) {
+    let owner = vec!["owner".to_string()];
+    let stranger = vec!["stranger".to_string()];
+    let mut p = Stash::new();
+    p.insert("n".to_string(), json!(1));
+    repo.create(Envelope::new("ver-private", p, owner.clone()), &owner)
+        .await
+        .unwrap();
+
+    let seen = repo.list_versions("ver-private", &stranger).await.unwrap();
+    assert_eq!(seen.len(), 1, "the version is still reported");
+    assert!(seen[0].token.is_none(), "but carries no way to read it");
+}
+
+/// An unknown token is absent; an unreadable one is refused. A caller already
+/// told a version exists must not then be told it does not.
+pub async fn test_unknown_token_absent_unreadable_refused(repo: &dyn Repository) {
+    let owner = vec!["owner".to_string()];
+    let stranger = vec!["stranger".to_string()];
+    let mut p = Stash::new();
+    p.insert("n".to_string(), json!(1));
+    repo.create(Envelope::new("ver-refused", p, owner.clone()), &owner)
+        .await
+        .unwrap();
+
+    assert!(repo
+        .read_version("ver-refused", "not-a-real-token", &owner)
+        .await
+        .unwrap()
+        .is_none());
+
+    let real = repo.list_versions("ver-refused", &owner).await.unwrap()[0]
+        .token
+        .clone()
+        .unwrap();
+    assert!(matches!(
+        repo.read_version("ver-refused", &real, &stranger).await,
+        Err(crate::MeshqlError::Unauthorized)
+    ));
+}

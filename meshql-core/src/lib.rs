@@ -9,7 +9,9 @@ pub use config::{
     RestletteConfig, RootConfig, RootConfigBuilder, ServerConfig, SingletonResolverConfig,
     VectorResolverConfig,
 };
+pub mod versions;
 pub use error::{MeshqlError, Result};
+pub use versions::{version_order, version_token, VersionRef};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -87,6 +89,33 @@ pub trait Repository: Send + Sync {
     async fn read_many(&self, ids: &[String], tokens: &[String]) -> Result<Vec<Envelope>>;
     async fn remove_many(&self, ids: &[String], tokens: &[String])
         -> Result<HashMap<String, bool>>;
+
+    /// Every version of one document, oldest first.
+    ///
+    /// A version the caller is not authorized to read still appears, as a
+    /// tombstone carrying its timestamp and deletion flag but no token.
+    /// Omitting it would make the history look continuous when it is not.
+    ///
+    /// The default refuses rather than returning an empty list, so a caller can
+    /// tell "this document has no history" from "this adapter cannot answer".
+    async fn list_versions(&self, _id: &str, _tokens: &[String]) -> Result<Vec<VersionRef>> {
+        Err(MeshqlError::Unsupported(
+            "this adapter does not implement version listing".into(),
+        ))
+    }
+
+    /// Resolve one version by its token. Applies the same authorization as
+    /// `read`.
+    async fn read_version(
+        &self,
+        _id: &str,
+        _token: &str,
+        _tokens: &[String],
+    ) -> Result<Option<Envelope>> {
+        Err(MeshqlError::Unsupported(
+            "this adapter does not implement version reads".into(),
+        ))
+    }
 }
 
 #[async_trait::async_trait]

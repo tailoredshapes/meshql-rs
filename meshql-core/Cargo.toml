@@ -9,6 +9,7 @@ repository = "https://github.com/tailoredshapes/meshql-rs"
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = "0.10"
 async-trait = { workspace = true }
 chrono = { workspace = true }
 thiserror = { workspace = true }
