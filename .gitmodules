@@ -1,0 +1,3 @@
+[submodule "meshql-cert/tests/features/contract"]
+	path = meshql-cert/tests/features/contract
+	url = ../meshql-contract.git

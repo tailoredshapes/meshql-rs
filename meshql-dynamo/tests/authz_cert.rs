@@ -95,7 +95,11 @@ async fn run(indexing: Indexing) {
                     let _ = meshql_dynamo::drop_table(&client, &table).await;
                 }
             })
-        })
+        }) // A scenario whose steps do not match is *skipped*, and cucumber
+        // exits 0 on a skip. Without this, a suite where nothing ran at all
+        // reports success — which is how a diverged feature file went
+        // unnoticed for months.
+        .fail_on_skipped()
         .run_and_exit("../meshql-cert/tests/features/authz.feature")
         .await;
 }
