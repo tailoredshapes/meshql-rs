@@ -121,3 +121,111 @@ type Query {
         assert_eq!(field_is_list(COOP, "Query", "getById"), Some(false));
     }
 }
+
+/// Walk a dotted resolver path to the type that owns its last segment.
+///
+/// `hens.layReports` on root `Coop` means: field `hens` has type `Hen`, and the
+/// resolver attaches to `layReports` on `Hen`. Returns the owning type and the
+/// final field name.
+pub fn walk_path<'a>(schema: &str, root: &'a str, path: &'a str) -> Option<(String, &'a str)> {
+    let mut owner = root.to_string();
+    let mut parts = path.split('.').peekable();
+    while let Some(seg) = parts.next() {
+        if parts.peek().is_none() {
+            return Some((owner, seg));
+        }
+        owner = field_type_name(schema, &owner, seg)?;
+    }
+    None
+}
+
+/// The bare type name of a field, with list and non-null markers stripped.
+pub fn field_type_name(schema: &str, type_name: &str, field: &str) -> Option<String> {
+    let body = type_body(schema, type_name)?;
+    for line in body.lines() {
+        let line = line.trim();
+        let Some((name, _)) = line.split_once(':') else {
+            continue;
+        };
+        let name = name.split('(').next().unwrap_or(name).trim();
+        if name != field {
+            continue;
+        }
+        let after_args = match line.rfind(')') {
+            Some(i) => &line[i + 1..],
+            None => line,
+        };
+        let ty = after_args.split_once(':').map(|(_, t)| t)?;
+        return Some(
+            ty.trim()
+                .trim_start_matches('[')
+                .trim_end_matches('!')
+                .trim_end_matches(']')
+                .trim_end_matches('!')
+                .to_string(),
+        );
+    }
+    None
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    // Shaped like a real schema: one field per line, with blank lines and a
+    // comment, because those are what broke the first version of this scanner.
+    const FARM: &str = r#"
+scalar Date
+
+type Coop {
+  name: String!
+  farm: Farm!
+  hens: [Hen]
+}
+
+# The nested hop the shared farm config resolves through.
+type Hen {
+  name: String!
+  coop: Coop
+  layReports: [LayReport]
+}
+
+type Query {
+  getById(id: ID, at: Float): Coop
+}
+"#;
+
+    /// The case the shared farm config uses: a resolver two hops from the root.
+    #[test]
+    fn a_dotted_path_resolves_to_the_type_that_owns_the_last_field() {
+        assert_eq!(
+            walk_path(FARM, "Coop", "hens.layReports"),
+            Some(("Hen".to_string(), "layReports"))
+        );
+    }
+
+    #[test]
+    fn an_undotted_name_stays_on_the_root() {
+        assert_eq!(
+            walk_path(FARM, "Coop", "farm"),
+            Some(("Coop".to_string(), "farm"))
+        );
+    }
+
+    #[test]
+    fn a_path_through_a_field_that_does_not_exist_is_none() {
+        assert_eq!(walk_path(FARM, "Coop", "nope.layReports"), None);
+    }
+
+    #[test]
+    fn list_and_non_null_markers_do_not_leak_into_the_type_name() {
+        assert_eq!(
+            field_type_name(FARM, "Coop", "hens").as_deref(),
+            Some("Hen")
+        );
+        assert_eq!(
+            field_type_name(FARM, "Coop", "farm").as_deref(),
+            Some("Farm")
+        );
+    }
+}

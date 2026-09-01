@@ -17,18 +17,18 @@ pub struct Built {
     pub restlettes: Vec<(String, serde_json::Value, Store)>,
 }
 
-/// A resolver the config declares that Rust cannot yet serve.
+/// A resolver the config declares that meshql-rs cannot serve.
 ///
-/// The shared farm config carries `name = "hens.layReports"` — a resolver on a
-/// *nested* type, reached through another resolver's result. TypeScript hands
-/// its flat resolver list to GraphQL and lets the type system walk the path;
-/// Rust's `RootConfig` attaches a resolver to one field of one root type and
-/// has no notion of a path.
+/// Nested resolvers themselves are fine: `schema_builder` matches a dotted name
+/// by its suffix, so `hens.layReports` attaches to `layReports` wherever that
+/// field is built. What is *not* fine is a nested **singleton** resolver. The
+/// suffix fallback exists on vector resolvers and internal vector resolvers
+/// only; singletons match exactly, so a dotted singleton silently becomes a
+/// null field with no error.
 ///
-/// This is reported rather than skipped. A loader that quietly dropped the
-/// resolver would produce a server that answers a federated query with `null`
-/// and no explanation — which is exactly the class of divergence that let the
-/// implementations grow apart unnoticed.
+/// That is reported rather than skipped. A loader that let it through would
+/// produce a server answering a federated query with `null` and no explanation,
+/// which is the class of divergence this exercise has been about.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnsupportedResolver {
     pub graphlette: String,
@@ -36,9 +36,10 @@ pub struct UnsupportedResolver {
     pub reason: &'static str,
 }
 
-pub const NESTED_RESOLVER: &str =
-    "a resolver on a nested type. meshql-rs attaches resolvers to fields of the \
-     root type only, so a dotted path has nowhere to go";
+pub const NESTED_SINGLETON: &str =
+    "a nested singleton resolver. meshql-graphlette matches a dotted resolver \
+     name by its suffix for vector resolvers only, so a nested singleton would \
+     resolve to null with no error";
 
 /// Build a deployment, reporting resolvers that cannot be served.
 ///
@@ -102,37 +103,38 @@ fn root_config_for(
 
     let mut unsupported = Vec::new();
     for r in &g.root_config.resolvers {
-        if r.name.contains('.') {
+        // A dotted name attaches to the last segment, on the type the path
+        // walks to — `hens.layReports` is `layReports` on `Hen`, not on `Coop`.
+        let (owner, field) = schema::walk_path(&g.schema, &root, &r.name).ok_or_else(|| {
+            ConfigError::Shape(format!(
+                "{}: resolver \"{}\" names a path that does not exist in the schema",
+                g.path, r.name
+            ))
+        })?;
+
+        let is_list = schema::field_is_list(&g.schema, &owner, field).ok_or_else(|| {
+            ConfigError::Shape(format!(
+                "{}: resolver \"{}\" has no matching field on type {owner}",
+                g.path, r.name
+            ))
+        })?;
+
+        if r.name.contains('.') && !is_list {
             unsupported.push(UnsupportedResolver {
                 graphlette: g.path.clone(),
                 name: r.name.clone(),
-                reason: NESTED_RESOLVER,
+                reason: NESTED_SINGLETON,
             });
             continue;
         }
-        b = attach(b, &root, &g.schema, r, &g.path)?;
+
+        let fk = r.id.as_deref();
+        b = if is_list {
+            b.vector_resolver(&r.name, fk, &r.query_name, &r.url)
+        } else {
+            b.singleton_resolver(&r.name, fk, &r.query_name, &r.url)
+        };
     }
 
     Ok((b.build(), unsupported))
-}
-
-fn attach(
-    b: meshql_core::RootConfigBuilder,
-    root: &str,
-    schema_text: &str,
-    r: &ResolverDef,
-    path: &str,
-) -> Result<meshql_core::RootConfigBuilder, ConfigError> {
-    let is_list = schema::field_is_list(schema_text, root, &r.name).ok_or_else(|| {
-        ConfigError::Shape(format!(
-            "{path}: resolver \"{}\" has no matching field on type {root}",
-            r.name
-        ))
-    })?;
-    let fk = r.id.as_deref();
-    Ok(if is_list {
-        b.vector_resolver(&r.name, fk, &r.query_name, &r.url)
-    } else {
-        b.singleton_resolver(&r.name, fk, &r.query_name, &r.url)
-    })
 }

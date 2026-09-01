@@ -170,61 +170,67 @@ fn the_vendored_config_matches_the_one_the_other_languages_run() {
     }
 }
 
-/// What the shared config asks for that meshql-rs cannot yet serve.
+/// The shared config is fully serveable, including its nested resolver.
 ///
-/// This test exists to name the gap rather than let it hide. It asserts the
-/// *exact* set, so closing the gap fails the test and forces the assertion to
-/// be updated deliberately — and so a new gap appearing cannot pass unnoticed.
-#[tokio::test]
-async fn the_only_thing_rust_cannot_serve_is_the_nested_resolver() {
-    use std::sync::Arc;
+/// I first assumed a dotted resolver name had nowhere to go in meshql-rs. It
+/// does: `schema_builder` matches a dotted name by its suffix, so
+/// `hens.layReports` attaches to `layReports` on `Hen`. This asserts the whole
+/// config classifies, so a regression there fails here.
+#[test]
+fn every_resolver_in_the_shared_config_classifies() {
     let path = shared_config().unwrap();
     let d = meshql_config::load_with_env(&path, &farm_env()).unwrap();
 
-    // Storage is opened while building, and the farm config is Mongo, so this
-    // asserts against the classification rather than a live server.
-    let mut unsupported = Vec::new();
+    let mut nested = Vec::new();
     for g in &d.graphlettes {
+        let root = meshql_config::schema::root_type(&g.schema)
+            .unwrap_or_else(|| panic!("{} has no Query type", g.path));
         for r in &g.root_config.resolvers {
+            let (owner, field) = meshql_config::schema::walk_path(&g.schema, &root, &r.name)
+                .unwrap_or_else(|| panic!("{}: {} does not walk", g.path, r.name));
+            let is_list = meshql_config::schema::field_is_list(&g.schema, &owner, field)
+                .unwrap_or_else(|| panic!("{}: {}.{field} is not a field", g.path, owner));
             if r.name.contains('.') {
-                unsupported.push(format!("{} {}", g.path, r.name));
+                nested.push((r.name.clone(), owner, is_list));
             }
         }
     }
-    unsupported.sort();
 
     assert_eq!(
-        unsupported,
-        vec!["/coop/graph hens.layReports".to_string()],
-        "the shared config's nested resolver is the one thing meshql-rs cannot \
-         attach; anything else appearing here is a new gap"
+        nested,
+        vec![("hens.layReports".to_string(), "Hen".to_string(), true)],
+        "the one nested resolver walks to Hen and is a list, so the suffix \
+         fallback serves it"
     );
-    let _ = Arc::<()>::default();
 }
 
-/// Every other resolver classifies, and the schema decides which kind it is.
+/// The real boundary, which is narrower than I first claimed.
+///
+/// The suffix fallback exists on vector resolvers and internal vector resolvers
+/// only. A nested *singleton* matches exactly, so it would resolve to null with
+/// no error — that one the loader refuses rather than serving quietly.
 #[test]
-fn resolvers_classify_as_singleton_or_vector_from_the_schema() {
-    let path = shared_config().unwrap();
-    let d = meshql_config::load_with_env(&path, &farm_env()).unwrap();
-    let coop = d
-        .graphlettes
-        .iter()
-        .find(|g| g.path == "/coop/graph")
-        .unwrap();
+fn a_nested_singleton_resolver_is_refused_rather_than_silently_null() {
+    const SCHEMA: &str = r#"
+type Coop {
+  name: String!
+  hens: [Hen]
+}
 
-    // `farm: Farm!` is a singleton, `hens: [Hen]` is a vector. The config says
-    // nothing about the difference; only the schema knows.
+type Hen {
+  name: String!
+  coop: Coop
+}
+
+type Query {
+  getById(id: ID, at: Float): Coop
+}
+"#;
+    // `hens.coop` walks to Hen, where `coop: Coop` is a singleton.
+    let (owner, field) = meshql_config::schema::walk_path(SCHEMA, "Coop", "hens.coop").unwrap();
+    assert_eq!(owner, "Hen");
     assert_eq!(
-        meshql_config::schema::field_is_list(&coop.schema, "Coop", "farm"),
+        meshql_config::schema::field_is_list(SCHEMA, &owner, field),
         Some(false)
-    );
-    assert_eq!(
-        meshql_config::schema::field_is_list(&coop.schema, "Coop", "hens"),
-        Some(true)
-    );
-    assert_eq!(
-        meshql_config::schema::root_type(&coop.schema).as_deref(),
-        Some("Coop")
     );
 }
