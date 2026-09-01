@@ -1,65 +1,106 @@
 Feature: Repository Contract
+  As a database plugin developer
+  I want to implement the Repository interface correctly
+  So that MeshQL can use any database backend reliably
 
   Background:
     Given a fresh repository instance
 
-  Scenario: Creating an envelope stores and returns it
-    When I create envelopes named "Create Test"
+  Scenario: Creating a new envelope
+    When I create envelopes:
+      | name        | count |
+      | Create Test | 3     |
     Then the envelopes should have generated IDs
-    And the envelopes created_at should be recent
-    And the envelopes deleted flag should be false
+    And the envelopes created_at should be greater than or equal to the test start time
+    And the envelopes deleted flag should be disabled
 
-  Scenario: Reading an envelope by ID retrieves the correct data
-    When I create envelopes named "Read Test"
-    And I read the envelope named "Read Test"
-    Then the read should succeed
+  Scenario: Reading an envelope by ID
+    Given I have created envelopes:
+      | name      | count |
+      | Read Test | 51    |
+    When I read envelopes ["Read Test"] by their IDs
+    Then I should receive 1 envelope
+    And the payload "name" should be "Read Test"
 
-  Scenario: Listing all envelopes returns created items
-    When I create 3 envelopes named "List Item"
+  Scenario: Listing all envelopes
+    Given I have created envelopes:
+      | name  | count |
+      | test1 | 4     |
+      | test2 | 45    |
+      | test3 | 2     |
+    When I list all envelopes
+    Then I should receive exactly 3 envelopes
+
+  Scenario: Removing envelopes by ID
+    Given I have created envelopes:
+      | name      | count |
+      | Read Test | 51    |
+    When I remove envelope "Read Test"
+    Then the remove operation should return true
+    And reading envelopes ["Read Test"] by their IDs should return nothing
+
+  Scenario: Reading multiple envelopes by IDs
+    Given I have created envelopes:
+      | name  | count |
+      | test1 | 4     |
+      | test2 | 45    |
+      | test3 | 2     |
+    When I read envelopes ["test1", "test2"] by their IDs
+    Then I should receive exactly 2 envelopes
+
+  Scenario: Removing multiple envelopes by IDs
+    Given I have created envelopes:
+      | name  | count |
+      | test1 | 4     |
+      | test2 | 45    |
+      | test3 | 2     |
+    When I remove envelopes ["test1", "test2"] by their IDs
+    Then the remove operations should return true
+    And listing all envelopes should show exactly 1 envelope
+
+  Scenario: Temporal versioning - multiple versions of the same ID
+    Given I create envelopes:
+      | name | version | msg           |
+      | doc1 | v1      | First version |
+    And I capture the current timestamp as "t1"
+    And I wait 50 milliseconds
+    When I create a new version of envelope "doc1":
+      | version | msg            |
+      | v2      | Second version |
+    And I capture the current timestamp as "t2"
+    Then reading envelope "doc1" at timestamp "t2" should return version "v2"
+    And reading envelope "doc1" at timestamp "t1" should return version "v1"
+
+  Scenario: Listing only returns the latest version
+    Given I create envelopes:
+      | name | version | msg           |
+      | doc1 | v1      | First version |
+    And I wait 50 milliseconds
+    When I create a new version of envelope "doc1":
+      | version | msg            |
+      | v2      | Second version |
     And I list all envelopes
-    Then the envelope list should contain at least 3 items
-    And the envelope list should contain "List Item-0"
-    And the envelope list should contain "List Item-1"
-    And the envelope list should contain "List Item-2"
+    Then I should receive exactly 1 envelope
+    And the payload "version" should be "v2"
 
-  Scenario: Removing an envelope soft-deletes it
-    When I create envelopes named "To Delete"
-    And I remove the envelope named "To Delete"
-    Then the remove should return true
-    And reading "To Delete" should return None
-
-  Scenario: Creating many envelopes stores all of them
-    When I create many envelopes with base name "Bulk Item" and count 3
-    Then I should have 3 created envelopes
-
-  Scenario: Reading many envelopes retrieves all of them
-    When I create many envelopes with base name "ReadMany" and count 3
-    And I read many envelopes named "ReadMany"
-    Then I should have 3 read envelopes
-
-  Scenario: Removing many envelopes deletes all of them
-    When I create many envelopes with base name "RemoveMany" and count 3
-    And I remove many envelopes named "RemoveMany"
-    Then all removes should succeed
-
-  Scenario: Temporal versioning allows reading old versions
-    When I create a version 1 envelope named "Temporal" with value "version-1" dated 10 seconds ago
-    And I create a version 2 envelope for "Temporal" with value "version-2"
-    And I read envelope "Temporal" at timestamp "before_Temporal"
-    Then the result at "before_Temporal" should have version "version-1"
-    When I read envelope "Temporal" now
-    Then the result at "before_Temporal" should have version "version-2"
-
-  Scenario: Listing only shows the latest version per ID
-    When I create two versions of envelope "Latest" with old value "old" and new value "new"
-    And I list all envelopes
-    Then listing should return exactly 1 result for "Latest"
-    And the listed version should have value "new"
+  Scenario: Creating many envelopes in one call stores all of them
+    When I create many envelopes:
+      | name  | count |
+      | bulk1 | 1     |
+      | bulk2 | 2     |
+      | bulk3 | 3     |
+    Then the envelopes should have generated IDs
+    And listing all envelopes should show exactly 3 envelopes
 
   Scenario: Listing excludes a removed envelope that has an earlier version
-    When I create two dated versions of envelope "Deleted History" with old value "old" and new value "new"
-    And I remove the envelope named "Deleted History"
-    And I list all envelopes
-    Then the remove should return true
-    And reading "Deleted History" should return None
-    And the envelope list should not contain "Deleted History"
+    Given I create envelopes:
+      | name | version | msg           |
+      | doc1 | v1      | First version |
+    And I wait 50 milliseconds
+    And I create a new version of envelope "doc1":
+      | version | msg            |
+      | v2      | Second version |
+    When I remove envelope "doc1"
+    Then the remove operation should return true
+    And reading envelopes ["doc1"] by their IDs should return nothing
+    And listing all envelopes should show exactly 0 envelopes

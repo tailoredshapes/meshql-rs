@@ -31,6 +31,9 @@ pub struct CertWorld {
     pub timestamps: HashMap<String, DateTime<Utc>>,
     pub last_search_result: Option<Option<Stash>>,
     pub search_results: Vec<Stash>,
+    /// The envelope returned by a single-id read, so `the payload "k" should be
+    /// "v"` can assert against it rather than against a list.
+    pub single_result: Option<Envelope>,
     pub last_remove: bool,
     pub remove_results: HashMap<String, bool>,
     pub test_start: DateTime<Utc>,
@@ -74,6 +77,7 @@ impl CertWorld {
             timestamps: HashMap::new(),
             last_search_result: None,
             search_results: Vec::new(),
+            single_result: None,
             last_remove: false,
             remove_results: HashMap::new(),
             test_start: Utc::now(),

@@ -1,4 +1,3 @@
-use chrono::Utc;
 use cucumber::{given, then, when};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -159,16 +158,8 @@ async fn create_entities(
     }
 }
 
-#[given(regex = r#"^I capture the current timestamp as "([^"]+)"$"#)]
-async fn capture_timestamp(world: &mut CertWorld, key: String) {
-    let ms = Utc::now().timestamp_millis();
-    if key == "first_stamp" || key == "before_update" {
-        world.first_stamp_ms = Some(ms);
-    }
-    world.timestamps.insert(key, Utc::now());
-    // Small sleep to ensure temporal separation
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-}
+// `I capture the current timestamp as "..."` lives in `super::common`, which
+// both this feature and `repository.feature` share.
 
 #[given(regex = r#"^I update "([^"]+)" "([^"]+)" with data (.+)$"#)]
 async fn update_entity(world: &mut CertWorld, entity_type: String, name: String, raw_data: String) {
