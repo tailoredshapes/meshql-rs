@@ -138,7 +138,8 @@ pub fn envelope_to_item(env: &Envelope) -> HashMap<String, AttributeValue> {
     item.insert(
         TOKS.to_string(),
         AttributeValue::L(
-            env.authorized_tokens
+            env.auth
+                .as_parts()
                 .iter()
                 .map(|t| AttributeValue::S(t.clone()))
                 .collect(),
@@ -194,7 +195,7 @@ pub fn item_to_envelope(item: &HashMap<String, AttributeValue>) -> Result<Envelo
         }
     };
 
-    let authorized_tokens = match item.get(TOKS) {
+    let auth: meshql_core::AuthMark = match item.get(TOKS) {
         Some(AttributeValue::L(items)) => items
             .iter()
             .map(|a| match a {
@@ -203,8 +204,9 @@ pub fn item_to_envelope(item: &HashMap<String, AttributeValue>) -> Result<Envelo
                     "{TOKS} must be a list of S, got {other:?}"
                 ))),
             })
-            .collect::<Result<Vec<String>>>()?,
-        None => Vec::new(),
+            .collect::<Result<Vec<String>>>()?
+            .into(),
+        None => meshql_core::AuthMark::empty(),
         Some(other) => {
             return Err(MeshqlError::Storage(format!(
                 "{TOKS} must be L, got {other:?}"
@@ -227,7 +229,7 @@ pub fn item_to_envelope(item: &HashMap<String, AttributeValue>) -> Result<Envelo
         payload,
         created_at,
         deleted,
-        authorized_tokens,
+        auth,
     })
 }
 
@@ -1177,7 +1179,7 @@ mod tests {
                 .unwrap()
                 .with_timezone(&Utc),
             deleted: false,
-            authorized_tokens: vec!["alice".to_string()],
+            auth: vec!["alice".to_string()].into(),
         };
 
         let item = envelope_to_item(&env);
@@ -1186,7 +1188,7 @@ mod tests {
         assert_eq!(back.id, env.id);
         assert_eq!(back.payload, env.payload);
         assert_eq!(back.deleted, env.deleted);
-        assert_eq!(back.authorized_tokens, env.authorized_tokens);
+        assert_eq!(back.auth, env.auth);
         assert_eq!(back.created_at, env.created_at);
         assert_eq!(
             back.created_at.to_rfc3339(),
@@ -1202,10 +1204,10 @@ mod tests {
             payload: meshql_core::Stash::new(),
             created_at: Utc::now(),
             deleted: false,
-            authorized_tokens: vec![],
+            auth: vec![].into(),
         };
         let back = item_to_envelope(&envelope_to_item(&env)).unwrap();
-        assert!(back.authorized_tokens.is_empty());
+        assert!(back.auth.is_empty());
     }
 
     #[test]

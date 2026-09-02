@@ -493,7 +493,7 @@ fn tuple_to_envelope(tuple: &Tuple) -> Option<Envelope> {
         payload,
         created_at: chrono::DateTime::from_timestamp_millis(created_at_ms).unwrap_or_default(),
         deleted,
-        authorized_tokens,
+        auth: authorized_tokens.into(),
     })
 }
 
@@ -959,7 +959,7 @@ mod tests {
                 let envelope = tuple_to_envelope(&tuple).expect("a decodable envelope");
                 assert_eq!(envelope.id, "evt-1");
                 assert_eq!(envelope.payload["eggs"], serde_json::json!(3));
-                assert_eq!(envelope.authorized_tokens, vec!["farm".to_string()]);
+                assert_eq!(envelope.auth.as_parts(), ["farm".to_string()]);
                 assert!(!envelope.deleted);
                 assert_eq!(envelope.created_at.timestamp_millis(), 1751892345123);
             }

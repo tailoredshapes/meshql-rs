@@ -50,7 +50,7 @@ Rules:
 
 If writes need to actually be validated (they almost always do), use `build_restlette_router_ext`'s `validator` extension point with a compiled JSON Schema validator (the `jsonschema` crate), pointed at the same schema file the manifest publishes — so the published contract and the enforced contract can't drift. Don't assume declaring `schema_json` is sufficient, and don't write a test that only asserts the *happy* path, which passes either way.
 
-This validates the REST write payload. It describes the **payload** only — never include `id`, `created_at`, `deleted`, or `authorized_tokens`; those are Envelope metadata managed by the framework.
+This validates the REST write payload. It describes the **payload** only — never include `id`, `created_at`, `deleted`, or `auth`; those are Envelope metadata managed by the framework.
 
 ## 3. Wire it in `main.rs`
 

@@ -49,7 +49,10 @@ fn envelope(id: &str, body: &str) -> Envelope {
 async fn create_stores_and_returns_the_envelope() {
     let repo = repo("mem://merk-create");
     let result = repo
-        .create(envelope("id-1", "hello"), &star())
+        .create(
+            envelope("id-1", "hello"),
+            &meshql_core::TokenSession::new(star()),
+        )
         .await
         .unwrap();
 
@@ -61,7 +64,13 @@ async fn create_stores_and_returns_the_envelope() {
 #[tokio::test]
 async fn create_mints_an_id_when_the_caller_supplies_none() {
     let repo = repo("mem://merk-create-id");
-    let result = repo.create(envelope("", "anon"), &star()).await.unwrap();
+    let result = repo
+        .create(
+            envelope("", "anon"),
+            &meshql_core::TokenSession::new(star()),
+        )
+        .await
+        .unwrap();
     assert!(!result.id.is_empty());
     assert_eq!(result.id.len(), 36, "a uuid: {}", result.id);
 }
@@ -77,10 +86,13 @@ async fn create_stamps_the_callers_tokens() {
     // The envelope arrives carrying something else entirely; the caller's
     // resolved tokens are what gets stored.
     let mut incoming = envelope("id-tok", "x");
-    incoming.authorized_tokens = vec!["whatever-the-client-sent".to_string()];
+    incoming.auth = vec!["whatever-the-client-sent".to_string()].into();
 
-    let stored = repo.create(incoming, &tokens).await.unwrap();
-    assert_eq!(stored.authorized_tokens, tokens);
+    let stored = repo
+        .create(incoming, &meshql_core::TokenSession::new(tokens.clone()))
+        .await
+        .unwrap();
+    assert_eq!(stored.auth, meshql_core::AuthMark::from(tokens));
 }
 
 #[tokio::test]
@@ -90,18 +102,25 @@ async fn create_many_stores_every_envelope() {
         .map(|i| envelope(&format!("bulk-{i}"), &format!("body-{i}")))
         .collect();
 
-    let stored = repo.create_many(batch, &star()).await.unwrap();
+    let stored = repo
+        .create_many(batch, &meshql_core::TokenSession::new(star()))
+        .await
+        .unwrap();
     assert_eq!(stored.len(), 25);
     for (i, env) in stored.iter().enumerate() {
         assert_eq!(env.id, format!("bulk-{i}"));
-        assert_eq!(env.authorized_tokens, star());
+        assert_eq!(env.auth, meshql_core::AuthMark::from(star()));
     }
 }
 
 #[tokio::test]
 async fn create_many_of_nothing_is_not_an_error() {
     let repo = repo("mem://merk-create-many-empty");
-    assert!(repo.create_many(vec![], &star()).await.unwrap().is_empty());
+    assert!(repo
+        .create_many(vec![], &meshql_core::TokenSession::new(star()))
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 /// The gateway's step 7 is append, then notify, then 201 — and the notify needs
@@ -121,7 +140,10 @@ async fn create_located_reports_the_partition_the_engine_chose() {
     for i in 0..20 {
         let id = format!("e-{i:02}");
         let (env, notification) = repo
-            .create_located(envelope(&id, "body"), &star())
+            .create_located(
+                envelope(&id, "body"),
+                &meshql_core::TokenSession::new(star()),
+            )
             .await
             .unwrap();
 
@@ -145,7 +167,10 @@ async fn create_many_located_notifies_each_partition_once() {
         .map(|i| envelope(&uuid::Uuid::new_v4().to_string(), &format!("b{i}")))
         .collect();
 
-    let (stored, notifications) = repo.create_many_located(batch, &star()).await.unwrap();
+    let (stored, notifications) = repo
+        .create_many_located(batch, &meshql_core::TokenSession::new(star()))
+        .await
+        .unwrap();
     assert_eq!(stored.len(), 200);
 
     assert!(
@@ -169,48 +194,58 @@ async fn create_many_located_notifies_each_partition_once() {
 #[tokio::test]
 async fn every_read_path_is_refused() {
     let repo = repo("mem://merk-refusals");
-    repo.create(envelope("present", "here"), &star())
-        .await
-        .unwrap();
+    repo.create(
+        envelope("present", "here"),
+        &meshql_core::TokenSession::new(star()),
+    )
+    .await
+    .unwrap();
 
     let ids = vec!["present".to_string()];
 
     let errors = [
         (
             "read",
-            repo.read("present", &star(), None)
+            repo.read("present", &meshql_core::TokenSession::new(star()), None)
                 .await
                 .err()
                 .map(|e| e.to_string()),
         ),
         (
             "read at:",
-            repo.read("present", &star(), Some(chrono::Utc::now()))
+            repo.read(
+                "present",
+                &meshql_core::TokenSession::new(star()),
+                Some(chrono::Utc::now()),
+            )
+            .await
+            .err()
+            .map(|e| e.to_string()),
+        ),
+        (
+            "list",
+            repo.list(&meshql_core::TokenSession::new(star()))
                 .await
                 .err()
                 .map(|e| e.to_string()),
         ),
         (
-            "list",
-            repo.list(&star()).await.err().map(|e| e.to_string()),
-        ),
-        (
             "read_many",
-            repo.read_many(&ids, &star())
+            repo.read_many(&ids, &meshql_core::TokenSession::new(star()))
                 .await
                 .err()
                 .map(|e| e.to_string()),
         ),
         (
             "remove",
-            repo.remove("present", &star())
+            repo.remove("present", &meshql_core::TokenSession::new(star()))
                 .await
                 .err()
                 .map(|e| e.to_string()),
         ),
         (
             "remove_many",
-            repo.remove_many(&ids, &star())
+            repo.remove_many(&ids, &meshql_core::TokenSession::new(star()))
                 .await
                 .err()
                 .map(|e| e.to_string()),
@@ -234,7 +269,15 @@ async fn every_read_path_is_refused() {
 #[tokio::test]
 async fn remove_is_refused_by_name_not_by_returning_false() {
     let repo = repo("mem://merk-remove");
-    repo.create(envelope("gone", "x"), &star()).await.unwrap();
-    let error = repo.remove("gone", &star()).await.expect_err("must refuse");
+    repo.create(
+        envelope("gone", "x"),
+        &meshql_core::TokenSession::new(star()),
+    )
+    .await
+    .unwrap();
+    let error = repo
+        .remove("gone", &meshql_core::TokenSession::new(star()))
+        .await
+        .expect_err("must refuse");
     assert!(error.to_string().starts_with("Storage error: remove:"));
 }

@@ -952,7 +952,7 @@ impl SapOdpSource {
             entity: entity.clone(),
             key_properties: key_properties.clone(),
             changed_at_property: changed_at_property.clone(),
-            authorized_tokens: authorized_tokens.clone(),
+            auth: authorized_tokens.clone().into(),
             page_size: *page_size,
             auth: auth.clone(),
             poll_interval: Duration::from_millis(*poll_interval_ms),

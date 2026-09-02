@@ -9,10 +9,21 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
-    // Only run cert tests if Confluent Cloud credentials are set
+    // A skip is a failure. This binary used to `return` when Confluent Cloud
+    // credentials were absent, which exits 0 — so the whole ksql adapter
+    // reported success on every machine that had never configured it, and
+    // `.fail_on_skipped()` below never got the chance to see a thing. Every
+    // other adapter fails when its backend is missing (Postgres, MySQL and
+    // Mongo need Docker; DynamoDB needs DynamoDB Local); ksql now says so too.
     if std::env::var("CONFLUENT_KAFKA_REST_URL").is_err() {
-        eprintln!("Skipping ksql repo cert tests: CONFLUENT_KAFKA_REST_URL not set");
-        return;
+        panic!(
+            "ksql repository certification cannot run: CONFLUENT_KAFKA_REST_URL is not set.\n\
+             This is a FAILURE, not a skip. The adapter is uncertified until a \n\
+             Confluent Cloud cluster is configured — set CONFLUENT_KAFKA_REST_URL, \n\
+             CONFLUENT_KAFKA_CLUSTER_ID, CONFLUENT_KAFKA_API_KEY, \n\
+             CONFLUENT_KAFKA_API_SECRET, CONFLUENT_KSQLDB_URL, \n\
+             CONFLUENT_KSQLDB_API_KEY and CONFLUENT_KSQLDB_API_SECRET."
+        );
     }
 
     let config = KsqlConfig::from_env().expect("missing Confluent Cloud env vars");
@@ -78,7 +89,10 @@ async fn await_auth_seed_materialized(repo: &KsqlRepository) {
     ];
 
     for _ in 0..150 {
-        let listed = repo.list(&star).await.unwrap_or_default();
+        let listed = repo
+            .list(&meshql_core::TokenSession::new(star.clone()))
+            .await
+            .unwrap_or_default();
         let versioned_is_v2 = listed
             .iter()
             .find(|e| e.id == "repo-auth-versioned")

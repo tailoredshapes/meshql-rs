@@ -1,7 +1,7 @@
 use crate::query::build_where;
 use async_trait::async_trait;
 use handlebars::Handlebars;
-use meshql_core::{Envelope, MeshqlError, Result, Searcher, Stash};
+use meshql_core::{AuthMark, Envelope, MeshqlError, Operation, Result, Searcher, Session, Stash};
 use serde_json::json;
 use sqlx::{PgPool, Row};
 
@@ -55,7 +55,7 @@ impl PostgresSearcher {
             .map_err(|e| MeshqlError::Storage(e.to_string()))?;
 
         let created_at = chrono::DateTime::from_timestamp_millis(created_at_ms).unwrap_or_default();
-        let authorized_tokens: Vec<String> =
+        let auth: AuthMark =
             serde_json::from_str(&tokens_json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
         let payload: Stash =
             serde_json::from_str(&payload_json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
@@ -65,7 +65,7 @@ impl PostgresSearcher {
             payload,
             created_at,
             deleted,
-            authorized_tokens,
+            auth,
         })
     }
 
@@ -73,7 +73,7 @@ impl PostgresSearcher {
         &self,
         template: &str,
         args: &Stash,
-        creds: &[String],
+        session: &dyn Session,
         at: i64,
         limit: Option<i64>,
     ) -> Result<Vec<Stash>> {
@@ -102,12 +102,10 @@ FROM latest WHERE rn = 1 AND deleted = FALSE",
             self.table
         );
 
-        // Visibility filtering happens in Rust after the fetch, so LIMIT can
-        // only be pushed into SQL for a "*" caller (who sees every row);
-        // otherwise an invisible row could consume the limit and shadow a
-        // visible match.
-        let wildcard = creds.iter().any(|t| t == "*");
-        let sql_limit = if wildcard { limit } else { None };
+        // Authorization is fetch-then-ask: the mark is opaque, so it cannot
+        // become a WHERE clause, and the limit is applied to the *authorized*
+        // rows further down. Nothing is pushed into SQL — the caller's limit
+        // must never be consumed by a row the caller is not entitled to see.
 
         let mut sql = if where_part.clause.is_empty() {
             base_sql
@@ -116,15 +114,11 @@ FROM latest WHERE rn = 1 AND deleted = FALSE",
         };
 
         // Canonical result ordering (meshql_core::envelope_order): the resolved
-        // version's created_at, then the envelope id. Must precede LIMIT so the
-        // limit truncates a meaningful prefix. `COLLATE "C"` forces byte
+        // version's created_at, then the envelope id, so the limit applied after
+        // authorization truncates a meaningful prefix. `COLLATE "C"` forces byte
         // ordering — the database's default collation is locale-dependent and
         // would disagree with the other adapters.
         sql.push_str(" ORDER BY created_at_ms ASC, id COLLATE \"C\" ASC");
-
-        if let Some(lim) = sql_limit {
-            sql = format!("{} LIMIT {}", sql, lim);
-        }
 
         let mut q = sqlx::query(&sql).bind(cutoff_ms);
         for val in &where_part.values {
@@ -139,7 +133,7 @@ FROM latest WHERE rn = 1 AND deleted = FALSE",
         let mut results = Vec::new();
         for row in rows {
             let env = Self::row_to_envelope(&row)?;
-            if !meshql_core::envelope_visible_to(&env, creds) {
+            if !session.is_authorized(Operation::Read, &env) {
                 continue;
             }
             let mut stash = env.payload;
@@ -162,11 +156,11 @@ impl Searcher for PostgresSearcher {
         &self,
         template: &str,
         args: &Stash,
-        creds: &[String],
+        session: &dyn Session,
         at: i64,
     ) -> Result<Option<Stash>> {
         let mut results = self
-            .execute_query(template, args, creds, at, Some(1))
+            .execute_query(template, args, session, at, Some(1))
             .await?;
         Ok(results.pop())
     }
@@ -175,10 +169,10 @@ impl Searcher for PostgresSearcher {
         &self,
         template: &str,
         args: &Stash,
-        creds: &[String],
+        session: &dyn Session,
         at: i64,
     ) -> Result<Vec<Stash>> {
         let limit = args.get("limit").and_then(|v| v.as_i64());
-        self.execute_query(template, args, creds, at, limit).await
+        self.execute_query(template, args, session, at, limit).await
     }
 }

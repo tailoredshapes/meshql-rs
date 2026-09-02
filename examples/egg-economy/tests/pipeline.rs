@@ -173,10 +173,14 @@ async fn read(
     repo: &Arc<SqliteRepository>,
     id: &str,
 ) -> Option<serde_json::Map<String, serde_json::Value>> {
-    repo.read(id, &["*".to_string()], None)
-        .await
-        .unwrap()
-        .map(|e| e.payload)
+    repo.read(
+        id,
+        &meshql_core::TokenSession::new(vec!["*".to_string()]),
+        None,
+    )
+    .await
+    .unwrap()
+    .map(|e| e.payload)
 }
 
 #[tokio::test]

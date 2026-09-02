@@ -99,7 +99,7 @@ async fn create_envelopes(world: &mut CertWorld, step: &Step) {
         let envelope = Envelope::new(new_id(), payload, CertWorld::star());
         let stored = world
             .repo()
-            .create(envelope, &CertWorld::star())
+            .create(envelope, &CertWorld::star_session())
             .await
             .expect("create failed");
         world.envelopes_by_name.insert(name, stored);
@@ -116,7 +116,7 @@ async fn create_many_envelopes(world: &mut CertWorld, step: &Step) {
 
     let stored = world
         .repo()
-        .create_many(envelopes, &CertWorld::star())
+        .create_many(envelopes, &CertWorld::star_session())
         .await
         .expect("create_many failed");
 
@@ -138,7 +138,7 @@ async fn create_new_version(world: &mut CertWorld, name: String, step: &Step) {
         .get(&name)
         .unwrap_or_else(|| panic!("envelope \"{name}\" was never created"));
     let id = previous.id.clone();
-    let tokens = previous.authorized_tokens.clone();
+    let tokens = previous.auth.clone();
 
     let payload = payloads(step)
         .into_iter()
@@ -148,7 +148,7 @@ async fn create_new_version(world: &mut CertWorld, name: String, step: &Step) {
     let envelope = Envelope::new(id, payload, tokens);
     let stored = world
         .repo()
-        .create(envelope, &CertWorld::star())
+        .create(envelope, &CertWorld::star_session())
         .await
         .expect("create failed");
     world.envelopes_by_name.insert(name, stored);
@@ -170,7 +170,7 @@ async fn read_envelopes_by_id(world: &mut CertWorld, names_json: String) {
     if ids.len() == 1 {
         let found = world
             .repo()
-            .read(&ids[0], &CertWorld::star(), None)
+            .read(&ids[0], &CertWorld::star_session(), None)
             .await
             .expect("read failed");
         world.last_envelopes = found.iter().cloned().collect();
@@ -178,7 +178,7 @@ async fn read_envelopes_by_id(world: &mut CertWorld, names_json: String) {
     } else {
         let found = world
             .repo()
-            .read_many(&ids, &CertWorld::star())
+            .read_many(&ids, &CertWorld::star_session())
             .await
             .expect("read_many failed");
         world.last_envelopes = found;
@@ -197,7 +197,7 @@ async fn remove_envelope(world: &mut CertWorld, name: String) {
         .clone();
     world.last_remove = world
         .repo()
-        .remove(&id, &CertWorld::star())
+        .remove(&id, &CertWorld::star_session())
         .await
         .expect("remove failed");
 }
@@ -208,7 +208,7 @@ async fn remove_envelopes_by_id(world: &mut CertWorld, names_json: String) {
     let ids = ids_for(world, &names_json);
     world.remove_results = world
         .repo()
-        .remove_many(&ids, &CertWorld::star())
+        .remove_many(&ids, &CertWorld::star_session())
         .await
         .expect("remove_many failed");
 }
@@ -218,7 +218,7 @@ async fn remove_envelopes_by_id(world: &mut CertWorld, names_json: String) {
 async fn list_all_envelopes(world: &mut CertWorld) {
     world.last_envelopes = world
         .repo()
-        .list(&CertWorld::star())
+        .list(&CertWorld::star_session())
         .await
         .expect("list failed");
     world.single_result = None;
@@ -310,14 +310,14 @@ async fn assert_read_returns_nothing(world: &mut CertWorld, names_json: String) 
     if ids.len() == 1 {
         let found = world
             .repo()
-            .read(&ids[0], &CertWorld::star(), None)
+            .read(&ids[0], &CertWorld::star_session(), None)
             .await
             .expect("read failed");
         assert!(found.is_none(), "expected nothing, got {found:?}");
     } else {
         let found = world
             .repo()
-            .read_many(&ids, &CertWorld::star())
+            .read_many(&ids, &CertWorld::star_session())
             .await
             .expect("read_many failed");
         assert!(
@@ -350,7 +350,7 @@ async fn assert_version_at_timestamp(
 
     let found = world
         .repo()
-        .read(&id, &CertWorld::star(), Some(at))
+        .read(&id, &CertWorld::star_session(), Some(at))
         .await
         .expect("read failed")
         .unwrap_or_else(|| panic!("reading \"{name}\" at \"{label}\" returned nothing"));
@@ -366,7 +366,7 @@ async fn assert_version_at_timestamp(
 async fn assert_list_count(world: &mut CertWorld, expected: usize) {
     let listed = world
         .repo()
-        .list(&CertWorld::star())
+        .list(&CertWorld::star_session())
         .await
         .expect("list failed");
     assert_eq!(

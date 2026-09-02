@@ -57,7 +57,7 @@ impl VersionRef {
 /// Derive a version's token.
 ///
 /// Two versions collide only when the document id, the timestamp, the deletion
-/// flag, the authorized tokens, and the payload are all identical — which makes
+/// flag, the authorization mark, and the payload are all identical — which makes
 /// them the same version recorded twice, indistinguishable by any other means.
 ///
 /// The payload is serialized with its keys sorted, so the token does not depend
@@ -68,7 +68,7 @@ pub fn version_token(env: &Envelope) -> String {
     for (k, v) in &env.payload {
         sorted.insert(k, v);
     }
-    let mut tokens: Vec<&String> = env.authorized_tokens.iter().collect();
+    let mut tokens: Vec<&String> = env.auth.as_parts().iter().collect();
     tokens.sort();
 
     let mut h = Sha256::new();

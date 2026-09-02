@@ -78,7 +78,7 @@ impl EventSource for RepositoryTail {
         let now = chrono::Utc::now().timestamp_millis();
         let rows: Vec<Stash> = self
             .searcher
-            .find_all("{}", &Stash::new(), &["*".to_string()], now)
+            .find_all("{}", &Stash::new(), &meshql_core::SystemSession, now)
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 

@@ -60,7 +60,7 @@ mod tests {
         assert_eq!(back.id, original.id);
         assert_eq!(back.payload, original.payload);
         assert_eq!(back.deleted, original.deleted);
-        assert_eq!(back.authorized_tokens, original.authorized_tokens);
+        assert_eq!(back.auth, original.auth);
         // Millisecond fidelity is the contract every adapter is held to.
         assert_eq!(
             back.created_at.timestamp_millis(),

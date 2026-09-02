@@ -13,11 +13,10 @@ use serde_json::{json, Value};
 use crate::authz::{self, GRAPHLETTE_PATH, IDENTITY_HEADER, RESTLETTE_PATH};
 use crate::world::CertWorld;
 
-/// The tokens a caller reads with when *nothing* is meant to be filtered —
-/// used only to inspect storage directly, never to certify a read path.
-fn inspector_tokens() -> Vec<String> {
-    vec!["*".to_string()]
-}
+/// Storage inspection runs under the explicit system session — a caller
+/// outside any request. Used only to see what the write path persisted, never
+/// to certify a read path.
+const INSPECTOR: meshql_core::SystemSession = meshql_core::SystemSession;
 
 fn request(
     client: &reqwest::Client,
@@ -72,6 +71,25 @@ fn widget_id(world: &CertWorld, name: &str) -> String {
 }
 
 // ---- Given ----
+
+/// Stand the certified server up behind a named plugin.
+///
+/// The runner's before-hook supplies the storage; this step supplies the
+/// plugin, because `auth_plugin.feature` runs a different one per scenario.
+#[given(regex = r#"^a MeshQL server running the "([^"]+)" auth plugin$"#)]
+async fn server_with_plugin(world: &mut CertWorld, plugin: String) {
+    assert!(
+        world.has_repo(),
+        "the backing repository must be set by the test runner's before-hook"
+    );
+    let addr = authz::start_server_with_auth(
+        world.repo_arc(),
+        world.searcher_arc(),
+        crate::plugins::plugin_named(&plugin),
+    )
+    .await;
+    world.server_addr = Some(addr);
+}
 
 #[given("an authorizing MeshQL server is running")]
 async fn server_running(world: &mut CertWorld) {
@@ -256,7 +274,7 @@ async fn stored_envelope_carries_tokens(world: &mut CertWorld, name: String, cal
     let id = widget_id(world, &name);
     let env = world
         .repo()
-        .read(&id, &inspector_tokens(), None)
+        .read(&id, &INSPECTOR, None)
         .await
         .expect("storage read")
         .unwrap_or_else(|| panic!("widget '{name}' is not in storage at all"));
@@ -267,13 +285,14 @@ async fn stored_envelope_carries_tokens(world: &mut CertWorld, name: String, cal
         "'{caller}' resolves to no tokens — this step is meaningless for that caller"
     );
     assert!(
-        !env.authorized_tokens.is_empty(),
-        "the stored envelope for '{name}' carries NO authorized_tokens: the write \
-         path dropped the tokens the Auth resolved, so the record is public to \
+        !env.auth.is_empty(),
+        "the stored envelope for '{name}' carries NO authorization mark: the write \
+         path dropped what the plugin stamped, so the record is public to \
          everyone"
     );
     assert_eq!(
-        env.authorized_tokens, expected,
+        env.auth.as_parts(),
+        expected.as_slice(),
         "the stored envelope for '{name}' does not carry the tokens '{caller}' resolves to"
     );
 }
@@ -283,15 +302,14 @@ async fn stored_envelope_carries_no_tokens(world: &mut CertWorld, name: String) 
     let id = widget_id(world, &name);
     let env = world
         .repo()
-        .read(&id, &inspector_tokens(), None)
+        .read(&id, &INSPECTOR, None)
         .await
         .expect("storage read")
         .unwrap_or_else(|| panic!("widget '{name}' is not in storage at all"));
     assert!(
-        env.authorized_tokens.is_empty(),
-        "a record written without credentials must stay public, but it was \
-         stamped with {:?}",
-        env.authorized_tokens
+        env.auth.is_empty(),
+        "the plugin stamped no mark, but storage came back holding {:?}",
+        env.auth.as_parts()
     );
 }
 

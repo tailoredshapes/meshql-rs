@@ -1164,7 +1164,7 @@ impl Inner {
             // over, dropping the flag would publish a live-looking record for
             // something the CRM considers gone.
             deleted: result.archived,
-            authorized_tokens: self.settings.authorized_tokens.clone(),
+            auth: self.settings.authorized_tokens.clone().into(),
         }
     }
 
@@ -1219,7 +1219,7 @@ impl Inner {
             payload,
             created_at: chrono::DateTime::from_timestamp_millis(ts_ms).unwrap_or_default(),
             deleted: true,
-            authorized_tokens: self.settings.authorized_tokens.clone(),
+            auth: self.settings.authorized_tokens.clone().into(),
         }
     }
 
@@ -1296,7 +1296,7 @@ impl HubspotSource {
             base_url: base_url.clone(),
             objects: objects.clone(),
             entity: entity.clone(),
-            authorized_tokens: authorized_tokens.clone(),
+            auth: authorized_tokens.clone().into(),
             properties: properties.clone(),
             page_size: *page_size,
             poll_interval: Duration::from_millis(*poll_interval_ms),
@@ -2335,7 +2335,7 @@ mod tests {
             objects: vec!["contacts".to_string()],
             entity: "crm".to_string(),
             properties: vec![],
-            authorized_tokens: vec![],
+            auth: Default::default(),
             base_url: "https://api.hubapi.com".to_string(),
             token_env: "HUBSPOT_TOKEN_ALSO_NOT_SET_4c71".to_string(),
             poll_interval_ms: 30_000,

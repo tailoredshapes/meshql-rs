@@ -98,7 +98,7 @@
 use async_trait::async_trait;
 use aws_sdk_dynamodb::Client;
 use handlebars::Handlebars;
-use meshql_core::{Envelope, MeshqlError, Result, RootConfig, Searcher, Stash};
+use meshql_core::{Envelope, MeshqlError, Operation, Result, RootConfig, Searcher, Session, Stash};
 use serde_json::{json, Value};
 
 use crate::index::{self, IndexPlan, Key};
@@ -264,7 +264,7 @@ impl DynamoSearcher {
         &self,
         template: &str,
         args: &Stash,
-        creds: &[String],
+        session: &dyn Session,
         at: i64,
         limit: Option<i64>,
     ) -> Result<Vec<Stash>> {
@@ -302,7 +302,7 @@ impl DynamoSearcher {
             }
         };
 
-        Ok(select(candidates, &query, creds, limit))
+        Ok(select(candidates, &query, session, limit))
     }
 
     /// Phase 1 then phase 2. The result is the *resolved* version of every
@@ -446,13 +446,13 @@ enum Access {
 pub(crate) fn select(
     candidates: Vec<Envelope>,
     query: &Value,
-    creds: &[String],
+    session: &dyn Session,
     limit: Option<i64>,
 ) -> Vec<Stash> {
     let mut matched: Vec<Envelope> = candidates
         .into_iter()
         .filter(|env| matcher::matches(&matcher::record_json(env), query))
-        .filter(|env| meshql_core::envelope_visible_to(env, creds))
+        .filter(|env| session.is_authorized(Operation::Read, env))
         .collect();
 
     // The pushdown path returns a single envelope, so it is trivially ordered;
@@ -485,11 +485,11 @@ impl Searcher for DynamoSearcher {
         &self,
         template: &str,
         args: &Stash,
-        creds: &[String],
+        session: &dyn Session,
         at: i64,
     ) -> Result<Option<Stash>> {
         let results = self
-            .execute_query(template, args, creds, at, Some(1))
+            .execute_query(template, args, session, at, Some(1))
             .await?;
         Ok(results.into_iter().next())
     }
@@ -498,11 +498,11 @@ impl Searcher for DynamoSearcher {
         &self,
         template: &str,
         args: &Stash,
-        creds: &[String],
+        session: &dyn Session,
         at: i64,
     ) -> Result<Vec<Stash>> {
         let limit = args.get("limit").and_then(|v| v.as_i64());
-        self.execute_query(template, args, creds, at, limit).await
+        self.execute_query(template, args, session, at, limit).await
     }
 }
 
@@ -524,7 +524,7 @@ mod tests {
             payload,
             created_at: at(ms),
             deleted: false,
-            authorized_tokens: tokens.iter().map(|t| t.to_string()).collect(),
+            auth: tokens.iter().map(|t| t.to_string()).collect(),
         }
     }
 
@@ -552,7 +552,12 @@ mod tests {
     /// results — not every record, which is how the SQL adapters fail.
     #[test]
     fn a_bare_payload_key_returns_nothing_not_everything() {
-        let bare = select(corpus(), &json!({"kind": "tool"}), &star(), None);
+        let bare = select(
+            corpus(),
+            &json!({"kind": "tool"}),
+            &meshql_core::TokenSession::new(star()),
+            None,
+        );
         assert!(
             bare.is_empty(),
             "an unrecognised template key must fail empty, like merkql — not wide, \
@@ -562,7 +567,12 @@ mod tests {
 
         // ...and the correctly-prefixed form does work, so the test above is
         // about the prefix and not about the data.
-        let prefixed = select(corpus(), &json!({"payload.kind": "tool"}), &star(), None);
+        let prefixed = select(
+            corpus(),
+            &json!({"payload.kind": "tool"}),
+            &meshql_core::TokenSession::new(star()),
+            None,
+        );
         assert_eq!(ids(&prefixed), vec!["a", "b"]);
     }
 
@@ -573,7 +583,7 @@ mod tests {
         let results = select(
             corpus(),
             &json!({"payload.kind": "tool", "kind": "tool"}),
-            &star(),
+            &meshql_core::TokenSession::new(star()),
             None,
         );
         assert!(results.is_empty(), "got {:?}", ids(&results));
@@ -581,13 +591,23 @@ mod tests {
 
     #[test]
     fn empty_query_matches_everything_in_canonical_order() {
-        let results = select(corpus(), &json!({}), &star(), None);
+        let results = select(
+            corpus(),
+            &json!({}),
+            &meshql_core::TokenSession::new(star()),
+            None,
+        );
         assert_eq!(ids(&results), vec!["a", "b", "c"]);
     }
 
     #[test]
     fn results_carry_id_and_created_at_alongside_the_payload() {
-        let results = select(corpus(), &json!({"id": "a"}), &star(), None);
+        let results = select(
+            corpus(),
+            &json!({"id": "a"}),
+            &meshql_core::TokenSession::new(star()),
+            None,
+        );
         assert_eq!(results.len(), 1);
         assert_eq!(results[0]["id"], json!("a"));
         assert_eq!(results[0]["createdAt"], json!(at(1_000).to_rfc3339()));
@@ -609,7 +629,7 @@ mod tests {
         let results = select(
             candidates,
             &json!({"payload.kind": "tool"}),
-            &["alice".to_string()],
+            &meshql_core::TokenSession::new(vec!["alice".to_string()]),
             Some(1),
         );
         assert_eq!(ids(&results), vec!["visible"]);
@@ -622,7 +642,12 @@ mod tests {
             env("tie-b", "t", 5_000, &["*"]),
             env("tie-a", "t", 5_000, &["*"]),
         ];
-        let results = select(candidates, &json!({}), &star(), None);
+        let results = select(
+            candidates,
+            &json!({}),
+            &meshql_core::TokenSession::new(star()),
+            None,
+        );
         assert_eq!(ids(&results), vec!["tie-a", "tie-b"]);
 
         // ...but created_at is the *primary* key, so an id that sorts first must
@@ -632,7 +657,12 @@ mod tests {
             env("zzz", "t", 1_000, &["*"]),
             env("aaa", "t", 9_000, &["*"]),
         ];
-        let results = select(candidates, &json!({}), &star(), None);
+        let results = select(
+            candidates,
+            &json!({}),
+            &meshql_core::TokenSession::new(star()),
+            None,
+        );
         assert_eq!(ids(&results), vec!["zzz", "aaa"]);
     }
 

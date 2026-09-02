@@ -45,7 +45,10 @@ async fn batch_round_trips_every_envelope_in_input_order() {
         .map(|i| envelope(&format!("batch-{i:03}"), &format!("name-{i}")))
         .collect();
 
-    let written = repo.create_many(inputs.clone(), &star()).await.unwrap();
+    let written = repo
+        .create_many(inputs.clone(), &meshql_core::TokenSession::new(star()))
+        .await
+        .unwrap();
 
     assert_eq!(written.len(), inputs.len());
     for (returned, input) in written.iter().zip(inputs.iter()) {
@@ -56,13 +59,13 @@ async fn batch_round_trips_every_envelope_in_input_order() {
     // Every one is durable, with its contents intact.
     for input in &inputs {
         let stored = repo
-            .read(&input.id, &star(), None)
+            .read(&input.id, &meshql_core::TokenSession::new(star()), None)
             .await
             .unwrap()
             .unwrap_or_else(|| panic!("{} was reported written but is not readable", input.id));
         assert_eq!(stored.payload, input.payload);
         assert!(!stored.deleted);
-        assert_eq!(stored.authorized_tokens, star());
+        assert_eq!(stored.auth, meshql_core::AuthMark::from(star()));
         assert_eq!(
             stored.created_at.timestamp_millis(),
             input.created_at.timestamp_millis()
@@ -83,7 +86,10 @@ async fn batch_larger_than_one_statement_is_chunked() {
         .map(|i| envelope(&format!("chunk-{i:06}"), &format!("n{i}")))
         .collect();
 
-    let written = repo.create_many(inputs.clone(), &star()).await.unwrap();
+    let written = repo
+        .create_many(inputs.clone(), &meshql_core::TokenSession::new(star()))
+        .await
+        .unwrap();
 
     assert_eq!(written.len(), count);
     assert_eq!(row_count(&repo).await, count as i64);
@@ -92,7 +98,7 @@ async fn batch_larger_than_one_statement_is_chunked() {
     for i in [0, MAX_ROWS_PER_INSERT - 1, MAX_ROWS_PER_INSERT, count - 1] {
         assert_eq!(written[i].id, inputs[i].id);
         let stored = repo
-            .read(&inputs[i].id, &star(), None)
+            .read(&inputs[i].id, &meshql_core::TokenSession::new(star()), None)
             .await
             .unwrap()
             .unwrap_or_else(|| panic!("row {i} straddling the chunk boundary is missing"));
@@ -104,7 +110,10 @@ async fn batch_larger_than_one_statement_is_chunked() {
 async fn empty_batch_is_a_no_op() {
     let (repo, _c) = create_repo().await;
 
-    let written = repo.create_many(Vec::new(), &star()).await.unwrap();
+    let written = repo
+        .create_many(Vec::new(), &meshql_core::TokenSession::new(star()))
+        .await
+        .unwrap();
 
     assert!(written.is_empty());
     assert_eq!(row_count(&repo).await, 0);
@@ -131,7 +140,9 @@ async fn constraint_violation_is_reported_as_an_error() {
         envelope("dup-a", "collides with the first"),
     ];
 
-    let result = repo.create_many(inputs, &star()).await;
+    let result = repo
+        .create_many(inputs, &meshql_core::TokenSession::new(star()))
+        .await;
 
     assert!(
         result.is_err(),
@@ -158,13 +169,28 @@ async fn batch_and_repeated_single_writes_store_the_same_thing() {
         .map(|i| envelope(&format!("eq-{i:02}"), &format!("payload-{i}")))
         .collect();
 
-    batched.create_many(inputs.clone(), &tokens).await.unwrap();
+    batched
+        .create_many(
+            inputs.clone(),
+            &meshql_core::TokenSession::new(tokens.clone()),
+        )
+        .await
+        .unwrap();
     for env in inputs.clone() {
-        singly.create(env, &tokens).await.unwrap();
+        singly
+            .create(env, &meshql_core::TokenSession::new(tokens.clone()))
+            .await
+            .unwrap();
     }
 
-    let mut from_batch = batched.list(&tokens).await.unwrap();
-    let mut from_singles = singly.list(&tokens).await.unwrap();
+    let mut from_batch = batched
+        .list(&meshql_core::TokenSession::new(tokens.clone()))
+        .await
+        .unwrap();
+    let mut from_singles = singly
+        .list(&meshql_core::TokenSession::new(tokens.clone()))
+        .await
+        .unwrap();
     from_batch.sort_by(|a, b| a.id.cmp(&b.id));
     from_singles.sort_by(|a, b| a.id.cmp(&b.id));
 
@@ -174,7 +200,7 @@ async fn batch_and_repeated_single_writes_store_the_same_thing() {
         assert_eq!(b.id, s.id);
         assert_eq!(b.payload, s.payload);
         assert_eq!(b.deleted, s.deleted);
-        assert_eq!(b.authorized_tokens, s.authorized_tokens);
+        assert_eq!(b.auth, s.auth);
         assert_eq!(
             b.created_at.timestamp_millis(),
             s.created_at.timestamp_millis()
@@ -190,11 +216,17 @@ async fn batch_assigns_ids_to_envelopes_that_arrive_without_one() {
 
     let inputs: Vec<Envelope> = (0..3).map(|i| envelope("", &format!("anon-{i}"))).collect();
 
-    let written = repo.create_many(inputs, &star()).await.unwrap();
+    let written = repo
+        .create_many(inputs, &meshql_core::TokenSession::new(star()))
+        .await
+        .unwrap();
 
     for env in &written {
         assert!(!env.id.is_empty(), "batch returned an unassigned id");
-        let stored = repo.read(&env.id, &star(), None).await.unwrap();
+        let stored = repo
+            .read(&env.id, &meshql_core::TokenSession::new(star()), None)
+            .await
+            .unwrap();
         assert!(
             stored.is_some(),
             "the id the batch returned does not name a stored row"

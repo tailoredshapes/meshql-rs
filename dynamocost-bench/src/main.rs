@@ -46,7 +46,7 @@ fn envelope(id: &str, created_at: DateTime<Utc>, seq: u64, pad: usize) -> Envelo
         payload,
         created_at,
         deleted: false,
-        authorized_tokens: vec!["bench".to_string()],
+        auth: vec!["bench".to_string()],
     }
 }
 

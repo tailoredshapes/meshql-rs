@@ -101,7 +101,10 @@ struct MongoCert {
 impl CertStore for MongoCert {
     async fn write(&self, envelope: Envelope) -> anyhow::Result<()> {
         self.repo
-            .create(envelope, &["cert".to_string()])
+            .create(
+                envelope,
+                &meshql_core::TokenSession::new(vec!["cert".to_string()]),
+            )
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         Ok(())

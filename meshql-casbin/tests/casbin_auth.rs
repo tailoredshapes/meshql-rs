@@ -4,7 +4,7 @@
 
 use casbin::CoreApi;
 use meshql_casbin::CasbinAuth;
-use meshql_core::{Auth, Envelope, Stash, StashKeyAuth};
+use meshql_core::{Envelope, Operation, Session, Stash, StashKeyAuth};
 use serde_json::json;
 
 const MODEL: &str = "tests/fixtures/model.conf";
@@ -30,38 +30,38 @@ async fn initializes_from_model_and_policy_paths() {
 }
 
 #[tokio::test]
-async fn get_auth_token_returns_roles_for_known_user() {
+async fn roles_returns_roles_for_known_user() {
     let auth = CasbinAuth::new(MODEL, POLICY, StashKeyAuth::new("user_id"))
         .await
         .unwrap();
-    let roles = auth.get_auth_token(&stash_with_user("alice"));
+    let roles = auth.roles(&stash_with_user("alice"));
     assert_eq!(roles, vec!["admin"]);
 }
 
 #[tokio::test]
-async fn get_auth_token_returns_roles_for_editor() {
+async fn roles_returns_roles_for_editor() {
     let auth = CasbinAuth::new(MODEL, POLICY, StashKeyAuth::new("user_id"))
         .await
         .unwrap();
-    let roles = auth.get_auth_token(&stash_with_user("bob"));
+    let roles = auth.roles(&stash_with_user("bob"));
     assert_eq!(roles, vec!["editor"]);
 }
 
 #[tokio::test]
-async fn get_auth_token_returns_empty_for_unknown_user() {
+async fn roles_returns_empty_for_unknown_user() {
     let auth = CasbinAuth::new(MODEL, POLICY, StashKeyAuth::new("user_id"))
         .await
         .unwrap();
-    let roles = auth.get_auth_token(&stash_with_user("nobody@example.dev"));
+    let roles = auth.roles(&stash_with_user("nobody@example.dev"));
     assert!(roles.is_empty());
 }
 
 #[tokio::test]
-async fn get_auth_token_returns_empty_when_inner_yields_no_user() {
+async fn roles_returns_empty_when_inner_yields_no_user() {
     let auth = CasbinAuth::new(MODEL, POLICY, StashKeyAuth::new("user_id"))
         .await
         .unwrap();
-    let roles = auth.get_auth_token(&Stash::new());
+    let roles = auth.roles(&Stash::new());
     assert!(roles.is_empty());
 }
 
@@ -71,7 +71,9 @@ async fn authorizes_when_credentials_overlap_authorized_tokens() {
         .await
         .unwrap();
     let env = envelope_with_tokens(vec!["admin".into(), "editor".into()]);
-    assert!(auth.is_authorized(&["editor".to_string()], &env));
+    assert!(auth
+        .session_for(vec!["editor".to_string()])
+        .is_authorized(Operation::Read, &env));
 }
 
 #[tokio::test]
@@ -80,7 +82,9 @@ async fn denies_when_no_credentials_overlap() {
         .await
         .unwrap();
     let env = envelope_with_tokens(vec!["admin".into(), "editor".into()]);
-    assert!(!auth.is_authorized(&["viewer".to_string()], &env));
+    assert!(!auth
+        .session_for(vec!["viewer".to_string()])
+        .is_authorized(Operation::Read, &env));
 }
 
 #[tokio::test]
@@ -89,8 +93,12 @@ async fn allows_everyone_when_authorized_tokens_is_empty() {
         .await
         .unwrap();
     let env = envelope_with_tokens(vec![]);
-    assert!(auth.is_authorized(&[], &env));
-    assert!(auth.is_authorized(&["anything".to_string()], &env));
+    assert!(auth
+        .session_for(vec![])
+        .is_authorized(Operation::Read, &env));
+    assert!(auth
+        .session_for(vec!["anything".to_string()])
+        .is_authorized(Operation::Read, &env));
 }
 
 #[tokio::test]
@@ -98,9 +106,11 @@ async fn end_to_end_alice_admin_can_access_admin_record() {
     let auth = CasbinAuth::new(MODEL, POLICY, StashKeyAuth::new("user_id"))
         .await
         .unwrap();
-    let roles = auth.get_auth_token(&stash_with_user("alice"));
+    let roles = auth.roles(&stash_with_user("alice"));
     let env = envelope_with_tokens(vec!["admin".into()]);
-    assert!(auth.is_authorized(&roles, &env));
+    assert!(auth
+        .session_for(roles.clone())
+        .is_authorized(Operation::Read, &env));
 }
 
 #[tokio::test]
@@ -108,9 +118,11 @@ async fn end_to_end_bob_editor_cannot_access_admin_only_record() {
     let auth = CasbinAuth::new(MODEL, POLICY, StashKeyAuth::new("user_id"))
         .await
         .unwrap();
-    let roles = auth.get_auth_token(&stash_with_user("bob"));
+    let roles = auth.roles(&stash_with_user("bob"));
     let env = envelope_with_tokens(vec!["admin".into()]);
-    assert!(!auth.is_authorized(&roles, &env));
+    assert!(!auth
+        .session_for(roles.clone())
+        .is_authorized(Operation::Read, &env));
 }
 
 // Equivalent suite using in-memory model/policy strings.
@@ -144,10 +156,7 @@ async fn from_strings_supports_embedded_policy() {
     let auth = CasbinAuth::from_strings(MODEL_STR, POLICY_STR, StashKeyAuth::new("user_id"))
         .await
         .expect("should load embedded model/policy");
-    assert_eq!(
-        auth.get_auth_token(&stash_with_user("alice")),
-        vec!["admin"]
-    );
-    assert_eq!(auth.get_auth_token(&stash_with_user("bob")), vec!["editor"]);
-    assert!(auth.get_auth_token(&stash_with_user("nobody")).is_empty());
+    assert_eq!(auth.roles(&stash_with_user("alice")), vec!["admin"]);
+    assert_eq!(auth.roles(&stash_with_user("bob")), vec!["editor"]);
+    assert!(auth.roles(&stash_with_user("nobody")).is_empty());
 }

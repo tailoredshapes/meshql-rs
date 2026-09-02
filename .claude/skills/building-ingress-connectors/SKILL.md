@@ -193,7 +193,7 @@ correct. The obligations that come with it:
 
 ## Step 3 — The envelope mapping rules
 
-`Envelope { id, payload, created_at, deleted, authorized_tokens }`
+`Envelope { id, payload, created_at, deleted, auth }`
 (`meshql-core/src/lib.rs:20-27`). All five are yours.
 
 ### id — the rule that matters most
@@ -307,11 +307,13 @@ the module docs that a fold written against the record shape will see a
 near-empty envelope for tombstones. `created_at` on a tombstone is the **deletion**
 timestamp: it must sort after the last live version, or the delete loses to it.
 
-### authorized_tokens
+### The authorization mark (`auth`)
 
-From config, never from the source record. They are also passed back as the
-caller credentials on append (`sink.rs:250-254`), so getting them wrong makes the
-connector's own writes invisible to every reader.
+From config, never from the source record. A connector writes outside any
+request, so the sink appends under `meshql_core::SystemSession`, whose `stamp`
+leaves the envelope exactly as the source built it — the mark you set is the
+mark that is stored. Getting it wrong therefore makes the connector's own
+writes invisible to every reader, with nothing to correct it downstream.
 
 ## Step 4 — The cursor
 
@@ -556,7 +558,7 @@ anti-pattern.
 
 Two further adaptations:
 
-1. `certify_snapshot_then_stream` asserts `authorized_tokens == ["cert"]`
+1. `certify_snapshot_then_stream` asserts the mark is `["cert"]`
    (`cert.rs:148-153`) — configure the fake source with those tokens.
 2. `certify_positions_are_present_and_distinct` (`cert.rs:160-186`) is the test
    that catches a watermark cursor. **Make your fake serve three records sharing

@@ -87,7 +87,10 @@ struct PgCert {
 impl CertStore for PgCert {
     async fn write(&self, envelope: Envelope) -> anyhow::Result<()> {
         self.repo
-            .create(envelope, &["cert".to_string()])
+            .create(
+                envelope,
+                &meshql_core::TokenSession::new(vec!["cert".to_string()]),
+            )
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         Ok(())
@@ -225,8 +228,8 @@ async fn a_committed_postgres_write_reaches_the_merkql_topic() {
         "the committed payload must survive pgoutput decoding onto the topic"
     );
     assert_eq!(
-        records[0].after.as_ref().unwrap().authorized_tokens,
-        vec!["cert".to_string()],
+        records[0].after.as_ref().unwrap().auth,
+        meshql_core::AuthMark::from(vec!["cert".to_string()]),
         "authorized_tokens must survive pgoutput decoding"
     );
     // The position is a real Postgres LSN, not a counter we invented.

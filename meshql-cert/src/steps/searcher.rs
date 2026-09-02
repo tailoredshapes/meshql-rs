@@ -138,7 +138,7 @@ async fn create_dataset(world: &mut CertWorld, step: &Step) {
 
     let saved = world
         .repo()
-        .create_many(envelopes, &CertWorld::star())
+        .create_many(envelopes, &CertWorld::star_session())
         .await
         .expect("create_many failed");
 
@@ -163,7 +163,7 @@ async fn remove_named_envelope(world: &mut CertWorld, name: String) {
         .clone();
     world
         .repo()
-        .remove(&id, &CertWorld::star())
+        .remove(&id, &CertWorld::star_session())
         .await
         .expect("remove failed");
 }
@@ -188,10 +188,10 @@ async fn update_named_envelope(
     payload.insert("name".to_string(), json!(new_name));
     payload.insert("count".to_string(), json!(count));
 
-    let envelope = Envelope::new(previous.id.clone(), payload, previous.authorized_tokens);
+    let envelope = Envelope::new(previous.id.clone(), payload, previous.auth.clone());
     let updated = world
         .repo()
-        .create(envelope, &CertWorld::star())
+        .create(envelope, &CertWorld::star_session())
         .await
         .expect("create failed");
 
@@ -212,7 +212,7 @@ async fn search_one(world: &mut CertWorld, template_name: String, step: &Step) {
         .find(
             &template,
             &args,
-            &CertWorld::star(),
+            &CertWorld::star_session(),
             Utc::now().timestamp_millis(),
         )
         .await
@@ -231,7 +231,7 @@ async fn search_all(world: &mut CertWorld, template_name: String, step: &Step) {
         .find_all(
             &template,
             &args,
-            &CertWorld::star(),
+            &CertWorld::star_session(),
             Utc::now().timestamp_millis(),
         )
         .await
@@ -257,7 +257,7 @@ async fn search_all_with_limit(
         .find_all(
             &template,
             &args,
-            &CertWorld::star(),
+            &CertWorld::star_session(),
             Utc::now().timestamp_millis(),
         )
         .await

@@ -1,10 +1,17 @@
-use crate::{Envelope, Repository, Searcher, Stash};
+use crate::{Envelope, Repository, Searcher, Stash, TokenSession};
 use chrono::{DateTime, Utc};
 use serde_json::json;
 
 const STAR: &str = "*";
 fn star() -> Vec<String> {
     vec![STAR.to_string()]
+}
+
+/// The certification harness stands in for the auth plugin: it names the
+/// session every storage call runs under, exactly as a lette does. The token
+/// plugin is the default, so that is the session these suites drive.
+fn sess(tokens: &[String]) -> TokenSession {
+    TokenSession::new(tokens.to_vec())
 }
 
 // ---- Repository Certification Tests ----
@@ -14,7 +21,7 @@ pub async fn test_create_should_store_and_return_envelope(repo: &dyn Repository)
     payload.insert("name".to_string(), json!("test farm"));
 
     let envelope = Envelope::new("id-1", payload, star());
-    let result = repo.create(envelope, &star()).await.unwrap();
+    let result = repo.create(envelope, &sess(&star())).await.unwrap();
 
     assert_eq!(result.id, "id-1");
     assert!(!result.deleted);
@@ -26,9 +33,9 @@ pub async fn test_read_should_retrieve_existing_envelope(repo: &dyn Repository) 
     payload.insert("name".to_string(), json!("read test"));
 
     let envelope = Envelope::new("id-read", payload, star());
-    repo.create(envelope, &star()).await.unwrap();
+    repo.create(envelope, &sess(&star())).await.unwrap();
 
-    let result = repo.read("id-read", &star(), None).await.unwrap();
+    let result = repo.read("id-read", &sess(&star()), None).await.unwrap();
     assert!(result.is_some());
     let found = result.unwrap();
     assert_eq!(found.id, "id-read");
@@ -40,10 +47,10 @@ pub async fn test_list_should_retrieve_all_created_envelopes(repo: &dyn Reposito
         let mut payload = Stash::new();
         payload.insert("name".to_string(), json!(format!("item-{i}")));
         let env = Envelope::new(format!("list-id-{i}"), payload, star());
-        repo.create(env, &star()).await.unwrap();
+        repo.create(env, &sess(&star())).await.unwrap();
     }
 
-    let results = repo.list(&star()).await.unwrap();
+    let results = repo.list(&sess(&star())).await.unwrap();
     assert!(results.len() >= 3);
     let ids: Vec<&str> = results.iter().map(|e| e.id.as_str()).collect();
     assert!(ids.contains(&"list-id-0"));
@@ -56,12 +63,12 @@ pub async fn test_remove_should_delete_envelope(repo: &dyn Repository) {
     payload.insert("name".to_string(), json!("to delete"));
 
     let env = Envelope::new("id-delete", payload, star());
-    repo.create(env, &star()).await.unwrap();
+    repo.create(env, &sess(&star())).await.unwrap();
 
-    let deleted = repo.remove("id-delete", &star()).await.unwrap();
+    let deleted = repo.remove("id-delete", &sess(&star())).await.unwrap();
     assert!(deleted);
 
-    let result = repo.read("id-delete", &star(), None).await.unwrap();
+    let result = repo.read("id-delete", &sess(&star()), None).await.unwrap();
     assert!(result.is_none());
 }
 
@@ -74,7 +81,7 @@ pub async fn test_create_many_should_store_multiple_envelopes(repo: &dyn Reposit
         })
         .collect();
 
-    let results = repo.create_many(envelopes, &star()).await.unwrap();
+    let results = repo.create_many(envelopes, &sess(&star())).await.unwrap();
     assert_eq!(results.len(), 3);
 }
 
@@ -83,11 +90,11 @@ pub async fn test_read_many_should_retrieve_multiple_envelopes(repo: &dyn Reposi
         let mut payload = Stash::new();
         payload.insert("name".to_string(), json!(format!("readmany-{i}")));
         let env = Envelope::new(format!("rm-id-{i}"), payload, star());
-        repo.create(env, &star()).await.unwrap();
+        repo.create(env, &sess(&star())).await.unwrap();
     }
 
     let ids: Vec<String> = (0..3).map(|i| format!("rm-id-{i}")).collect();
-    let results = repo.read_many(&ids, &star()).await.unwrap();
+    let results = repo.read_many(&ids, &sess(&star())).await.unwrap();
     assert_eq!(results.len(), 3);
 }
 
@@ -96,11 +103,11 @@ pub async fn test_remove_many_should_delete_multiple_envelopes(repo: &dyn Reposi
         let mut payload = Stash::new();
         payload.insert("name".to_string(), json!(format!("rmmany-{i}")));
         let env = Envelope::new(format!("rmmany-id-{i}"), payload, star());
-        repo.create(env, &star()).await.unwrap();
+        repo.create(env, &sess(&star())).await.unwrap();
     }
 
     let ids: Vec<String> = (0..3).map(|i| format!("rmmany-id-{i}")).collect();
-    let results = repo.remove_many(&ids, &star()).await.unwrap();
+    let results = repo.remove_many(&ids, &sess(&star())).await.unwrap();
     assert_eq!(results.len(), 3);
     assert!(results.values().all(|&v| v));
 }
@@ -113,9 +120,9 @@ pub async fn test_temporal_versioning(repo: &dyn Repository) {
         payload: payload_v1,
         created_at: chrono::Utc::now() - chrono::Duration::seconds(10),
         deleted: false,
-        authorized_tokens: star(),
+        auth: star().into(),
     };
-    repo.create(env_v1, &star()).await.unwrap();
+    repo.create(env_v1, &sess(&star())).await.unwrap();
 
     let between = chrono::Utc::now() - chrono::Duration::seconds(5);
 
@@ -126,13 +133,13 @@ pub async fn test_temporal_versioning(repo: &dyn Repository) {
         payload: payload_v2,
         created_at: chrono::Utc::now(),
         deleted: false,
-        authorized_tokens: star(),
+        auth: star().into(),
     };
-    repo.create(env_v2, &star()).await.unwrap();
+    repo.create(env_v2, &sess(&star())).await.unwrap();
 
     // Read at time between the two versions — should get v1
     let at_v1 = repo
-        .read("temporal-id", &star(), Some(between))
+        .read("temporal-id", &sess(&star()), Some(between))
         .await
         .unwrap();
     assert!(at_v1.is_some());
@@ -142,7 +149,10 @@ pub async fn test_temporal_versioning(repo: &dyn Repository) {
     );
 
     // Read now — should get v2
-    let current = repo.read("temporal-id", &star(), None).await.unwrap();
+    let current = repo
+        .read("temporal-id", &sess(&star()), None)
+        .await
+        .unwrap();
     assert!(current.is_some());
     assert_eq!(
         current.unwrap().payload.get("name").unwrap(),
@@ -158,9 +168,9 @@ pub async fn test_list_shows_only_latest_version(repo: &dyn Repository) {
         payload: payload_v1,
         created_at: chrono::Utc::now() - chrono::Duration::seconds(10),
         deleted: false,
-        authorized_tokens: star(),
+        auth: star().into(),
     };
-    repo.create(env_v1, &star()).await.unwrap();
+    repo.create(env_v1, &sess(&star())).await.unwrap();
 
     let mut payload_v2 = Stash::new();
     payload_v2.insert("version".to_string(), json!("new"));
@@ -169,11 +179,11 @@ pub async fn test_list_shows_only_latest_version(repo: &dyn Repository) {
         payload: payload_v2,
         created_at: chrono::Utc::now(),
         deleted: false,
-        authorized_tokens: star(),
+        auth: star().into(),
     };
-    repo.create(env_v2, &star()).await.unwrap();
+    repo.create(env_v2, &sess(&star())).await.unwrap();
 
-    let all = repo.list(&star()).await.unwrap();
+    let all = repo.list(&sess(&star())).await.unwrap();
     let for_id: Vec<_> = all.iter().filter(|e| e.id == "latest-test-id").collect();
     assert_eq!(for_id.len(), 1, "Should only show latest version");
     assert_eq!(for_id[0].payload.get("version").unwrap(), &json!("new"));
@@ -192,9 +202,9 @@ pub async fn test_list_excludes_deleted_envelope_with_prior_version(repo: &dyn R
         payload: payload_v1,
         created_at: chrono::Utc::now() - chrono::Duration::seconds(10),
         deleted: false,
-        authorized_tokens: star(),
+        auth: star().into(),
     };
-    repo.create(env_v1, &star()).await.unwrap();
+    repo.create(env_v1, &sess(&star())).await.unwrap();
 
     let mut payload_v2 = Stash::new();
     payload_v2.insert("version".to_string(), json!("new"));
@@ -203,20 +213,23 @@ pub async fn test_list_excludes_deleted_envelope_with_prior_version(repo: &dyn R
         payload: payload_v2,
         created_at: chrono::Utc::now() - chrono::Duration::seconds(5),
         deleted: false,
-        authorized_tokens: star(),
+        auth: star().into(),
     };
-    repo.create(env_v2, &star()).await.unwrap();
+    repo.create(env_v2, &sess(&star())).await.unwrap();
 
-    let removed = repo.remove("deleted-with-history", &star()).await.unwrap();
+    let removed = repo
+        .remove("deleted-with-history", &sess(&star()))
+        .await
+        .unwrap();
     assert!(removed, "remove should report that it deleted the envelope");
 
     let read_back = repo
-        .read("deleted-with-history", &star(), None)
+        .read("deleted-with-history", &sess(&star()), None)
         .await
         .unwrap();
     assert!(read_back.is_none(), "read should not return a removed id");
 
-    let all = repo.list(&star()).await.unwrap();
+    let all = repo.list(&sess(&star())).await.unwrap();
     let resurrected: Vec<_> = all
         .iter()
         .filter(|e| e.id == "deleted-with-history")
@@ -244,7 +257,7 @@ pub async fn seed_searcher_data(repo: &dyn Repository) {
         payload.insert("count".to_string(), json!(count));
         payload.insert("type".to_string(), json!(item_type));
         let env = Envelope::new(id, payload, star());
-        repo.create(env, &star()).await.unwrap();
+        repo.create(env, &sess(&star())).await.unwrap();
     }
 }
 
@@ -254,7 +267,7 @@ pub async fn test_searcher_empty_result_for_nonexistent(searcher: &dyn Searcher)
         .find(
             r#"{"id": "nonexistent-id"}"#,
             &args,
-            &star(),
+            &sess(&star()),
             chrono::Utc::now().timestamp_millis(),
         )
         .await
@@ -269,7 +282,7 @@ pub async fn test_searcher_find_by_id(searcher: &dyn Searcher) {
         .find(
             r#"{"id": "{{id}}"}"#,
             &args,
-            &star(),
+            &sess(&star()),
             chrono::Utc::now().timestamp_millis(),
         )
         .await
@@ -287,7 +300,7 @@ pub async fn test_searcher_find_by_name(searcher: &dyn Searcher) {
         .find(
             r#"{"payload.name": "{{name}}"}"#,
             &args,
-            &star(),
+            &sess(&star()),
             chrono::Utc::now().timestamp_millis(),
         )
         .await
@@ -303,7 +316,7 @@ pub async fn test_searcher_find_all_by_type(searcher: &dyn Searcher) {
         .find_all(
             r#"{"payload.type": "{{type}}"}"#,
             &args,
-            &star(),
+            &sess(&star()),
             chrono::Utc::now().timestamp_millis(),
         )
         .await
@@ -322,7 +335,7 @@ pub async fn test_searcher_find_all_by_type_and_name(searcher: &dyn Searcher) {
         .find_all(
             r#"{"payload.type": "{{type}}", "payload.name": "{{name}}"}"#,
             &args,
-            &star(),
+            &sess(&star()),
             chrono::Utc::now().timestamp_millis(),
         )
         .await
@@ -338,7 +351,7 @@ pub async fn test_searcher_empty_array_for_nonexistent_type(searcher: &dyn Searc
         .find_all(
             r#"{"payload.type": "{{type}}"}"#,
             &args,
-            &star(),
+            &sess(&star()),
             chrono::Utc::now().timestamp_millis(),
         )
         .await
@@ -353,7 +366,7 @@ pub async fn test_searcher_respects_limit(searcher: &dyn Searcher) {
         .find_all(
             r#"{}"#,
             &args,
-            &star(),
+            &sess(&star()),
             chrono::Utc::now().timestamp_millis(),
         )
         .await
@@ -363,7 +376,7 @@ pub async fn test_searcher_respects_limit(searcher: &dyn Searcher) {
 
 // ---- Searcher Authorization Certification Tests ----
 //
-// These certify the visibility convention of `meshql_core::envelope_visible_to`
+// These certify the default token plugin's visibility rules (`TokenSession`)
 // on every Searcher read path (architecture invariant 4):
 //   - a caller holding "*" sees everything,
 //   - an envelope with empty `authorized_tokens` is public,
@@ -391,7 +404,7 @@ pub async fn seed_searcher_auth_data(repo: &dyn Repository) {
         payload.insert("name".to_string(), json!(name));
         payload.insert("type".to_string(), json!(item_type));
         let env = Envelope::new(id, payload, tokens.clone());
-        repo.create(env, &tokens).await.unwrap();
+        repo.create(env, &sess(&tokens)).await.unwrap();
     }
 
     // Versioned envelope: v1 visible to alice, later v2 visible only to bob.
@@ -403,9 +416,9 @@ pub async fn seed_searcher_auth_data(repo: &dyn Repository) {
         payload: payload_v1,
         created_at: chrono::Utc::now() - chrono::Duration::seconds(10),
         deleted: false,
-        authorized_tokens: creds("alice"),
+        auth: creds("alice").into(),
     };
-    repo.create(v1, &creds("alice")).await.unwrap();
+    repo.create(v1, &sess(&creds("alice"))).await.unwrap();
 
     let mut payload_v2 = Stash::new();
     payload_v2.insert("name".to_string(), json!("versioned-v2"));
@@ -415,9 +428,9 @@ pub async fn seed_searcher_auth_data(repo: &dyn Repository) {
         payload: payload_v2,
         created_at: chrono::Utc::now(),
         deleted: false,
-        authorized_tokens: creds("bob"),
+        auth: creds("bob").into(),
     };
-    repo.create(v2, &creds("bob")).await.unwrap();
+    repo.create(v2, &sess(&creds("bob"))).await.unwrap();
 }
 
 pub async fn test_searcher_auth_wildcard_caller_sees_all(searcher: &dyn Searcher) {
@@ -425,7 +438,12 @@ pub async fn test_searcher_auth_wildcard_caller_sees_all(searcher: &dyn Searcher
     let now = chrono::Utc::now().timestamp_millis();
 
     let results = searcher
-        .find_all(r#"{"payload.type": "authShared"}"#, &args, &star(), now)
+        .find_all(
+            r#"{"payload.type": "authShared"}"#,
+            &args,
+            &sess(&star()),
+            now,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -435,7 +453,7 @@ pub async fn test_searcher_auth_wildcard_caller_sees_all(searcher: &dyn Searcher
     );
 
     let result = searcher
-        .find(r#"{"payload.name": "bob-doc"}"#, &args, &star(), now)
+        .find(r#"{"payload.name": "bob-doc"}"#, &args, &sess(&star()), now)
         .await
         .unwrap();
     assert!(
@@ -452,7 +470,7 @@ pub async fn test_searcher_auth_restricted_caller_sees_only_intersecting(searche
         .find_all(
             r#"{"payload.type": "authShared"}"#,
             &args,
-            &creds("alice"),
+            &sess(&creds("alice")),
             now,
         )
         .await
@@ -470,7 +488,7 @@ pub async fn test_searcher_auth_restricted_caller_sees_only_intersecting(searche
         .find(
             r#"{"payload.type": "authShared"}"#,
             &args,
-            &creds("alice"),
+            &sess(&creds("alice")),
             now,
         )
         .await
@@ -492,7 +510,7 @@ pub async fn test_searcher_auth_denies_non_intersecting(searcher: &dyn Searcher)
         .find(
             r#"{"payload.name": "bob-doc"}"#,
             &args,
-            &creds("alice"),
+            &sess(&creds("alice")),
             now,
         )
         .await
@@ -506,7 +524,7 @@ pub async fn test_searcher_auth_denies_non_intersecting(searcher: &dyn Searcher)
         .find_all(
             r#"{"payload.name": "bob-doc"}"#,
             &args,
-            &creds("alice"),
+            &sess(&creds("alice")),
             now,
         )
         .await
@@ -517,7 +535,7 @@ pub async fn test_searcher_auth_denies_non_intersecting(searcher: &dyn Searcher)
     );
 
     let result = searcher
-        .find(r#"{"payload.name": "bob-doc"}"#, &args, &[], now)
+        .find(r#"{"payload.name": "bob-doc"}"#, &args, &sess(&[]), now)
         .await
         .unwrap();
     assert!(
@@ -532,7 +550,12 @@ pub async fn test_searcher_auth_empty_tokens_are_public(searcher: &dyn Searcher)
 
     for caller in [creds("charlie"), vec![]] {
         let result = searcher
-            .find(r#"{"payload.name": "public-doc"}"#, &args, &caller, now)
+            .find(
+                r#"{"payload.name": "public-doc"}"#,
+                &args,
+                &sess(&caller),
+                now,
+            )
             .await
             .unwrap();
         assert!(
@@ -548,7 +571,12 @@ pub async fn test_searcher_auth_star_token_visible_to_all(searcher: &dyn Searche
 
     for caller in [creds("charlie"), vec![]] {
         let result = searcher
-            .find(r#"{"payload.name": "star-doc"}"#, &args, &caller, now)
+            .find(
+                r#"{"payload.name": "star-doc"}"#,
+                &args,
+                &sess(&caller),
+                now,
+            )
             .await
             .unwrap();
         assert!(
@@ -568,7 +596,7 @@ pub async fn test_searcher_auth_latest_version_controls_visibility(searcher: &dy
         .find(
             r#"{"payload.type": "authVersioned"}"#,
             &args,
-            &creds("alice"),
+            &sess(&creds("alice")),
             now,
         )
         .await
@@ -582,7 +610,7 @@ pub async fn test_searcher_auth_latest_version_controls_visibility(searcher: &dy
         .find(
             r#"{"payload.type": "authVersioned"}"#,
             &args,
-            &creds("bob"),
+            &sess(&creds("bob")),
             now,
         )
         .await
@@ -604,7 +632,7 @@ pub async fn test_searcher_auth_latest_version_controls_visibility(searcher: &dy
 // authorized_tokens, so an adapter that ignores `tokens` entirely still
 // passes it — these certs close that gap.
 //
-// Same convention as `meshql_core::envelope_visible_to`:
+// Same rules as the token plugin's `TokenSession`:
 //   - a caller holding "*" sees everything,
 //   - an envelope with empty `authorized_tokens` is public,
 //   - an envelope tagged "*" is visible to any caller,
@@ -637,7 +665,7 @@ pub async fn seed_repository_auth_data(repo: &dyn Repository) {
         let mut payload = Stash::new();
         payload.insert("name".to_string(), json!(name));
         let env = Envelope::new(id, payload, tokens.clone());
-        repo.create(env, &tokens).await.unwrap();
+        repo.create(env, &sess(&tokens)).await.unwrap();
     }
 
     // Versioned envelope: v1 visible to alice, later v2 visible only to bob.
@@ -648,9 +676,9 @@ pub async fn seed_repository_auth_data(repo: &dyn Repository) {
         payload: payload_v1,
         created_at: chrono::Utc::now() - chrono::Duration::seconds(10),
         deleted: false,
-        authorized_tokens: creds("alice"),
+        auth: creds("alice").into(),
     };
-    repo.create(v1, &creds("alice")).await.unwrap();
+    repo.create(v1, &sess(&creds("alice"))).await.unwrap();
 
     let mut payload_v2 = Stash::new();
     payload_v2.insert("name".to_string(), json!("versioned-v2"));
@@ -659,9 +687,9 @@ pub async fn seed_repository_auth_data(repo: &dyn Repository) {
         payload: payload_v2,
         created_at: chrono::Utc::now(),
         deleted: false,
-        authorized_tokens: creds("bob"),
+        auth: creds("bob").into(),
     };
-    repo.create(v2, &creds("bob")).await.unwrap();
+    repo.create(v2, &sess(&creds("bob"))).await.unwrap();
 }
 
 pub async fn test_repository_auth_wildcard_caller_sees_all(repo: &dyn Repository) {
@@ -673,12 +701,12 @@ pub async fn test_repository_auth_wildcard_caller_sees_all(repo: &dyn Repository
         REPO_AUTH_VERSIONED,
     ] {
         assert!(
-            repo.read(id, &star(), None).await.unwrap().is_some(),
+            repo.read(id, &sess(&star()), None).await.unwrap().is_some(),
             "a '*' caller must be able to read {id}"
         );
     }
 
-    let listed = repo.list(&star()).await.unwrap();
+    let listed = repo.list(&sess(&star())).await.unwrap();
     let ids = ids_of(&listed);
     for id in [
         REPO_AUTH_PUBLIC,
@@ -691,7 +719,7 @@ pub async fn test_repository_auth_wildcard_caller_sees_all(repo: &dyn Repository
     }
 
     let all: Vec<String> = vec![REPO_AUTH_ALICE.to_string(), REPO_AUTH_BOB.to_string()];
-    let found = repo.read_many(&all, &star()).await.unwrap();
+    let found = repo.read_many(&all, &sess(&star())).await.unwrap();
     assert_eq!(
         found.len(),
         2,
@@ -702,7 +730,10 @@ pub async fn test_repository_auth_wildcard_caller_sees_all(repo: &dyn Repository
 pub async fn test_repository_auth_restricted_caller_sees_only_intersecting(repo: &dyn Repository) {
     let alice = creds("alice");
 
-    let own = repo.read(REPO_AUTH_ALICE, &alice, None).await.unwrap();
+    let own = repo
+        .read(REPO_AUTH_ALICE, &sess(&alice), None)
+        .await
+        .unwrap();
     assert_eq!(
         own.expect("caller 'alice' must read her own envelope")
             .payload
@@ -711,7 +742,7 @@ pub async fn test_repository_auth_restricted_caller_sees_only_intersecting(repo:
         &json!("alice-doc")
     );
 
-    let listed = repo.list(&alice).await.unwrap();
+    let listed = repo.list(&sess(&alice)).await.unwrap();
     let ids = ids_of(&listed);
     assert!(
         ids.contains(&REPO_AUTH_ALICE),
@@ -731,7 +762,7 @@ pub async fn test_repository_auth_restricted_caller_sees_only_intersecting(repo:
     );
 
     let both: Vec<String> = vec![REPO_AUTH_ALICE.to_string(), REPO_AUTH_BOB.to_string()];
-    let found = repo.read_many(&both, &alice).await.unwrap();
+    let found = repo.read_many(&both, &sess(&alice)).await.unwrap();
     assert_eq!(
         ids_of(&found),
         vec![REPO_AUTH_ALICE],
@@ -742,14 +773,14 @@ pub async fn test_repository_auth_restricted_caller_sees_only_intersecting(repo:
 pub async fn test_repository_auth_denies_non_intersecting(repo: &dyn Repository) {
     for caller in [creds("alice"), creds("charlie"), vec![]] {
         assert!(
-            repo.read(REPO_AUTH_BOB, &caller, None)
+            repo.read(REPO_AUTH_BOB, &sess(&caller), None)
                 .await
                 .unwrap()
                 .is_none(),
             "read must not return an envelope restricted to 'bob' (caller {caller:?})"
         );
 
-        let listed = repo.list(&caller).await.unwrap();
+        let listed = repo.list(&sess(&caller)).await.unwrap();
         assert!(
             !ids_of(&listed).contains(&REPO_AUTH_BOB),
             "list must not leak an envelope restricted to 'bob' (caller {caller:?})"
@@ -757,19 +788,22 @@ pub async fn test_repository_auth_denies_non_intersecting(repo: &dyn Repository)
 
         let ids = vec![REPO_AUTH_BOB.to_string()];
         assert!(
-            repo.read_many(&ids, &caller).await.unwrap().is_empty(),
+            repo.read_many(&ids, &sess(&caller))
+                .await
+                .unwrap()
+                .is_empty(),
             "read_many must not leak an envelope restricted to 'bob' (caller {caller:?})"
         );
 
         assert!(
-            !repo.remove(REPO_AUTH_BOB, &caller).await.unwrap(),
+            !repo.remove(REPO_AUTH_BOB, &sess(&caller)).await.unwrap(),
             "remove must not act on an envelope restricted to 'bob' (caller {caller:?})"
         );
     }
 
     // ...and after all those denied attempts, bob's envelope is still there.
     assert!(
-        repo.read(REPO_AUTH_BOB, &creds("bob"), None)
+        repo.read(REPO_AUTH_BOB, &sess(&creds("bob")), None)
             .await
             .unwrap()
             .is_some(),
@@ -780,14 +814,14 @@ pub async fn test_repository_auth_denies_non_intersecting(repo: &dyn Repository)
 pub async fn test_repository_auth_empty_tokens_are_public(repo: &dyn Repository) {
     for caller in [creds("charlie"), vec![]] {
         assert!(
-            repo.read(REPO_AUTH_PUBLIC, &caller, None)
+            repo.read(REPO_AUTH_PUBLIC, &sess(&caller), None)
                 .await
                 .unwrap()
                 .is_some(),
             "an envelope with no authorized_tokens is public (caller {caller:?})"
         );
 
-        let listed = repo.list(&caller).await.unwrap();
+        let listed = repo.list(&sess(&caller)).await.unwrap();
         assert!(
             ids_of(&listed).contains(&REPO_AUTH_PUBLIC),
             "list must return the public envelope (caller {caller:?})"
@@ -795,7 +829,7 @@ pub async fn test_repository_auth_empty_tokens_are_public(repo: &dyn Repository)
 
         let ids = vec![REPO_AUTH_PUBLIC.to_string()];
         assert_eq!(
-            repo.read_many(&ids, &caller).await.unwrap().len(),
+            repo.read_many(&ids, &sess(&caller)).await.unwrap().len(),
             1,
             "read_many must return the public envelope (caller {caller:?})"
         );
@@ -805,14 +839,14 @@ pub async fn test_repository_auth_empty_tokens_are_public(repo: &dyn Repository)
 pub async fn test_repository_auth_star_token_visible_to_all(repo: &dyn Repository) {
     for caller in [creds("charlie"), vec![]] {
         assert!(
-            repo.read(REPO_AUTH_STAR, &caller, None)
+            repo.read(REPO_AUTH_STAR, &sess(&caller), None)
                 .await
                 .unwrap()
                 .is_some(),
             "an envelope tagged '*' is visible to any caller (caller {caller:?})"
         );
 
-        let listed = repo.list(&caller).await.unwrap();
+        let listed = repo.list(&sess(&caller)).await.unwrap();
         assert!(
             ids_of(&listed).contains(&REPO_AUTH_STAR),
             "list must return the '*'-tagged envelope (caller {caller:?})"
@@ -820,7 +854,7 @@ pub async fn test_repository_auth_star_token_visible_to_all(repo: &dyn Repositor
 
         let ids = vec![REPO_AUTH_STAR.to_string()];
         assert_eq!(
-            repo.read_many(&ids, &caller).await.unwrap().len(),
+            repo.read_many(&ids, &sess(&caller)).await.unwrap().len(),
             1,
             "read_many must return the '*'-tagged envelope (caller {caller:?})"
         );
@@ -831,21 +865,21 @@ pub async fn test_repository_auth_latest_version_controls_visibility(repo: &dyn 
     // Latest version is restricted to bob: alice must see nothing — the older
     // alice-visible version must not resurface.
     assert!(
-        repo.read(REPO_AUTH_VERSIONED, &creds("alice"), None)
+        repo.read(REPO_AUTH_VERSIONED, &sess(&creds("alice")), None)
             .await
             .unwrap()
             .is_none(),
         "an older visible version must not resurface when the latest is restricted"
     );
 
-    let listed = repo.list(&creds("alice")).await.unwrap();
+    let listed = repo.list(&sess(&creds("alice"))).await.unwrap();
     assert!(
         !ids_of(&listed).contains(&REPO_AUTH_VERSIONED),
         "list must not resurface an older visible version"
     );
 
     let current = repo
-        .read(REPO_AUTH_VERSIONED, &creds("bob"), None)
+        .read(REPO_AUTH_VERSIONED, &sess(&creds("bob")), None)
         .await
         .unwrap();
     assert_eq!(
@@ -857,7 +891,7 @@ pub async fn test_repository_auth_latest_version_controls_visibility(repo: &dyn 
         &json!("versioned-v2")
     );
 
-    let listed = repo.list(&creds("bob")).await.unwrap();
+    let listed = repo.list(&sess(&creds("bob"))).await.unwrap();
     assert!(
         ids_of(&listed).contains(&REPO_AUTH_VERSIONED),
         "list must return the latest version to 'bob'"
@@ -930,7 +964,7 @@ fn ordering_envelope(id: &str, name: &str, item_type: &str, created_at: DateTime
         payload,
         created_at,
         deleted: false,
-        authorized_tokens: star(),
+        auth: star().into(),
     }
 }
 
@@ -938,7 +972,7 @@ pub async fn seed_searcher_ordering_data(repo: &dyn Repository) {
     for i in 0..ORDER_COUNT {
         let id = format!("ord-{i:02}");
         let at = order_at(ORDER_STEP_MS * i as i64);
-        repo.create(ordering_envelope(&id, &id, ORDER_TYPE, at), &star())
+        repo.create(ordering_envelope(&id, &id, ORDER_TYPE, at), &sess(&star()))
             .await
             .unwrap();
     }
@@ -950,13 +984,13 @@ pub async fn seed_searcher_ordering_data(repo: &dyn Repository) {
     let v2_at = order_at(ORDER_STEP_MS * (ORDER_COUNT as i64 + 1));
     repo.create(
         ordering_envelope(ORDER_MULTI, "multi-v1", ORDER_TYPE, v1_at),
-        &star(),
+        &sess(&star()),
     )
     .await
     .unwrap();
     repo.create(
         ordering_envelope(ORDER_MULTI, "multi-v2", ORDER_TYPE, v2_at),
-        &star(),
+        &sess(&star()),
     )
     .await
     .unwrap();
@@ -967,9 +1001,12 @@ pub async fn seed_searcher_ordering_data(repo: &dyn Repository) {
     // same way: by id, regardless of which was physically written first.
     let tie_at = order_at(1_000);
     for id in ["tie-b", "tie-a"] {
-        repo.create(ordering_envelope(id, id, ORDER_TIE_TYPE, tie_at), &star())
-            .await
-            .unwrap();
+        repo.create(
+            ordering_envelope(id, id, ORDER_TIE_TYPE, tie_at),
+            &sess(&star()),
+        )
+        .await
+        .unwrap();
     }
 }
 
@@ -978,7 +1015,7 @@ pub async fn test_searcher_ordering_limit_truncates_in_insertion_order(searcher:
     let expected = expected_order();
 
     let all = searcher
-        .find_all(&order_query(), &Stash::new(), &star(), now)
+        .find_all(&order_query(), &Stash::new(), &sess(&star()), now)
         .await
         .unwrap();
     assert_eq!(
@@ -993,7 +1030,7 @@ pub async fn test_searcher_ordering_limit_truncates_in_insertion_order(searcher:
         let mut args = Stash::new();
         args.insert("limit".to_string(), json!(lim));
         let limited = searcher
-            .find_all(&order_query(), &args, &star(), now)
+            .find_all(&order_query(), &args, &sess(&star()), now)
             .await
             .unwrap();
         assert_eq!(
@@ -1005,7 +1042,7 @@ pub async fn test_searcher_ordering_limit_truncates_in_insertion_order(searcher:
 
     // find() is the same order, taken one deep.
     let first = searcher
-        .find(&order_query(), &Stash::new(), &star(), now)
+        .find(&order_query(), &Stash::new(), &sess(&star()), now)
         .await
         .unwrap()
         .expect("find must locate the first envelope in insertion order");
@@ -1024,7 +1061,7 @@ pub async fn test_searcher_ordering_is_stable_across_repeated_queries(searcher: 
     let mut seen: Vec<Vec<String>> = Vec::new();
     for _ in 0..4 {
         let results = searcher
-            .find_all(&order_query(), &args, &star(), now)
+            .find_all(&order_query(), &args, &sess(&star()), now)
             .await
             .unwrap();
         seen.push(ordered_ids(&results));
@@ -1047,7 +1084,7 @@ pub async fn test_searcher_ordering_uses_resolved_version_position(searcher: &dy
     let now = Utc::now().timestamp_millis();
 
     let all = searcher
-        .find_all(&order_query(), &Stash::new(), &star(), now)
+        .find_all(&order_query(), &Stash::new(), &sess(&star()), now)
         .await
         .unwrap();
     let ids = ordered_ids(&all);
@@ -1076,7 +1113,7 @@ pub async fn test_searcher_ordering_as_of_uses_version_resolved_at_cutoff(search
     let cutoff = ORDER_BASE_MS + ORDER_STEP_MS * 5;
 
     let as_of = searcher
-        .find_all(&order_query(), &Stash::new(), &star(), cutoff)
+        .find_all(&order_query(), &Stash::new(), &sess(&star()), cutoff)
         .await
         .unwrap();
     let expected_as_of: Vec<String> = vec![
@@ -1103,7 +1140,7 @@ pub async fn test_searcher_ordering_as_of_uses_version_resolved_at_cutoff(search
     let mut args = Stash::new();
     args.insert("limit".to_string(), json!(2));
     let limited = searcher
-        .find_all(&order_query(), &args, &star(), cutoff)
+        .find_all(&order_query(), &args, &sess(&star()), cutoff)
         .await
         .unwrap();
     assert_eq!(
@@ -1118,7 +1155,7 @@ pub async fn test_searcher_ordering_breaks_millisecond_ties_by_id(searcher: &dyn
     let query = format!(r#"{{"payload.type": "{ORDER_TIE_TYPE}"}}"#);
 
     let results = searcher
-        .find_all(&query, &Stash::new(), &star(), now)
+        .find_all(&query, &Stash::new(), &sess(&star()), now)
         .await
         .unwrap();
     assert_eq!(
@@ -1131,7 +1168,7 @@ pub async fn test_searcher_ordering_breaks_millisecond_ties_by_id(searcher: &dyn
     let mut args = Stash::new();
     args.insert("limit".to_string(), json!(1));
     let limited = searcher
-        .find_all(&query, &args, &star(), now)
+        .find_all(&query, &args, &sess(&star()), now)
         .await
         .unwrap();
     assert_eq!(
@@ -1147,7 +1184,7 @@ pub async fn test_searcher_empty_query(searcher: &dyn Searcher) {
         .find_all(
             r#"{}"#,
             &args,
-            &star(),
+            &sess(&star()),
             chrono::Utc::now().timestamp_millis(),
         )
         .await
@@ -1196,14 +1233,14 @@ fn shape_envelope(id: &str, name: &str, created_at: DateTime<Utc>) -> Envelope {
         payload,
         created_at,
         deleted: false,
-        authorized_tokens: star(),
+        auth: star().into(),
     }
 }
 
 pub async fn seed_searcher_result_shape_data(repo: &dyn Repository) {
     repo.create(
         shape_envelope(SHAPE_SINGLE, "single", shape_at(SHAPE_V1_MS)),
-        &star(),
+        &sess(&star()),
     )
     .await
     .unwrap();
@@ -1213,13 +1250,13 @@ pub async fn seed_searcher_result_shape_data(repo: &dyn Repository) {
     // to read first.
     repo.create(
         shape_envelope(SHAPE_MULTI, "multi-v1", shape_at(SHAPE_V1_MS)),
-        &star(),
+        &sess(&star()),
     )
     .await
     .unwrap();
     repo.create(
         shape_envelope(SHAPE_MULTI, "multi-v2", shape_at(SHAPE_V2_MS)),
-        &star(),
+        &sess(&star()),
     )
     .await
     .unwrap();
@@ -1266,7 +1303,7 @@ pub async fn test_searcher_result_carries_id_and_created_at(searcher: &dyn Searc
     let now = Utc::now().timestamp_millis();
 
     let all = searcher
-        .find_all(&shape_query(), &Stash::new(), &star(), now)
+        .find_all(&shape_query(), &Stash::new(), &sess(&star()), now)
         .await
         .unwrap();
     assert_eq!(
@@ -1289,7 +1326,7 @@ pub async fn test_searcher_result_carries_id_and_created_at(searcher: &dyn Searc
     let mut args = Stash::new();
     args.insert("id".to_string(), json!(SHAPE_SINGLE));
     let one = searcher
-        .find(r#"{"id": "{{id}}"}"#, &args, &star(), now)
+        .find(r#"{"id": "{{id}}"}"#, &args, &sess(&star()), now)
         .await
         .unwrap()
         .expect("find must locate the single-version result-shape record");
@@ -1319,7 +1356,7 @@ async fn write_n(repo: &dyn Repository, id: &str, n: i64) {
     for i in 1..=n {
         let mut p = Stash::new();
         p.insert("n".to_string(), json!(i));
-        repo.create(Envelope::new(id, p, star()), &star())
+        repo.create(Envelope::new(id, p, star()), &sess(&star()))
             .await
             .unwrap();
     }
@@ -1327,7 +1364,10 @@ async fn write_n(repo: &dyn Repository, id: &str, n: i64) {
 
 pub async fn test_lists_every_version_oldest_first(repo: &dyn Repository) {
     write_n(repo, "ver-order", 3).await;
-    let versions = repo.list_versions("ver-order", &star()).await.unwrap();
+    let versions = repo
+        .list_versions("ver-order", &sess(&star()))
+        .await
+        .unwrap();
 
     assert_eq!(versions.len(), 3, "one entry per write");
     assert!(
@@ -1345,7 +1385,7 @@ pub async fn test_lists_every_version_oldest_first(repo: &dyn Repository) {
             .expect("an authorized version carries a token");
         assert!(seen.insert(token.clone()), "tokens are distinct");
         assert!(
-            repo.read_version("ver-order", &token, &star())
+            repo.read_version("ver-order", &token, &sess(&star()))
                 .await
                 .unwrap()
                 .is_some(),
@@ -1358,7 +1398,10 @@ pub async fn test_lists_every_version_oldest_first(repo: &dyn Repository) {
 /// still be separately addressable, which is the whole reason the token exists.
 pub async fn test_versions_in_one_millisecond_are_distinct(repo: &dyn Repository) {
     write_n(repo, "ver-burst", 3).await;
-    let versions = repo.list_versions("ver-burst", &star()).await.unwrap();
+    let versions = repo
+        .list_versions("ver-burst", &sess(&star()))
+        .await
+        .unwrap();
     let distinct: std::collections::BTreeSet<_> =
         versions.iter().filter_map(|v| v.token.clone()).collect();
     assert_eq!(
@@ -1372,8 +1415,14 @@ pub async fn test_versions_in_one_millisecond_are_distinct(repo: &dyn Repository
 /// insertion order or a physical row id fails here once its rows move.
 pub async fn test_version_listing_is_stable(repo: &dyn Repository) {
     write_n(repo, "ver-stable", 4).await;
-    let first = repo.list_versions("ver-stable", &star()).await.unwrap();
-    let second = repo.list_versions("ver-stable", &star()).await.unwrap();
+    let first = repo
+        .list_versions("ver-stable", &sess(&star()))
+        .await
+        .unwrap();
+    let second = repo
+        .list_versions("ver-stable", &sess(&star()))
+        .await
+        .unwrap();
     assert_eq!(first, second);
 }
 
@@ -1381,9 +1430,12 @@ pub async fn test_version_listing_is_stable(repo: &dyn Repository) {
 /// and "when did this go away" is one of the questions versions answer.
 pub async fn test_a_deletion_appears_in_the_history(repo: &dyn Repository) {
     write_n(repo, "ver-deleted", 1).await;
-    repo.remove("ver-deleted", &star()).await.unwrap();
+    repo.remove("ver-deleted", &sess(&star())).await.unwrap();
 
-    let versions = repo.list_versions("ver-deleted", &star()).await.unwrap();
+    let versions = repo
+        .list_versions("ver-deleted", &sess(&star()))
+        .await
+        .unwrap();
     assert!(versions.len() >= 2, "the deletion is a version of its own");
     assert!(versions.iter().any(|v| v.deleted), "and is marked deleted");
 }
@@ -1395,11 +1447,17 @@ pub async fn test_an_unreadable_version_is_a_tombstone(repo: &dyn Repository) {
     let stranger = vec!["stranger".to_string()];
     let mut p = Stash::new();
     p.insert("n".to_string(), json!(1));
-    repo.create(Envelope::new("ver-private", p, owner.clone()), &owner)
+    repo.create(
+        Envelope::new("ver-private", p, owner.clone()),
+        &sess(&owner),
+    )
+    .await
+    .unwrap();
+
+    let seen = repo
+        .list_versions("ver-private", &sess(&stranger))
         .await
         .unwrap();
-
-    let seen = repo.list_versions("ver-private", &stranger).await.unwrap();
     assert_eq!(seen.len(), 1, "the version is still reported");
     assert!(seen[0].token.is_none(), "but carries no way to read it");
 }
@@ -1411,22 +1469,29 @@ pub async fn test_unknown_token_absent_unreadable_refused(repo: &dyn Repository)
     let stranger = vec!["stranger".to_string()];
     let mut p = Stash::new();
     p.insert("n".to_string(), json!(1));
-    repo.create(Envelope::new("ver-refused", p, owner.clone()), &owner)
-        .await
-        .unwrap();
+    repo.create(
+        Envelope::new("ver-refused", p, owner.clone()),
+        &sess(&owner),
+    )
+    .await
+    .unwrap();
 
     assert!(repo
-        .read_version("ver-refused", "not-a-real-token", &owner)
+        .read_version("ver-refused", "not-a-real-token", &sess(&owner))
         .await
         .unwrap()
         .is_none());
 
-    let real = repo.list_versions("ver-refused", &owner).await.unwrap()[0]
+    let real = repo
+        .list_versions("ver-refused", &sess(&owner))
+        .await
+        .unwrap()[0]
         .token
         .clone()
         .unwrap();
     assert!(matches!(
-        repo.read_version("ver-refused", &real, &stranger).await,
+        repo.read_version("ver-refused", &real, &sess(&stranger))
+            .await,
         Err(crate::MeshqlError::Unauthorized)
     ));
 }

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use meshql_core::versions::{version_token, VersionRef};
-use meshql_core::{envelope_visible_to, Envelope, MeshqlError, Repository, Result};
+use meshql_core::{Envelope, MeshqlError, Operation, Repository, Result, Session, SystemSession};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -114,7 +114,11 @@ impl KsqlRepository {
 
 #[async_trait]
 impl Repository for KsqlRepository {
-    async fn create(&self, envelope: Envelope, _tokens: &[String]) -> Result<Envelope> {
+    async fn create(&self, envelope: Envelope, session: &dyn Session) -> Result<Envelope> {
+        // The plugin owns the mark. Storage hands it the envelope and
+        // persists whatever comes back, verbatim, in the same write as the
+        // payload — so authorization can never become a dual write.
+        let envelope = session.stamp(envelope);
         let kafka_value = envelope_to_kafka_value(&envelope);
 
         self.client
@@ -128,7 +132,7 @@ impl Repository for KsqlRepository {
     async fn read(
         &self,
         id: &str,
-        tokens: &[String],
+        session: &dyn Session,
         at: Option<DateTime<Utc>>,
     ) -> Result<Option<Envelope>> {
         let escaped_id = Self::escape_id(id);
@@ -147,7 +151,7 @@ impl Repository for KsqlRepository {
                     Ok(rows) if !rows.is_empty() => {
                         let env = row_to_envelope(&rows[0])
                             .map_err(|e| MeshqlError::Parse(e.to_string()))?;
-                        if env.deleted || !envelope_visible_to(&env, tokens) {
+                        if env.deleted || !session.is_authorized(Operation::Read, &env) {
                             return Ok(None);
                         }
                         return Ok(Some(env));
@@ -176,7 +180,7 @@ impl Repository for KsqlRepository {
                     Ok(rows) if !rows.is_empty() => {
                         let env = row_to_envelope(&rows[0])
                             .map_err(|e| MeshqlError::Parse(e.to_string()))?;
-                        if env.deleted || !envelope_visible_to(&env, tokens) {
+                        if env.deleted || !session.is_authorized(Operation::Read, &env) {
                             return Ok(None);
                         }
                         return Ok(Some(env));
@@ -196,7 +200,7 @@ impl Repository for KsqlRepository {
         }
     }
 
-    async fn list(&self, tokens: &[String]) -> Result<Vec<Envelope>> {
+    async fn list(&self, session: &dyn Session) -> Result<Vec<Envelope>> {
         let query = format!("SELECT * FROM {} WHERE deleted = false;", self.table_name);
 
         for _ in 0..self.max_retries {
@@ -207,7 +211,9 @@ impl Repository for KsqlRepository {
                         // The ksqlDB TABLE holds only the latest version per
                         // id, so visibility is decided on the latest version.
                         match row_to_envelope(row) {
-                            Ok(env) if !env.deleted && envelope_visible_to(&env, tokens) => {
+                            Ok(env)
+                                if !env.deleted && session.is_authorized(Operation::Read, &env) =>
+                            {
                                 envelopes.push(env)
                             }
                             Ok(_) => {} // skip deleted / not visible to caller
@@ -233,17 +239,21 @@ impl Repository for KsqlRepository {
         Ok(Vec::new())
     }
 
-    async fn remove(&self, id: &str, tokens: &[String]) -> Result<bool> {
-        let current = self.read(id, tokens, None).await?;
+    async fn remove(&self, id: &str, session: &dyn Session) -> Result<bool> {
+        // Resolve the record first, then ask the plugin about `Remove`
+        // specifically. Reusing the authorized `read` would silently make
+        // remove a synonym for read.
+        let current = self.read(id, &SystemSession, None).await?;
         match current {
             None => Ok(false),
+            Some(env) if !session.is_authorized(Operation::Remove, &env) => Ok(false),
             Some(env) => {
                 let deleted_env = Envelope {
                     id: env.id,
                     payload: env.payload,
                     created_at: Utc::now(),
                     deleted: true,
-                    authorized_tokens: env.authorized_tokens,
+                    auth: env.auth,
                 };
                 let kafka_value = envelope_to_kafka_value(&deleted_env);
                 self.client
@@ -258,19 +268,19 @@ impl Repository for KsqlRepository {
     async fn create_many(
         &self,
         envelopes: Vec<Envelope>,
-        tokens: &[String],
+        session: &dyn Session,
     ) -> Result<Vec<Envelope>> {
         let mut results = Vec::new();
         for env in envelopes {
-            results.push(self.create(env, tokens).await?);
+            results.push(self.create(env, session).await?);
         }
         Ok(results)
     }
 
-    async fn read_many(&self, ids: &[String], tokens: &[String]) -> Result<Vec<Envelope>> {
+    async fn read_many(&self, ids: &[String], session: &dyn Session) -> Result<Vec<Envelope>> {
         let mut results = Vec::new();
         for id in ids {
-            if let Some(env) = self.read(id, tokens, None).await? {
+            if let Some(env) = self.read(id, session, None).await? {
                 results.push(env);
             }
         }
@@ -280,11 +290,11 @@ impl Repository for KsqlRepository {
     async fn remove_many(
         &self,
         ids: &[String],
-        tokens: &[String],
+        session: &dyn Session,
     ) -> Result<HashMap<String, bool>> {
         let mut results = HashMap::new();
         for id in ids {
-            let ok = self.remove(id, tokens).await?;
+            let ok = self.remove(id, session).await?;
             results.insert(id.clone(), ok);
         }
         Ok(results)
@@ -295,12 +305,12 @@ impl Repository for KsqlRepository {
     /// latest-per-id materialization, so it can never answer a question about
     /// history — a distinction `read`'s temporal branch currently gets wrong,
     /// since its comment says STREAM and its code says TABLE.
-    async fn list_versions(&self, id: &str, tokens: &[String]) -> Result<Vec<VersionRef>> {
+    async fn list_versions(&self, id: &str, session: &dyn Session) -> Result<Vec<VersionRef>> {
         let envelopes = self.all_versions(id).await?;
         Ok(envelopes
             .iter()
             .map(|e| {
-                if envelope_visible_to(e, tokens) {
+                if session.is_authorized(Operation::Read, e) {
                     VersionRef::visible(e)
                 } else {
                     VersionRef::tombstone(e)
@@ -313,14 +323,14 @@ impl Repository for KsqlRepository {
         &self,
         id: &str,
         token: &str,
-        tokens: &[String],
+        session: &dyn Session,
     ) -> Result<Option<Envelope>> {
         for env in self.all_versions(id).await? {
             if version_token(&env) != token {
                 continue;
             }
             // Unauthorized is not absent: the listing already reported it.
-            if !envelope_visible_to(&env, tokens) {
+            if !session.is_authorized(Operation::Read, &env) {
                 return Err(MeshqlError::Unauthorized);
             }
             return Ok(Some(env));

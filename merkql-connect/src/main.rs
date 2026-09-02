@@ -199,7 +199,7 @@ async fn open_source(config: &ConnectorConfig) -> Result<Box<dyn CommitSource>> 
                     sobject: sobject.clone(),
                     fields: fields.clone(),
                     entity: entity.clone(),
-                    authorized_tokens: authorized_tokens.clone(),
+                    auth: authorized_tokens.clone().into(),
                     auth: *auth,
                     poll_interval: std::time::Duration::from_millis(*poll_interval_ms),
                     lag: std::time::Duration::from_secs(*lag_seconds),

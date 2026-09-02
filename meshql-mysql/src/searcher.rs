@@ -1,7 +1,7 @@
 use crate::query::build_where;
 use async_trait::async_trait;
 use handlebars::Handlebars;
-use meshql_core::{MeshqlError, Result, Searcher, Stash};
+use meshql_core::{AuthMark, Envelope, MeshqlError, Operation, Result, Searcher, Session, Stash};
 use sqlx::MySqlPool;
 use sqlx::Row;
 
@@ -40,7 +40,7 @@ impl MysqlSearcher {
     async fn execute_query(
         &self,
         query_json: &str,
-        creds: &[String],
+        session: &dyn Session,
         at: i64,
         limit: Option<i64>,
     ) -> Result<Vec<Stash>> {
@@ -60,24 +60,16 @@ impl MysqlSearcher {
             format!("AND {}", where_part.clause)
         };
 
-        // Visibility filtering happens in Rust after the fetch, so LIMIT can
-        // only be pushed into SQL for a "*" caller (who sees every row);
-        // otherwise an invisible row could consume the limit and shadow a
-        // visible match.
-        let wildcard = creds.iter().any(|t| t == "*");
-        let sql_limit = if wildcard { limit } else { None };
-
-        let limit_clause = if sql_limit.is_some() {
-            "LIMIT ?".to_string()
-        } else {
-            String::new()
-        };
+        // Authorization is fetch-then-ask: the mark is opaque, so it cannot
+        // become a WHERE clause, and the limit is applied to the *authorized*
+        // rows further down. Nothing is pushed into SQL — the caller's limit
+        // must never be consumed by a row the caller is not entitled to see.
 
         // Canonical result ordering (meshql_core::envelope_order): the resolved
-        // version's created_at, then the envelope id. Must precede LIMIT so the
-        // limit truncates a meaningful prefix. `COLLATE utf8mb4_bin` forces byte
-        // ordering — MySQL's default collation is case-insensitive and would
-        // disagree with the other adapters.
+        // version's created_at, then the envelope id, so the limit applied after
+        // authorization truncates a meaningful prefix. `COLLATE utf8mb4_bin`
+        // forces byte ordering — MySQL's default collation is case-insensitive
+        // and would disagree with the other adapters.
         let sql = format!(
             r#"WITH latest AS (
                 SELECT id, created_at_ms, deleted, authorized_tokens, payload,
@@ -87,16 +79,12 @@ impl MysqlSearcher {
             SELECT id, created_at_ms, deleted, authorized_tokens, payload
             FROM latest WHERE rn = 1 AND deleted = 0
             {dynamic_where}
-            ORDER BY created_at_ms ASC, id COLLATE utf8mb4_bin ASC
-            {limit_clause}"#
+            ORDER BY created_at_ms ASC, id COLLATE utf8mb4_bin ASC"#
         );
 
         let mut q = sqlx::query(&sql).bind(at);
         for val in &where_part.values {
             q = q.bind(val.as_str());
-        }
-        if let Some(lim) = sql_limit {
-            q = q.bind(lim);
         }
 
         let rows = q
@@ -119,24 +107,34 @@ impl MysqlSearcher {
                 .try_get("payload")
                 .map_err(|e| MeshqlError::Storage(e.to_string()))?;
 
-            let authorized_tokens: Vec<String> = serde_json::from_str(&tokens_json)
+            let auth: AuthMark = serde_json::from_str(&tokens_json)
                 .map_err(|e| MeshqlError::Parse(e.to_string()))?;
-            if !meshql_core::tokens_visible_to(&authorized_tokens, creds) {
-                continue;
-            }
-
             let mut stash: Stash = serde_json::from_str(&payload_json)
                 .map_err(|e| MeshqlError::Parse(e.to_string()))?;
+
+            // The plugin is asked about the whole envelope, not about the mark:
+            // a plugin that authorizes on a payload field has nothing to say
+            // about a bare token list. `deleted` is false by construction — the
+            // query already resolved to the latest undeleted version.
+            let created_at =
+                chrono::DateTime::from_timestamp_millis(created_at_ms).unwrap_or_default();
+            let envelope = Envelope {
+                id: env_id.clone(),
+                payload: stash.clone(),
+                created_at,
+                deleted: false,
+                auth,
+            };
+            if !session.is_authorized(Operation::Read, &envelope) {
+                continue;
+            }
 
             // Merge id and createdAt into the stash so callers can find by id
             // field and GraphQL schemas can opt into an as-of timestamp.
             stash.insert("id".to_string(), serde_json::Value::String(env_id));
-            let created_at = chrono::DateTime::from_timestamp_millis(created_at_ms)
-                .unwrap_or_default()
-                .to_rfc3339();
             stash.insert(
                 "createdAt".to_string(),
-                serde_json::Value::String(created_at),
+                serde_json::Value::String(created_at.to_rfc3339()),
             );
 
             results.push(stash);
@@ -156,11 +154,13 @@ impl Searcher for MysqlSearcher {
         &self,
         template: &str,
         args: &Stash,
-        creds: &[String],
+        session: &dyn Session,
         at: i64,
     ) -> Result<Option<Stash>> {
         let query_json = self.render_template(template, args)?;
-        let results = self.execute_query(&query_json, creds, at, Some(1)).await?;
+        let results = self
+            .execute_query(&query_json, session, at, Some(1))
+            .await?;
         Ok(results.into_iter().next())
     }
 
@@ -168,11 +168,11 @@ impl Searcher for MysqlSearcher {
         &self,
         template: &str,
         args: &Stash,
-        creds: &[String],
+        session: &dyn Session,
         at: i64,
     ) -> Result<Vec<Stash>> {
         let query_json = self.render_template(template, args)?;
         let limit = args.get("limit").and_then(|v| v.as_i64());
-        self.execute_query(&query_json, creds, at, limit).await
+        self.execute_query(&query_json, session, at, limit).await
     }
 }

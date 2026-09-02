@@ -82,11 +82,16 @@ impl Worker {
 
         let mut written = 0;
         for up in self.projector.snapshot() {
-            let current = self.repo.read(&up.id, &self.tokens, None).await?;
+            // A worker runs outside any request, so it names an explicit system
+            // session rather than leaving the question open.
+            let current = self
+                .repo
+                .read(&up.id, &meshql_core::SystemSession, None)
+                .await?;
             let unchanged = current.map(|e| e.payload == up.payload).unwrap_or(false);
             if !unchanged {
                 let env = Envelope::new(up.id, up.payload, self.tokens.clone());
-                self.repo.create(env, &self.tokens).await?;
+                self.repo.create(env, &meshql_core::SystemSession).await?;
                 written += 1;
             }
         }

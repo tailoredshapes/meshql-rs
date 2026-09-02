@@ -6,7 +6,7 @@
 
 use crate::schema;
 use crate::storage::{self, Store};
-use crate::{ConfigError, Deployment, GraphletteDef, ResolverDef};
+use crate::{ConfigError, Deployment, GraphletteDef};
 use meshql_core::{Auth, GraphletteConfig, RootConfig, ServerConfig};
 use std::sync::Arc;
 

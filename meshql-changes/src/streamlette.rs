@@ -10,7 +10,7 @@ use axum::http::HeaderMap;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::get;
 use axum::{Extension, Router};
-use meshql_core::{tokens_visible_to, Auth, AuthContext};
+use meshql_core::{Auth, AuthContext, Operation};
 use std::collections::HashSet;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -171,7 +171,7 @@ async fn streamlette_handler(
     headers: HeaderMap,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stash = auth_ctx.map(|e| e.0 .0).unwrap_or_default();
-    let tokens = state.auth.get_auth_token(&stash);
+    let session = state.auth.authenticate(&AuthContext::new(stash));
 
     // An unusable or unsupported Last-Event-ID is NOT a 400: SSE auto-reconnect
     // would turn an error response into a reconnect loop. It degrades to
@@ -219,10 +219,10 @@ async fn streamlette_handler(
                     if !entities.contains(&event.entity) {
                         continue;
                     }
-                    // Replayed history is subject to the SAME token rule as
-                    // live events. A resume must not become a way to read
-                    // history you were never allowed to see.
-                    if !tokens_visible_to(&event.authorized_tokens, &tokens) {
+                    // Replayed history goes to the SAME plugin as live events.
+                    // A resume must not become a way to read history you were
+                    // never allowed to see.
+                    if !session.is_authorized(Operation::Read, &event.as_envelope()) {
                         continue;
                     }
                     prefix.push(Ok(change_frame(&event)));
@@ -243,7 +243,7 @@ async fn streamlette_handler(
     // 4. Then the live buffer, minus anything step 3 already delivered.
     let stream = tokio_stream::StreamExt::chain(
         tokio_stream::iter(prefix),
-        change_stream_skipping(rx, tokens, Some(entities), already_delivered),
+        change_stream_skipping(rx, session, Some(entities), already_delivered),
     );
 
     Sse::new(stream).keep_alive(
@@ -265,7 +265,7 @@ mod tests {
             id: id.into(),
             created_at: 1,
             deleted: false,
-            authorized_tokens: vec![],
+            auth: Default::default(),
             cursor: None,
             payload: None,
         }

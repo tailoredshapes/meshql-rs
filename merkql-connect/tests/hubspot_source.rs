@@ -50,7 +50,7 @@ fn settings(base_url: &str, objects: &[&str]) -> Settings {
         base_url: base_url.to_string(),
         objects: objects.iter().map(|o| o.to_string()).collect(),
         entity: "crm".to_string(),
-        authorized_tokens: vec!["farm".to_string()],
+        auth: vec!["farm".to_string()].into(),
         properties: vec!["name".to_string()],
         page_size: 100,
         // Long enough that an idle round parks instead of hammering the fake
@@ -218,7 +218,10 @@ async fn the_delivered_envelope_carries_the_hubspot_provenance() {
     let record = next(&mut stream).await;
     let envelope = record.after.as_ref().unwrap();
     assert_eq!(envelope.id, "deals:512");
-    assert_eq!(envelope.authorized_tokens, vec!["farm".to_string()]);
+    assert_eq!(
+        envelope.auth,
+        meshql_core::AuthMark::from(vec!["farm".to_string()])
+    );
     assert_eq!(envelope.payload["name"], json!("object 512"));
     assert_eq!(envelope.payload["_source"]["object_type"], json!("deals"));
     assert_eq!(envelope.payload["_source"]["object_id"], json!("512"));
@@ -447,7 +450,10 @@ async fn a_merged_away_record_is_retired_by_a_tombstone_that_outranks_it() {
     );
     assert_eq!(retired.payload["_merged_into"], json!("deals:33"));
     assert_eq!(retired.payload["_source"]["object_id"], json!("11"));
-    assert_eq!(retired.authorized_tokens, vec!["farm".to_string()]);
+    assert_eq!(
+        retired.auth,
+        meshql_core::AuthMark::from(vec!["farm".to_string()])
+    );
 
     // ── the part that actually retires anything ──
     let live = live_11.after.as_ref().unwrap();

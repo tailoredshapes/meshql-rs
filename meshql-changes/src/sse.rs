@@ -4,8 +4,8 @@
 //!   (omitted entirely for sources that can't seek, so a client never sends
 //!   back a Last-Event-ID the server can't honour),
 //!   `data:` = ChangeEvent::wire_json() (tokens stripped by construction).
-//! - Per-subscriber filtering with the same token rule as the lettes
-//!   (meshql_core::tokens_visible_to); tokens are captured once at connect.
+//! - Per-subscriber filtering by asking the caller's auth session, exactly as
+//!   the lettes do. The session is established once, at connect.
 //! - Reconnect contract: no replay. The hub is in-memory; on (re)connect a
 //!   client must treat all cached state as stale. Last-Event-ID is ignored
 //!   in v1 (a log-backed source may honor it later).
@@ -18,7 +18,7 @@ use axum::extract::{Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::get;
 use axum::{Extension, Router};
-use meshql_core::{tokens_visible_to, Auth, AuthContext};
+use meshql_core::{Auth, AuthContext, Operation, Session};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::convert::Infallible;
@@ -48,11 +48,11 @@ pub(crate) fn change_frame(ev: &ChangeEvent) -> Event {
 /// connection), so the client knows it must resync rather than guessing.
 pub fn change_stream(
     rx: tokio::sync::broadcast::Receiver<ChangeEvent>,
-    subscriber_tokens: Vec<String>,
+    session: Arc<dyn Session>,
     entities: Option<HashSet<String>>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     // An empty skip set is a no-op, so `/changes` keeps its exact behaviour.
-    change_stream_skipping(rx, subscriber_tokens, entities, HashSet::new())
+    change_stream_skipping(rx, session, entities, HashSet::new())
 }
 
 /// `change_stream`, plus a set of cursors already delivered.
@@ -67,7 +67,7 @@ pub fn change_stream(
 /// and can never match.
 pub(crate) fn change_stream_skipping(
     rx: tokio::sync::broadcast::Receiver<ChangeEvent>,
-    subscriber_tokens: Vec<String>,
+    session: Arc<dyn Session>,
     entities: Option<HashSet<String>>,
     already_delivered: HashSet<String>,
 ) -> impl Stream<Item = Result<Event, Infallible>> {
@@ -110,7 +110,8 @@ pub(crate) fn change_stream_skipping(
                             return Some(None);
                         }
                     }
-                    if !tokens_visible_to(&ev.authorized_tokens, &subscriber_tokens) {
+                    // The plugin decides, here as everywhere else.
+                    if !session.is_authorized(Operation::Read, &ev.as_envelope()) {
                         return Some(None);
                     }
                     Some(Some(Ok(change_frame(&ev))))
@@ -149,7 +150,7 @@ async fn changes_handler(
     Query(params): Query<ChangesParams>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let stash = auth_ctx.map(|e| e.0 .0).unwrap_or_default();
-    let tokens = state.auth.get_auth_token(&stash);
+    let session = state.auth.authenticate(&AuthContext::new(stash));
     let entities = params
         .entities
         .map(|s| {
@@ -163,7 +164,7 @@ async fn changes_handler(
         // stream that receives only heartbeats.
         .filter(|set| !set.is_empty());
 
-    Sse::new(change_stream(state.hub.subscribe(), tokens, entities)).keep_alive(
+    Sse::new(change_stream(state.hub.subscribe(), session, entities)).keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("heartbeat"),
@@ -174,6 +175,7 @@ async fn changes_handler(
 mod tests {
     use super::*;
     use crate::ChangeEvent;
+    use meshql_core::token_session;
     use tokio_stream::StreamExt;
 
     fn ev(entity: &str, id: &str, tokens: &[&str]) -> ChangeEvent {
@@ -182,7 +184,11 @@ mod tests {
             id: id.into(),
             created_at: 42,
             deleted: false,
-            authorized_tokens: tokens.iter().map(|s| s.to_string()).collect(),
+            auth: tokens
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .into(),
             cursor: None,
             payload: None,
         }
@@ -202,7 +208,7 @@ mod tests {
     async fn wire_frames(event: ChangeEvent) -> String {
         use axum::response::IntoResponse;
         let hub = ChangeHub::new(16);
-        let stream = change_stream(hub.subscribe(), vec!["*".into()], None);
+        let stream = change_stream(hub.subscribe(), token_session(&["*".to_string()]), None);
         hub.publish(event);
         drop(hub);
         let body = Sse::new(stream).into_response().into_body();
@@ -213,7 +219,11 @@ mod tests {
     #[tokio::test]
     async fn delivers_visible_events_and_filters_invisible() {
         let hub = ChangeHub::new(16);
-        let stream = change_stream(hub.subscribe(), vec!["farm-team".into()], None);
+        let stream = change_stream(
+            hub.subscribe(),
+            token_session(&["farm-team".to_string()]),
+            None,
+        );
         tokio::pin!(stream);
 
         hub.publish(ev("hen", "visible", &["farm-team"]));
@@ -232,7 +242,11 @@ mod tests {
     async fn entity_filter_drops_other_entities() {
         let hub = ChangeHub::new(16);
         let wanted: std::collections::HashSet<String> = ["hen".to_string()].into();
-        let stream = change_stream(hub.subscribe(), vec!["*".into()], Some(wanted));
+        let stream = change_stream(
+            hub.subscribe(),
+            token_session(&["*".to_string()]),
+            Some(wanted),
+        );
         tokio::pin!(stream);
 
         hub.publish(ev("farm", "nope", &[]));
@@ -278,7 +292,7 @@ mod tests {
         for i in 0..10 {
             hub.publish(ev("hen", &format!("e{i}"), &[]));
         }
-        let stream = change_stream(rx, vec!["*".into()], None);
+        let stream = change_stream(rx, token_session(&["*".to_string()]), None);
         tokio::pin!(stream);
 
         // The drain is wrapped in a timeout because a regression here is a

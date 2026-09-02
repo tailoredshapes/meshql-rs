@@ -119,7 +119,7 @@ impl MerkqlTopicSource {
             id: envelope.id,
             created_at: envelope.created_at.timestamp_millis(),
             deleted: envelope.deleted,
-            authorized_tokens: envelope.authorized_tokens,
+            auth: envelope.auth,
             cursor: Some(format!("{}:{}", record.partition, record.offset)),
             // The Envelope's `payload` field, NEVER the whole Envelope: this
             // is serialized verbatim into the SSE frame, and the `WireEvent`
@@ -541,7 +541,7 @@ mod tests {
         assert_eq!(a.entity, b.entity);
         assert_eq!(a.created_at, b.created_at);
         assert_eq!(a.deleted, b.deleted);
-        assert_eq!(a.authorized_tokens, b.authorized_tokens);
+        assert_eq!(a.auth, b.auth);
         assert_eq!(a.cursor, b.cursor);
         assert_eq!(a.payload, b.payload);
         assert_eq!(a.wire_json(), b.wire_json());
@@ -763,7 +763,7 @@ mod tests {
         assert_eq!(events.len(), 1);
         // The tokens must still reach the filter — they are dropped from the
         // wire, not from the event.
-        assert_eq!(events[0].authorized_tokens, vec!["SECRET-TEAM-TOKEN"]);
+        assert_eq!(events[0].auth.as_parts(), ["SECRET-TEAM-TOKEN".to_string()]);
 
         let wire = events[0].wire_json();
         assert!(

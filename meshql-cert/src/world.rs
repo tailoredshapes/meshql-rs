@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use cucumber::World;
-use meshql_core::{Envelope, Repository, Searcher, Stash};
+use meshql_core::{Envelope, Repository, Searcher, Stash, TokenSession};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -126,6 +126,13 @@ impl CertWorld {
         vec!["*".to_string()]
     }
 
+    /// The session the repository and searcher suites run every storage call
+    /// under. The harness stands in for the auth plugin, exactly as a lette
+    /// does — there is no unset session.
+    pub fn star_session() -> TokenSession {
+        TokenSession::new(Self::star())
+    }
+
     /// Whether a backing repository has been supplied. The authorization cert
     /// needs one so it can inspect what the write path actually persisted.
     pub fn has_repo(&self) -> bool {
@@ -163,6 +170,23 @@ impl CertWorld {
             .expect("repo not initialized")
             .0
             .as_ref()
+    }
+
+    /// The repository as a shared handle, for a step that must stand up a
+    /// server around the storage the runner created.
+    pub fn repo_arc(&self) -> Arc<dyn Repository> {
+        Arc::clone(&self.repo_inner.as_ref().expect("repo not initialized").0)
+    }
+
+    /// The searcher as a shared handle. See [`CertWorld::repo_arc`].
+    pub fn searcher_arc(&self) -> Arc<dyn Searcher> {
+        Arc::clone(
+            &self
+                .searcher_inner
+                .as_ref()
+                .expect("searcher not initialized")
+                .0,
+        )
     }
 
     pub fn searcher(&self) -> &dyn Searcher {

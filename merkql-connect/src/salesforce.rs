@@ -948,7 +948,7 @@ impl Capture {
                 // order undefined.
                 created_at: modstamp,
                 deleted: false,
-                authorized_tokens: self.authorized_tokens.clone(),
+                auth: self.authorized_tokens.clone().into(),
             },
             SourceInfo {
                 connector: CONNECTOR.to_string(),
@@ -977,7 +977,7 @@ impl Capture {
                 payload,
                 created_at: at,
                 deleted: true,
-                authorized_tokens: self.authorized_tokens.clone(),
+                auth: self.authorized_tokens.clone().into(),
             },
             SourceInfo {
                 connector: CONNECTOR.to_string(),
@@ -1144,7 +1144,7 @@ impl SalesforceSource {
         if options.authorized_tokens.is_empty() {
             return Err(CdcError::Backend(anyhow::anyhow!(
                 "no authorized_tokens configured. An envelope with no tokens is PUBLIC to \
-                 every reader of the mesh (see meshql_core::envelope_visible_to), and \
+                 every reader of the mesh, since the auth plugin treats an empty mark as \
                  defaulting CRM data to public is not a default anyone should get by \
                  omission. Set the tokens the mesh uses, or [\"*\"] to mean public \
                  deliberately."
@@ -1198,7 +1198,7 @@ impl SalesforceSource {
             sobject: options.sobject,
             select: select.join(", "),
             entity: options.entity.clone(),
-            authorized_tokens: options.authorized_tokens,
+            auth: options.authorized_tokens.into(),
             capture_deletes: options.capture_deletes,
         };
 

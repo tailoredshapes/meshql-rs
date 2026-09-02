@@ -1,5 +1,5 @@
 use chrono::{DateTime, TimeZone, Utc};
-use meshql_core::{Envelope, Stash};
+use meshql_core::{AuthMark, Envelope, Stash};
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
@@ -16,8 +16,7 @@ use std::collections::HashMap;
 /// ```
 pub fn envelope_to_kafka_value(envelope: &Envelope) -> Value {
     let payload_str = serde_json::to_string(&envelope.payload).unwrap_or_else(|_| "{}".to_string());
-    let tokens_str =
-        serde_json::to_string(&envelope.authorized_tokens).unwrap_or_else(|_| "[]".to_string());
+    let tokens_str = serde_json::to_string(&envelope.auth).unwrap_or_else(|_| "[]".to_string());
 
     json!({
         "payload": payload_str,
@@ -51,15 +50,14 @@ pub fn row_to_envelope(row: &HashMap<String, Value>) -> anyhow::Result<Envelope>
 
     let tokens_str = get_string_field(row, "AUTHORIZED_TOKENS", "authorized_tokens")
         .unwrap_or_else(|| "[]".to_string());
-    let authorized_tokens: Vec<String> =
-        serde_json::from_str(&tokens_str).unwrap_or_else(|_| Vec::new());
+    let auth: AuthMark = serde_json::from_str(&tokens_str).unwrap_or_else(|_| AuthMark::empty());
 
     Ok(Envelope {
         id,
         payload,
         created_at,
         deleted,
-        authorized_tokens,
+        auth,
     })
 }
 
@@ -111,7 +109,7 @@ mod tests {
             payload,
             created_at,
             deleted: false,
-            authorized_tokens: vec!["*".to_string()],
+            auth: vec!["*".to_string()].into(),
         };
 
         let kafka_val = envelope_to_kafka_value(&envelope);
@@ -147,7 +145,7 @@ mod tests {
         assert_eq!(env.payload["name"], json!("Bob"));
         assert_eq!(env.created_at.timestamp_millis(), 1640000000000);
         assert!(!env.deleted);
-        assert_eq!(env.authorized_tokens, vec!["*"]);
+        assert_eq!(env.auth.as_parts(), ["*".to_string()]);
     }
 
     #[test]
@@ -163,7 +161,7 @@ mod tests {
         assert_eq!(env.id, "def-456");
         assert_eq!(env.payload["type"], json!("A"));
         assert!(env.deleted);
-        assert_eq!(env.authorized_tokens, vec!["admin"]);
+        assert_eq!(env.auth.as_parts(), ["admin".to_string()]);
     }
 
     #[test]
@@ -189,6 +187,6 @@ mod tests {
         let env = row_to_envelope(&row).unwrap();
         assert_eq!(env.id, "empty-id");
         assert!(env.payload.is_empty());
-        assert!(env.authorized_tokens.is_empty());
+        assert!(env.auth.is_empty());
     }
 }

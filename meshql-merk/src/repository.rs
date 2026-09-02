@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use merk_object::backend::Backend;
 use merk_object::broker::BrokerRef;
 use meshql_core::versions::VersionRef;
-use meshql_core::{Envelope, MeshqlError, Repository, Result};
+use meshql_core::{Envelope, MeshqlError, Repository, Result, Session};
 use std::collections::HashMap;
 
 /// Why a read is refused, in the words a caller will see in a 500.
@@ -47,21 +47,20 @@ impl<B: Backend> MerkRepository<B> {
         self.log.topic()
     }
 
-    /// Stamp the caller's tokens and mint an id if the caller supplied none,
-    /// exactly as every other adapter's `create` does.
+    /// Let the plugin stamp the envelope and mint an id if the caller supplied
+    /// none, exactly as every other adapter's `create` does.
     ///
-    /// Note what this deliberately does *not* do: refuse an empty or `"*"`
-    /// token set. `meshql-core`'s visibility predicate treats both as public, so
-    /// a record written with either is permanently world-readable, and the
-    /// sociallymeshy design refuses such a write with a 500. That check belongs
-    /// in the gateway, not here — `meshql-cert`'s authorization suite certifies
-    /// that a record written without credentials *stays public*, so an adapter
-    /// that refused it would fail certification and stop being interchangeable.
-    fn prepare(mut envelope: Envelope, tokens: &[String]) -> Envelope {
+    /// Note what this deliberately does *not* do: inspect what the plugin
+    /// stamped, or refuse a record the adapter guesses is world-readable. What
+    /// a mark means is the plugin's business — `meshql-cert`'s authorization
+    /// suite certifies that a record written without credentials *stays
+    /// public*, so an adapter that refused it would fail certification and stop
+    /// being interchangeable.
+    fn prepare(envelope: Envelope, session: &dyn Session) -> Envelope {
+        let mut envelope = session.stamp(envelope);
         if envelope.id.is_empty() {
             envelope.id = uuid::Uuid::new_v4().to_string();
         }
-        envelope.authorized_tokens = tokens.to_vec();
         envelope
     }
 
@@ -82,9 +81,9 @@ impl<B: Backend> MerkRepository<B> {
     pub async fn create_located(
         &self,
         envelope: Envelope,
-        tokens: &[String],
+        session: &dyn Session,
     ) -> Result<(Envelope, Notification)> {
-        let env = Self::prepare(envelope, tokens);
+        let env = Self::prepare(envelope, session);
         let partition = self
             .log
             .append(envelope_key(&env), envelope_to_value(&env)?)
@@ -97,11 +96,11 @@ impl<B: Backend> MerkRepository<B> {
     pub async fn create_many_located(
         &self,
         envelopes: Vec<Envelope>,
-        tokens: &[String],
+        session: &dyn Session,
     ) -> Result<(Vec<Envelope>, Vec<Notification>)> {
         let prepared: Vec<Envelope> = envelopes
             .into_iter()
-            .map(|e| Self::prepare(e, tokens))
+            .map(|e| Self::prepare(e, session))
             .collect();
 
         let mut entries = Vec::with_capacity(prepared.len());
@@ -119,8 +118,8 @@ impl<B: Backend> MerkRepository<B> {
 
 #[async_trait]
 impl<B: Backend> Repository for MerkRepository<B> {
-    async fn create(&self, envelope: Envelope, tokens: &[String]) -> Result<Envelope> {
-        self.create_located(envelope, tokens)
+    async fn create(&self, envelope: Envelope, session: &dyn Session) -> Result<Envelope> {
+        self.create_located(envelope, session)
             .await
             .map(|(env, _)| env)
     }
@@ -130,9 +129,9 @@ impl<B: Backend> Repository for MerkRepository<B> {
     async fn create_many(
         &self,
         envelopes: Vec<Envelope>,
-        tokens: &[String],
+        session: &dyn Session,
     ) -> Result<Vec<Envelope>> {
-        self.create_many_located(envelopes, tokens)
+        self.create_many_located(envelopes, session)
             .await
             .map(|(envelopes, _)| envelopes)
     }
@@ -140,37 +139,37 @@ impl<B: Backend> Repository for MerkRepository<B> {
     async fn read(
         &self,
         _id: &str,
-        _tokens: &[String],
+        _session: &dyn Session,
         _at: Option<DateTime<Utc>>,
     ) -> Result<Option<Envelope>> {
         Err(refuse("read"))
     }
 
-    async fn list(&self, _tokens: &[String]) -> Result<Vec<Envelope>> {
+    async fn list(&self, _session: &dyn Session) -> Result<Vec<Envelope>> {
         Err(refuse("list"))
     }
 
-    async fn read_many(&self, _ids: &[String], _tokens: &[String]) -> Result<Vec<Envelope>> {
+    async fn read_many(&self, _ids: &[String], _session: &dyn Session) -> Result<Vec<Envelope>> {
         Err(refuse("read_many"))
     }
 
     /// Refused for two reasons that both hold: it is a read-modify-write, and an
     /// event meshlette has no delete. Correction is a new event.
-    async fn remove(&self, _id: &str, _tokens: &[String]) -> Result<bool> {
+    async fn remove(&self, _id: &str, _session: &dyn Session) -> Result<bool> {
         Err(refuse("remove"))
     }
 
     async fn remove_many(
         &self,
         _ids: &[String],
-        _tokens: &[String],
+        _session: &dyn Session,
     ) -> Result<HashMap<String, bool>> {
         Err(refuse("remove_many"))
     }
     /// Refused, like every other read. merk-cloud is an append-only log with no
     /// index, so answering this would mean replaying every partition — and this
     /// crate exists precisely to forbid the scan `meshql-merkql` allows.
-    async fn list_versions(&self, _id: &str, _tokens: &[String]) -> Result<Vec<VersionRef>> {
+    async fn list_versions(&self, _id: &str, _session: &dyn Session) -> Result<Vec<VersionRef>> {
         Err(refuse("list_versions"))
     }
 
@@ -178,7 +177,7 @@ impl<B: Backend> Repository for MerkRepository<B> {
         &self,
         _id: &str,
         _token: &str,
-        _tokens: &[String],
+        _session: &dyn Session,
     ) -> Result<Option<Envelope>> {
         Err(refuse("read_version"))
     }

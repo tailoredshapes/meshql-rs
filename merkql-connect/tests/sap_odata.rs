@@ -42,7 +42,7 @@ async fn source(server: &MockServer, auth: SapAuthConfig) -> SapSource {
         SapODataVersion::V4,
         &keys(),
         Some("LastChangeDateTime"),
-        &["sap".to_string()],
+        &meshql_core::TokenSession::new(vec!["sap".to_string()]),
         &auth,
         // Short, because a couple of tests wait for the next cycle. The idle
         // path is a timer by necessity — SAP OData has no notification edge.
@@ -206,7 +206,10 @@ async fn an_odata_entity_becomes_an_envelope_carrying_its_own_provenance() {
     assert!(!envelope.deleted);
     // Authorisation is configured, not invented per record: SAP carries no
     // meshql tokens.
-    assert_eq!(envelope.authorized_tokens, vec!["sap".to_string()]);
+    assert_eq!(
+        envelope.auth,
+        meshql_core::AuthMark::from(vec!["sap".to_string()])
+    );
     assert_eq!(envelope.payload["CityName"], json!("Leeds"));
 
     // The `source` block does not survive a repository append, so the domain's
@@ -580,7 +583,7 @@ async fn a_missing_credential_environment_variable_fails_at_open() {
         SapODataVersion::V4,
         &keys(),
         None,
-        &[],
+        &meshql_core::TokenSession::new(vec![]),
         &SapAuthConfig::Bearer {
             token_env: "MERKQL_TEST_SAP_ABSENT".into(),
         },
@@ -654,7 +657,7 @@ async fn v2_source(server: &MockServer) -> SapSource {
         SapODataVersion::V2,
         &keys(),
         Some("LastChangeDateTime"),
-        &["sap".to_string()],
+        &meshql_core::TokenSession::new(vec!["sap".to_string()]),
         &SapAuthConfig::None,
         Duration::from_millis(50),
     )

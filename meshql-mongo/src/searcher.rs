@@ -1,7 +1,7 @@
-use crate::converters::{document_to_result_stash, stash_to_doc};
-use bson::{doc, Bson, Document};
+use crate::converters::{document_to_envelope, document_to_result_stash, stash_to_doc};
+use bson::{doc, Document};
 use handlebars::Handlebars;
-use meshql_core::{Auth, MeshqlError, Result, Searcher, Stash};
+use meshql_core::{Auth, MeshqlError, Operation, Result, Searcher, Session, Stash};
 use mongodb::Collection;
 use std::sync::Arc;
 
@@ -39,13 +39,7 @@ impl MongoSearcher {
             .map_err(|e| MeshqlError::Template(e.to_string()))
     }
 
-    fn build_pipeline(
-        &self,
-        query_json: &str,
-        creds: &[String],
-        at: i64,
-        limit: Option<i64>,
-    ) -> Result<Vec<Document>> {
+    fn build_pipeline(&self, query_json: &str, at: i64) -> Result<Vec<Document>> {
         let at_bson = bson::DateTime::from_millis(at);
 
         let json_val: serde_json::Value =
@@ -70,19 +64,9 @@ impl MongoSearcher {
             doc! { "$match": { "deleted": { "$ne": true } } },
         ];
 
-        // Visibility convention (meshql_core::envelope_visible_to), applied to
-        // the latest version only — filtering before $group would resurrect
-        // older visible versions of a now-restricted envelope. A "*" caller
-        // sees everything, so no stage is needed.
-        if !creds.iter().any(|t| t == "*") {
-            let bson_tokens: Vec<Bson> = creds.iter().map(|s| Bson::String(s.clone())).collect();
-            pipeline.push(doc! { "$match": { "$or": [
-                { "authorizedTokens": { "$exists": false } },
-                { "authorizedTokens": { "$size": 0 } },
-                { "authorizedTokens": "*" },
-                { "authorizedTokens": { "$in": bson_tokens } },
-            ] } });
-        }
+        // No authorization stage. The mark is opaque, so it cannot become a
+        // `$match`; the plugin is asked about each resolved envelope after the
+        // fetch, and the limit is applied to what it authorized.
 
         // Canonical result ordering (meshql_core::envelope_order): the resolved
         // version's createdAt, then the envelope id. $group emits its buckets in
@@ -91,56 +75,20 @@ impl MongoSearcher {
         // matching the other adapters.
         pipeline.push(doc! { "$sort": { "createdAt": 1, "id": 1 } });
 
-        if let Some(l) = limit {
-            pipeline.push(doc! { "$limit": l });
-        }
-
         Ok(pipeline)
     }
-}
 
-#[async_trait::async_trait]
-impl Searcher for MongoSearcher {
-    async fn find(
+    /// Run one pipeline, ask the plugin about every envelope it resolved, and
+    /// truncate to `limit` *afterwards* — so a limit truncates authorized rows
+    /// rather than being consumed by rows the caller never gets to see.
+    async fn authorized_rows(
         &self,
-        template: &str,
-        args: &Stash,
-        creds: &[String],
+        query_json: &str,
+        session: &dyn Session,
         at: i64,
-    ) -> Result<Option<Stash>> {
-        let query_json = self.render_template(template, args)?;
-        let pipeline = self.build_pipeline(&query_json, creds, at, Some(1))?;
-
-        let mut cursor = self
-            .collection
-            .aggregate(pipeline)
-            .await
-            .map_err(|e| MeshqlError::Storage(e.to_string()))?;
-
-        if cursor
-            .advance()
-            .await
-            .map_err(|e| MeshqlError::Storage(e.to_string()))?
-        {
-            let doc = cursor
-                .deserialize_current()
-                .map_err(|e| MeshqlError::Storage(e.to_string()))?;
-            Ok(document_to_result_stash(&doc))
-        } else {
-            Ok(None)
-        }
-    }
-
-    async fn find_all(
-        &self,
-        template: &str,
-        args: &Stash,
-        creds: &[String],
-        at: i64,
+        limit: Option<i64>,
     ) -> Result<Vec<Stash>> {
-        let query_json = self.render_template(template, args)?;
-        let limit = args.get("limit").and_then(|v| v.as_i64());
-        let pipeline = self.build_pipeline(&query_json, creds, at, limit)?;
+        let pipeline = self.build_pipeline(query_json, at)?;
 
         let mut cursor = self
             .collection
@@ -157,11 +105,51 @@ impl Searcher for MongoSearcher {
             let doc = cursor
                 .deserialize_current()
                 .map_err(|e| MeshqlError::Storage(e.to_string()))?;
+            let Some(envelope) = document_to_envelope(&doc) else {
+                continue;
+            };
+            if !session.is_authorized(Operation::Read, &envelope) {
+                continue;
+            }
             if let Some(stash) = document_to_result_stash(&doc) {
                 results.push(stash);
+            }
+            if let Some(l) = limit {
+                if results.len() as i64 >= l.max(0) {
+                    break;
+                }
             }
         }
 
         Ok(results)
+    }
+}
+
+#[async_trait::async_trait]
+impl Searcher for MongoSearcher {
+    async fn find(
+        &self,
+        template: &str,
+        args: &Stash,
+        session: &dyn Session,
+        at: i64,
+    ) -> Result<Option<Stash>> {
+        let query_json = self.render_template(template, args)?;
+        let mut rows = self
+            .authorized_rows(&query_json, session, at, Some(1))
+            .await?;
+        Ok(rows.pop())
+    }
+
+    async fn find_all(
+        &self,
+        template: &str,
+        args: &Stash,
+        session: &dyn Session,
+        at: i64,
+    ) -> Result<Vec<Stash>> {
+        let query_json = self.render_template(template, args)?;
+        let limit = args.get("limit").and_then(|v| v.as_i64());
+        self.authorized_rows(&query_json, session, at, limit).await
     }
 }

@@ -1,22 +1,25 @@
+use meshql_core::{AuthMark, Envelope, Stash};
+
 /// A thin change notification: something about `entity`/`id` changed at
-/// `created_at` (epoch millis, the store's commit time). `authorized_tokens`
-/// ride along for per-subscriber filtering and are NEVER serialized to the
-/// wire — see `wire_json`.
+/// `created_at` (epoch millis, the store's commit time). The record's
+/// authorization mark rides along so a subscriber's session can be asked about
+/// it, and is NEVER serialized to the wire — see `wire_json`.
 #[derive(Debug, Clone)]
 pub struct ChangeEvent {
     pub entity: String,
     pub id: String,
     pub created_at: i64,
     pub deleted: bool,
-    /// Filtering input only — NEVER serialized. See `wire_json`.
-    pub authorized_tokens: Vec<String>,
+    /// The record's opaque authorization mark. Filtering input only — NEVER
+    /// serialized. See `wire_json`.
+    pub auth: AuthMark,
     /// Resume cursor, `"{partition}:{offset}"`. `Some` only for sources that
     /// can seek (merkql); `None` for tail-based sources, which don't resume.
     pub cursor: Option<String>,
     /// The changed payload, when the streamlette is configured to carry it.
     ///
     /// **This must be the Envelope's `payload`, never the whole Envelope.**
-    /// An Envelope carries `authorized_tokens`; this field is serialized
+    /// An Envelope carries the authorization mark; this field is serialized
     /// verbatim, so handing it a whole Envelope puts tokens on the wire and
     /// defeats the `WireEvent` split entirely. The split protects the
     /// top-level field only — it cannot police what a producer nests inside.
@@ -41,8 +44,30 @@ struct WireEvent<'a> {
 }
 
 impl ChangeEvent {
-    /// The SSE `data:` payload. Tokens are stripped by construction — the
-    /// wire struct has no field for them.
+    /// The event as an envelope, so a `Session` can be asked about it.
+    ///
+    /// `is_authorized` takes an envelope because a plugin may authorize on
+    /// anything the envelope carries — a payload field, not only a mark. The
+    /// change feed gives it everything it has: a source that carries the
+    /// payload hands over a complete record, and one that does not hands over
+    /// the mark and an empty payload.
+    pub fn as_envelope(&self) -> Envelope {
+        let payload = match &self.payload {
+            Some(serde_json::Value::Object(map)) => map.clone(),
+            _ => Stash::new(),
+        };
+        Envelope {
+            id: self.id.clone(),
+            payload,
+            created_at: chrono::DateTime::from_timestamp_millis(self.created_at)
+                .unwrap_or_default(),
+            deleted: self.deleted,
+            auth: self.auth.clone(),
+        }
+    }
+
+    /// The SSE `data:` payload. The mark is stripped by construction — the
+    /// wire struct has no field for it.
     pub fn wire_json(&self) -> String {
         serde_json::to_string(&WireEvent {
             entity: &self.entity,
@@ -66,7 +91,7 @@ mod tests {
             id: "abc-123".into(),
             created_at: 1751892345123,
             deleted: false,
-            authorized_tokens: vec!["secret-team".into()],
+            auth: vec!["secret-team".to_string()].into(),
             cursor: None,
             payload: None,
         }

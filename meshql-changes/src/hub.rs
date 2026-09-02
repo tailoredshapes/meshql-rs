@@ -65,7 +65,7 @@ mod tests {
             id: id.into(),
             created_at: 1,
             deleted: false,
-            authorized_tokens: vec![],
+            auth: Default::default(),
             cursor: None,
             payload: None,
         }

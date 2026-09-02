@@ -174,10 +174,10 @@ pub async fn certify_snapshot_then_stream(store: &dyn CertStore) -> Result<()> {
     if after.payload.get("marker") != Some(&serde_json::json!("live-1")) {
         bail!("the committed payload did not survive: {:?}", after.payload);
     }
-    if after.authorized_tokens != vec!["cert".to_string()] {
+    if after.auth.as_parts() != ["cert".to_string()] {
         bail!(
-            "authorized_tokens did not survive: {:?}",
-            after.authorized_tokens
+            "the authorization mark did not survive: {:?}",
+            after.auth.as_parts()
         );
     }
     Ok(())

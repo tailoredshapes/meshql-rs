@@ -5,12 +5,19 @@ use axum::{
     routing::{get, post},
     Extension, Json, Router,
 };
-use meshql_core::{Auth, AuthContext, Envelope, Repository, Stash};
+use meshql_core::{Auth, AuthContext, Envelope, Operation, Repository, Session, Stash};
 use std::sync::Arc;
 use uuid::Uuid;
 
 fn extract_stash(ext: Option<Extension<AuthContext>>) -> Stash {
     ext.map(|e| e.0 .0).unwrap_or_default()
+}
+
+/// Establish the request-scoped auth session. Every handler below runs storage
+/// calls under it — there is no unset session, and the restlette holds no
+/// credentials of its own to pass down instead.
+fn session_for(auth: &Arc<dyn Auth>, ext: Option<Extension<AuthContext>>) -> Arc<dyn Session> {
+    auth.authenticate(&AuthContext::new(extract_stash(ext)))
 }
 
 /// "Honesty" headers: the as-of timestamp and tombstone state, leaked from
@@ -138,17 +145,18 @@ async fn create_handler(
     }
 
     let id = Uuid::new_v4().to_string();
-    let stash = extract_stash(auth_ctx);
-    let tokens = state.auth.get_auth_token(&stash);
-    if !state.auth.authorize_action(&tokens, "write") {
+    let session = session_for(&state.auth, auth_ctx);
+    // The framework no longer copies the caller's tokens onto the envelope.
+    // `create` hands it to `Session::stamp`, which is the plugin's job.
+    let envelope = Envelope::new(id, payload, meshql_core::AuthMark::empty());
+    if !session.is_authorized(Operation::Create, &envelope) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "write not permitted for your role"})),
         )
             .into_response();
     }
-    let envelope = Envelope::new(id, payload, tokens.clone());
-    match state.repo.create(envelope, &tokens).await {
+    match state.repo.create(envelope, session.as_ref()).await {
         Ok(env) => {
             let headers = envelope_headers(&env);
             let mut payload = env.payload;
@@ -186,10 +194,9 @@ async fn list_versions_handler(
     base: Extension<RestlettePath>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let stash = extract_stash(auth_ctx);
-    let tokens = state.auth.get_auth_token(&stash);
+    let session = session_for(&state.auth, auth_ctx);
 
-    match state.repo.list_versions(&id, &tokens).await {
+    match state.repo.list_versions(&id, session.as_ref()).await {
         Ok(versions) => {
             let items: Vec<serde_json::Value> = versions
                 .iter()
@@ -222,10 +229,9 @@ async fn read_version_handler(
     auth_ctx: Option<Extension<AuthContext>>,
     Path((id, token)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    let stash = extract_stash(auth_ctx);
-    let tokens = state.auth.get_auth_token(&stash);
+    let session = session_for(&state.auth, auth_ctx);
 
-    match state.repo.read_version(&id, &token, &tokens).await {
+    match state.repo.read_version(&id, &token, session.as_ref()).await {
         Ok(Some(env)) => {
             let headers = envelope_headers(&env);
             let mut payload = env.payload;
@@ -250,9 +256,8 @@ async fn list_handler(
     State(state): State<RestletteState>,
     auth_ctx: Option<Extension<AuthContext>>,
 ) -> impl IntoResponse {
-    let stash = extract_stash(auth_ctx);
-    let tokens = state.auth.get_auth_token(&stash);
-    match state.repo.list(&tokens).await {
+    let session = session_for(&state.auth, auth_ctx);
+    match state.repo.list(session.as_ref()).await {
         Ok(envelopes) => {
             let items: Vec<serde_json::Value> = envelopes
                 .into_iter()
@@ -273,9 +278,8 @@ async fn read_handler(
     auth_ctx: Option<Extension<AuthContext>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let stash = extract_stash(auth_ctx);
-    let tokens = state.auth.get_auth_token(&stash);
-    match state.repo.read(&id, &tokens, None).await {
+    let session = session_for(&state.auth, auth_ctx);
+    match state.repo.read(&id, session.as_ref(), None).await {
         Ok(Some(env)) => {
             let headers = envelope_headers(&env);
             let mut payload = env.payload;
@@ -293,18 +297,10 @@ async fn update_handler(
     Path(id): Path<String>,
     Json(payload): Json<Stash>,
 ) -> impl IntoResponse {
-    let stash = extract_stash(auth_ctx);
-    let tokens = state.auth.get_auth_token(&stash);
-    if !state.auth.authorize_action(&tokens, "write") {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "write not permitted for your role"})),
-        )
-            .into_response();
-    }
+    let session = session_for(&state.auth, auth_ctx);
 
     // Merge: read existing, overlay new fields
-    let merged = match state.repo.read(&id, &tokens, None).await {
+    let merged = match state.repo.read(&id, session.as_ref(), None).await {
         Ok(Some(existing)) => {
             let mut merged = existing.payload;
             for (k, v) in payload {
@@ -315,8 +311,15 @@ async fn update_handler(
         _ => payload,
     };
 
-    let envelope = Envelope::new(id, merged, tokens.clone());
-    match state.repo.create(envelope, &tokens).await {
+    let envelope = Envelope::new(id, merged, meshql_core::AuthMark::empty());
+    if !session.is_authorized(Operation::Create, &envelope) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "write not permitted for your role"})),
+        )
+            .into_response();
+    }
+    match state.repo.create(envelope, session.as_ref()).await {
         Ok(env) => {
             let headers = envelope_headers(&env);
             let mut payload = env.payload;
@@ -332,16 +335,8 @@ async fn delete_handler(
     auth_ctx: Option<Extension<AuthContext>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let stash = extract_stash(auth_ctx);
-    let tokens = state.auth.get_auth_token(&stash);
-    if !state.auth.authorize_action(&tokens, "write") {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "write not permitted for your role"})),
-        )
-            .into_response();
-    }
-    match state.repo.remove(&id, &tokens).await {
+    let session = session_for(&state.auth, auth_ctx);
+    match state.repo.remove(&id, session.as_ref()).await {
         Ok(true) => {
             let body = serde_json::json!({"id": id, "status": "deleted"});
             (StatusCode::OK, Json(body)).into_response()

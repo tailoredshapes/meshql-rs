@@ -1,9 +1,9 @@
 //! Casbin-based authorizer for meshql.
 //!
-//! Wraps any [`meshql_core::Auth`] implementation and uses a Casbin
-//! [`Enforcer`] to resolve the wrapped Auth's user identity into a set of
-//! roles. Those roles are then matched against
-//! [`meshql_core::Envelope::authorized_tokens`] in [`Auth::is_authorized`].
+//! Wraps any [`meshql_core::Identity`] source and uses a Casbin [`Enforcer`]
+//! to resolve that identity into a set of roles. The session it hands back
+//! stamps those roles onto a record on write and matches them against the
+//! record's mark on read.
 //!
 //! Mirrors the canonical Java implementation in
 //! `meshql/auth/casbin/src/main/java/com/meshql/auth/casbin/CasbinAuth.java`
@@ -26,8 +26,11 @@
 //! ```
 
 use casbin::{CoreApi, DefaultModel, Enforcer, FileAdapter, MgmtApi, RbacApi};
-use meshql_core::{Auth, Envelope, Stash};
+use meshql_core::{
+    Auth, AuthContext, AuthMark, Envelope, Identity, Operation, Session, Stash, TokenSession,
+};
 use std::path::Path;
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -36,19 +39,19 @@ pub enum CasbinAuthError {
     Casbin(#[from] casbin::Error),
 }
 
-/// `Auth` impl that wraps another `Auth` and resolves the inner user identity
+/// `Auth` plugin that wraps an identity source and resolves the user identity
 /// into a list of roles via a Casbin policy.
 ///
-/// `get_auth_token` returns the caller's roles.
-/// `is_authorized` returns true when any of those roles appears in the
-/// envelope's `authorized_tokens` — or when `authorized_tokens` is empty
-/// (treated as a public record).
-pub struct CasbinAuth<A: Auth> {
+/// The session it produces stamps the caller's roles onto a record on write.
+/// On read it authorizes when any of those roles appears in the record's mark,
+/// or when the mark is empty (a public record). On create and remove it
+/// additionally requires the policy to permit `write`.
+pub struct CasbinAuth<A: Identity> {
     enforcer: Enforcer,
     inner: A,
 }
 
-impl<A: Auth> CasbinAuth<A> {
+impl<A: Identity> CasbinAuth<A> {
     /// Construct from filesystem paths to a Casbin model and policy.
     pub async fn new(
         model_path: impl AsRef<Path> + Send + Sync,
@@ -105,12 +108,14 @@ impl<A: Auth> CasbinAuth<A> {
     }
 }
 
-impl<A: Auth> Auth for CasbinAuth<A> {
-    fn get_auth_token(&self, context: &Stash) -> Vec<String> {
+impl<A: Identity> CasbinAuth<A> {
+    /// The roles a caller resolves to. Public so a deployment can inspect what
+    /// the policy did with an identity.
+    pub fn roles(&self, context: &Stash) -> Vec<String> {
         let mut creds: Vec<String> = Vec::new();
         // Roles bound to the user_id in the embedded g-policy (e.g. a known
         // operator -> admin).
-        if let Some(user_id) = self.inner.get_auth_token(context).first() {
+        if let Some(user_id) = self.inner.identify(context).first() {
             creds.extend(self.enforcer.get_roles_for_user(user_id, None));
         }
         // Roles the trusted edge injected directly as groups (the standard
@@ -126,20 +131,10 @@ impl<A: Auth> Auth for CasbinAuth<A> {
         creds
     }
 
-    fn is_authorized(&self, credentials: &[String], envelope: &Envelope) -> bool {
-        if envelope.authorized_tokens.is_empty() {
-            return true;
-        }
-        envelope
-            .authorized_tokens
-            .iter()
-            .any(|t| credentials.iter().any(|c| c == t))
-    }
-
-    fn authorize_action(&self, credentials: &[String], action: &str) -> bool {
-        // Allowed iff any of the caller's roles permits `action` on the API
-        // surface per the embedded policy (admin: `*`, editor: write, viewer:
-        // read). `/api` matches the policy's `/*` object glob.
+    /// Whether any of `credentials` permits `action` on the API surface per the
+    /// embedded policy (admin: `*`, editor: write, viewer: read). `/api`
+    /// matches the policy's `/*` object glob.
+    pub fn permits(&self, credentials: &[String], action: &str) -> bool {
         credentials.iter().any(|role| {
             self.enforcer
                 .enforce((role.as_str(), "/api", action))
@@ -148,10 +143,54 @@ impl<A: Auth> Auth for CasbinAuth<A> {
     }
 }
 
+impl<A: Identity> CasbinAuth<A> {
+    /// The session a caller holding `roles` would run under. `authenticate`
+    /// builds one from a request; this builds one from roles already in hand.
+    pub fn session_for(&self, roles: Vec<String>) -> CasbinSession {
+        CasbinSession {
+            may_write: self.permits(&roles, "write"),
+            roles,
+        }
+    }
+}
+
+impl<A: Identity> Auth for CasbinAuth<A> {
+    fn authenticate(&self, context: &AuthContext) -> Arc<dyn Session> {
+        Arc::new(self.session_for(self.roles(context.stash())))
+    }
+}
+
+/// One request's worth of Casbin authorization: the roles the policy resolved,
+/// and whether they permit writing.
+///
+/// The policy decision is taken once, at authentication, so the session holds
+/// no reference to the enforcer and nothing mutable.
+pub struct CasbinSession {
+    roles: Vec<String>,
+    may_write: bool,
+}
+
+impl Session for CasbinSession {
+    fn stamp(&self, mut envelope: Envelope) -> Envelope {
+        envelope.auth = AuthMark::new(self.roles.clone());
+        envelope
+    }
+
+    fn is_authorized(&self, operation: Operation, envelope: &Envelope) -> bool {
+        let visible = TokenSession::new(self.roles.clone()).is_authorized(operation, envelope);
+        match operation {
+            Operation::Read => visible,
+            // A mutation needs both: the policy has to permit writing at all,
+            // and the record has to be one this caller can see.
+            Operation::Create | Operation::Remove => self.may_write && visible,
+        }
+    }
+}
+
 #[cfg(test)]
 mod action_tests {
     use super::*;
-    use meshql_core::{Auth, Stash, StashKeyAuth};
+    use meshql_core::{Stash, StashKeyAuth};
     use serde_json::json;
 
     const MODEL: &str = "[request_definition]\nr = sub, obj, act\n[policy_definition]\np = sub, obj, act\n[role_definition]\ng = _, _\n[policy_effect]\ne = some(where (p.eft == allow))\n[matchers]\nm = g(r.sub, p.sub) && keyMatch(r.obj, p.obj) && (r.act == p.act || p.act == \"*\")\n";
@@ -166,11 +205,11 @@ mod action_tests {
     #[tokio::test]
     async fn write_action_enforced_by_role() {
         let a = auth().await;
-        assert!(a.authorize_action(&["admin".into()], "write"));
-        assert!(a.authorize_action(&["editor".into()], "write"));
-        assert!(!a.authorize_action(&["viewer".into()], "write"));
-        assert!(!a.authorize_action(&[], "write"));
-        assert!(a.authorize_action(&["viewer".into()], "read"));
+        assert!(a.permits(&["admin".into()], "write"));
+        assert!(a.permits(&["editor".into()], "write"));
+        assert!(!a.permits(&["viewer".into()], "write"));
+        assert!(!a.permits(&[], "write"));
+        assert!(a.permits(&["viewer".into()], "read"));
     }
 
     #[tokio::test]
@@ -181,9 +220,9 @@ mod action_tests {
         // edge stamped a role via groups.
         stash.insert("user_id".into(), json!("prospect@example.com"));
         stash.insert("groups".into(), json!(["viewer"]));
-        let creds = a.get_auth_token(&stash);
+        let creds = a.roles(&stash);
         assert!(creds.contains(&"viewer".to_string()));
-        assert!(!a.authorize_action(&creds, "write"));
-        assert!(a.authorize_action(&creds, "read"));
+        assert!(!a.permits(&creds, "write"));
+        assert!(a.permits(&creds, "read"));
     }
 }

@@ -78,7 +78,7 @@ Each rule the three builders were given, verified, corrected, or extended.
 
 ### Rule 1 — Wrap at ingress. **Correct, and under-specified.**
 
-`Envelope { id, payload, created_at, deleted, authorized_tokens }`
+`Envelope { id, payload, created_at, deleted, auth }`
 (`meshql-core/src/lib.rs:20-27`). The connector supplies all five. Three of them
 are traps:
 
@@ -666,9 +666,9 @@ fake rather than a real API. `CertStore` needs two methods (`cert.rs:21-31`):
 
 Three adaptations an ingress `CertStore` needs, each of which teaches something:
 
-1. `certify_snapshot_then_stream` asserts `after.authorized_tokens == ["cert"]`
+1. `certify_snapshot_then_stream` asserts `after.auth` is `["cert"]`
    (`cert.rs:148-153`). Ingress tokens come from config, so configure the fake
-   source with `authorized_tokens = ["cert"]`.
+   source with the mark `["cert"]`.
 2. `certify_positions_are_present_and_distinct` (`cert.rs:160-186`) is the test
    that catches a bare-timestamp cursor. If your fake serves three records with
    the same modification timestamp — and it should, because that is the case

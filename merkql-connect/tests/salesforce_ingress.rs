@@ -82,7 +82,7 @@ fn options(server: &MockServer) -> SalesforceOptions {
         sobject: "Account".to_string(),
         fields: vec!["Name".to_string()],
         entity: "accounts".to_string(),
-        authorized_tokens: vec!["farm".to_string()],
+        auth: vec!["farm".to_string()].into(),
         auth: SalesforceAuth::ClientCredentials,
         // Long enough that the loop parks rather than spinning once the window
         // has been consumed, so a test taking N records is not racing a poller.
@@ -258,7 +258,10 @@ async fn a_cold_start_snapshots_then_streams_from_the_captured_position() {
         assert_eq!(record.source.connector, "salesforce");
         assert_eq!(record.source.entity, "accounts");
         let envelope = record.after.as_ref().unwrap();
-        assert_eq!(envelope.authorized_tokens, vec!["farm".to_string()]);
+        assert_eq!(
+            envelope.auth,
+            meshql_core::AuthMark::from(vec!["farm".to_string()])
+        );
         assert_eq!(envelope.payload["_sobject"], json!("Account"));
         assert!(
             envelope.payload.get("attributes").is_none(),
@@ -615,7 +618,7 @@ async fn a_source_with_no_authorized_tokens_refuses_to_open() {
     mock_token(&server).await;
 
     let mut options = options(&server);
-    options.authorized_tokens.clear();
+    options.auth.clear();
     let err = must_fail(
         SalesforceSource::with_credentials(options, Credentials::new("id", "secret", None)).await,
         "CRM data must not become public by omission",

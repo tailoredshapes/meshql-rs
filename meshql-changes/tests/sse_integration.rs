@@ -120,7 +120,7 @@ async fn create_and_delete_notifications_arrive_over_http() {
         .repo
         .create(
             Envelope::new("hen-1", payload("henrietta"), vec![]),
-            &["*".to_string()],
+            &meshql_core::TokenSession::new(vec!["*".to_string()]),
         )
         .await
         .unwrap();
@@ -140,7 +140,10 @@ async fn create_and_delete_notifications_arrive_over_http() {
         .unwrap();
     server
         .repo
-        .remove("hen-1", &["*".to_string()])
+        .remove(
+            "hen-1",
+            &meshql_core::TokenSession::new(vec!["*".to_string()]),
+        )
         .await
         .unwrap();
     let data = await_data_line(resp2, |d| d.contains("hen-1") && d.contains("true"))
@@ -174,13 +177,16 @@ async fn subscribers_only_see_envelopes_their_tokens_allow() {
         .repo
         .create(
             Envelope::new("secret-hen", payload("classified"), vec![]),
-            &["alice".to_string()],
+            &meshql_core::TokenSession::new(vec!["alice".to_string()]),
         )
         .await
         .unwrap();
     server
         .repo
-        .create(Envelope::new("public-hen", payload("open"), vec![]), &[])
+        .create(
+            Envelope::new("public-hen", payload("open"), vec![]),
+            &meshql_core::TokenSession::new(vec![]),
+        )
         .await
         .unwrap();
 
@@ -212,7 +218,7 @@ async fn entities_param_filters_the_stream() {
         .repo
         .create(
             Envelope::new("hen-x", payload("x"), vec![]),
-            &["*".to_string()],
+            &meshql_core::TokenSession::new(vec!["*".to_string()]),
         )
         .await
         .unwrap();

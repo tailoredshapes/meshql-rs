@@ -467,7 +467,10 @@ struct SqliteCert {
 impl CertStore for SqliteCert {
     async fn write(&self, envelope: Envelope) -> anyhow::Result<()> {
         self.repo
-            .create(envelope, &["cert".to_string()])
+            .create(
+                envelope,
+                &meshql_core::TokenSession::new(vec!["cert".to_string()]),
+            )
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         Ok(())
@@ -601,7 +604,7 @@ async fn an_interrupted_sqlite_snapshot_resumes_rather_than_restarting() {
         payload.insert("eggs".to_string(), json!(i));
         repo.create(
             Envelope::new(format!("hen-{i}"), payload, vec!["farm".to_string()]),
-            &["farm".to_string()],
+            &meshql_core::TokenSession::new(vec!["farm".to_string()]),
         )
         .await
         .unwrap();

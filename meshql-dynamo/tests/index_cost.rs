@@ -225,7 +225,7 @@ async fn put(collection: &DynamoCollection, meter: &CapacityMeter, env: Envelope
     let before = meter.snapshot();
     collection
         .repository
-        .create(env, &star())
+        .create(env, &meshql_core::TokenSession::new(star()))
         .await
         .expect("create");
     meter.snapshot().minus(&before).write_units()
@@ -250,7 +250,12 @@ async fn wait_for_index(
     for attempt in 0..60 {
         let found = collection
             .searcher
-            .find_all(template, &Stash::new(), &star(), now)
+            .find_all(
+                template,
+                &Stash::new(),
+                &meshql_core::TokenSession::new(star()),
+                now,
+            )
             .await
             .expect("search");
         if found.len() == expected {
@@ -295,7 +300,7 @@ async fn a_foreign_key_lookup_against_the_scan_it_replaces(client: &Client, chec
             total_bytes += item_size_bytes(&store::envelope_to_item(&env));
             collection
                 .repository
-                .create(env, &star())
+                .create(env, &meshql_core::TokenSession::new(star()))
                 .await
                 .expect("create");
         }
@@ -343,7 +348,7 @@ async fn a_foreign_key_lookup_against_the_scan_it_replaces(client: &Client, chec
         .find_all(
             template,
             &Stash::new(),
-            &star(),
+            &meshql_core::TokenSession::new(star()),
             chrono::Utc::now().timestamp_millis(),
         )
         .await
@@ -667,7 +672,10 @@ async fn parallel_scan_costs_more_on_a_small_table(client: &Client, checks: &mut
     for i in 0..3 {
         collection
             .repository
-            .create(envelope(&format!("s{i}"), "north", None, 200), &star())
+            .create(
+                envelope(&format!("s{i}"), "north", None, 200),
+                &meshql_core::TokenSession::new(star()),
+            )
             .await
             .expect("create");
     }
@@ -744,7 +752,10 @@ async fn the_index_cannot_resolve_the_latest_version_by_itself(
     for (id, fk) in [("mover", "tool"), ("stayer", "tool"), ("mover", "widget")] {
         collection
             .repository
-            .create(envelope(id, fk, None, 400), &star())
+            .create(
+                envelope(id, fk, None, 400),
+                &meshql_core::TokenSession::new(star()),
+            )
             .await
             .expect("create");
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -782,7 +793,7 @@ async fn the_index_cannot_resolve_the_latest_version_by_itself(
         .find_all(
             template,
             &Stash::new(),
-            &star(),
+            &meshql_core::TokenSession::new(star()),
             chrono::Utc::now().timestamp_millis(),
         )
         .await

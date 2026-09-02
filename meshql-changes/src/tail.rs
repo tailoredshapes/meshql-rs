@@ -3,27 +3,28 @@
 //! Searcher+Repository pair.
 //!
 //! Why payload hash: `find_all` rows are payload + `"id"` only — no
-//! Envelope metadata. Commit time and tokens are recovered by a point
-//! `Repository::read` per *changed* envelope (a handful per poll, not
+//! Envelope metadata. Commit time and the authorization mark are recovered by
+//! a point `Repository::read` per *changed* envelope (a handful per poll, not
 //! N+1 over the table).
 //!
 //! Known blind spots (inherent to the row surface):
 //! - A byte-identical payload rewrite is not notified (hash unchanged) —
 //!   no refetch would show anything new.
-//! - A token-only ACL change with an identical payload is likewise
-//!   undetectable; stale tokens are kept until the next payload change or
+//! - An authorization-only change with an identical payload is likewise
+//!   undetectable; a stale mark is kept until the next payload change or
 //!   delete.
 //! - Within one poll, events across *different* ids follow `find_all` row
 //!   order; per-id ordering by `created_at` holds, which is what the
 //!   idempotent-refetch contract needs.
 //!
-//! Backend caveat (see spec): the `["*"]` poll relies on searchers letting
-//! a wildcard caller see everything. All backends, including Mongo as of
-//! the auth-token fix in `MongoSearcher::build_pipeline`, honor this.
+//! The poll itself runs under an explicit system session. A tail is a caller
+//! outside any request, and there is no unset session — "no session means
+//! allow" is exactly the bypass the plugin-owns-authorization design removes,
+//! so the tail names what it is instead of leaving the question open.
 
 use crate::{ChangeEvent, ChangeSource};
 use async_trait::async_trait;
-use meshql_core::{Repository, Searcher, Stash};
+use meshql_core::{AuthMark, Repository, Searcher, Stash, SystemSession};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -31,7 +32,10 @@ use std::sync::Arc;
 
 struct Known {
     payload_hash: u64,
-    tokens: Vec<String>,
+    /// The last authorization mark seen for this id. A deletion tombstone can
+    /// arrive carrying nothing, so this is what a subscriber's session is
+    /// asked about when deciding who hears about the delete.
+    auth: AuthMark,
 }
 
 pub struct SearcherTail {
@@ -95,7 +99,7 @@ impl ChangeSource for SearcherTail {
         let now_ms = chrono::Utc::now().timestamp_millis();
         let rows: Vec<Stash> = self
             .searcher
-            .find_all("{}", &Stash::new(), &["*".to_string()], now_ms)
+            .find_all("{}", &Stash::new(), &SystemSession, now_ms)
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
@@ -104,7 +108,6 @@ impl ChangeSource for SearcherTail {
         let mut staged_upserts: Vec<(String, Known)> = Vec::new();
         let mut staged_removals: Vec<String> = Vec::new();
         let mut present: HashSet<String> = HashSet::new();
-        let wildcard = ["*".to_string()];
 
         for row in &rows {
             let Some(id) = row.get("id").and_then(|v| v.as_str()).map(String::from) else {
@@ -112,18 +115,18 @@ impl ChangeSource for SearcherTail {
             };
             present.insert(id.clone());
             let row_hash = Self::hash_row(row);
-            let last_known_tokens = match state.get(&id) {
+            let last_known_auth = match state.get(&id) {
                 None => None, // create
-                Some(known) if known.payload_hash != row_hash => Some(known.tokens.clone()),
+                Some(known) if known.payload_hash != row_hash => Some(known.auth.clone()),
                 Some(_) => continue, // unchanged
             };
 
-            // Point-read to recover commit time + tokens. If the envelope
+            // Point-read to recover commit time + the mark. If the envelope
             // vanished between find_all and this read (delete race), emit a
-            // delete with last-known tokens instead.
+            // delete carrying the last known mark instead.
             match self
                 .repository
-                .read(&id, &wildcard, None)
+                .read(&id, &SystemSession, None)
                 .await
                 .map_err(|e| anyhow::anyhow!(e.to_string()))?
             {
@@ -132,7 +135,7 @@ impl ChangeSource for SearcherTail {
                         id.clone(),
                         Known {
                             payload_hash: row_hash,
-                            tokens: env.authorized_tokens.clone(),
+                            auth: env.auth.clone(),
                         },
                     ));
                     out.push(ChangeEvent {
@@ -140,7 +143,7 @@ impl ChangeSource for SearcherTail {
                         id,
                         created_at: env.created_at.timestamp_millis(),
                         deleted: false,
-                        authorized_tokens: env.authorized_tokens,
+                        auth: env.auth,
                         cursor: None,
                         payload: None,
                     });
@@ -152,7 +155,7 @@ impl ChangeSource for SearcherTail {
                         id,
                         created_at: now_ms,
                         deleted: true,
-                        authorized_tokens: last_known_tokens.unwrap_or_default(),
+                        auth: last_known_auth.unwrap_or_default(),
                         cursor: None,
                         payload: None,
                     });
@@ -173,7 +176,7 @@ impl ChangeSource for SearcherTail {
                 id: id.clone(),
                 created_at: now_ms,
                 deleted: true,
-                authorized_tokens: known.tokens.clone(),
+                auth: known.auth.clone(),
                 cursor: None,
                 payload: None,
             });
@@ -194,7 +197,7 @@ impl ChangeSource for SearcherTail {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use meshql_core::{Envelope, MeshqlError, Result as CoreResult};
+    use meshql_core::{Envelope, MeshqlError, Result as CoreResult, Session};
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -214,7 +217,7 @@ mod tests {
             &self,
             _t: &str,
             _a: &Stash,
-            _c: &[String],
+            _session: &dyn Session,
             _at: i64,
         ) -> CoreResult<Option<Stash>> {
             unimplemented!("not used by SearcherTail")
@@ -223,7 +226,7 @@ mod tests {
             &self,
             _t: &str,
             _a: &Stash,
-            _c: &[String],
+            _session: &dyn Session,
             _at: i64,
         ) -> CoreResult<Vec<Stash>> {
             let mut row_a = Stash::new();
@@ -242,13 +245,13 @@ mod tests {
 
     #[async_trait]
     impl Repository for FlakyReadRepo {
-        async fn create(&self, _e: Envelope, _t: &[String]) -> CoreResult<Envelope> {
+        async fn create(&self, _e: Envelope, _session: &dyn Session) -> CoreResult<Envelope> {
             unimplemented!()
         }
         async fn read(
             &self,
             id: &str,
-            _t: &[String],
+            _session: &dyn Session,
             _at: Option<chrono::DateTime<chrono::Utc>>,
         ) -> CoreResult<Option<Envelope>> {
             // Fail exactly once, and only on row-b — AFTER row-a's read
@@ -260,22 +263,30 @@ mod tests {
             payload.insert("name".to_string(), json!("recovered"));
             Ok(Some(Envelope::new(id, payload, vec!["team".to_string()])))
         }
-        async fn list(&self, _t: &[String]) -> CoreResult<Vec<Envelope>> {
+        async fn list(&self, _session: &dyn Session) -> CoreResult<Vec<Envelope>> {
             unimplemented!()
         }
-        async fn remove(&self, _id: &str, _t: &[String]) -> CoreResult<bool> {
+        async fn remove(&self, _id: &str, _session: &dyn Session) -> CoreResult<bool> {
             unimplemented!()
         }
-        async fn create_many(&self, _e: Vec<Envelope>, _t: &[String]) -> CoreResult<Vec<Envelope>> {
+        async fn create_many(
+            &self,
+            _e: Vec<Envelope>,
+            _session: &dyn Session,
+        ) -> CoreResult<Vec<Envelope>> {
             unimplemented!()
         }
-        async fn read_many(&self, _ids: &[String], _t: &[String]) -> CoreResult<Vec<Envelope>> {
+        async fn read_many(
+            &self,
+            _ids: &[String],
+            _session: &dyn Session,
+        ) -> CoreResult<Vec<Envelope>> {
             unimplemented!()
         }
         async fn remove_many(
             &self,
             _ids: &[String],
-            _t: &[String],
+            _session: &dyn Session,
         ) -> CoreResult<std::collections::HashMap<String, bool>> {
             unimplemented!()
         }
@@ -284,7 +295,7 @@ mod tests {
         async fn list_versions(
             &self,
             _id: &str,
-            _tokens: &[String],
+            _session: &dyn Session,
         ) -> meshql_core::Result<Vec<meshql_core::versions::VersionRef>> {
             Ok(Vec::new())
         }
@@ -293,7 +304,7 @@ mod tests {
             &self,
             _id: &str,
             _token: &str,
-            _tokens: &[String],
+            _session: &dyn Session,
         ) -> meshql_core::Result<Option<meshql_core::Envelope>> {
             Ok(None)
         }
@@ -328,6 +339,6 @@ mod tests {
         assert!(events.iter().all(|e| !e.deleted));
         assert!(events
             .iter()
-            .all(|e| e.authorized_tokens == vec!["team".to_string()]));
+            .all(|e| e.auth.as_parts() == ["team".to_string()]));
     }
 }

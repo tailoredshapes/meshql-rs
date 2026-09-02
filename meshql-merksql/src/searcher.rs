@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use handlebars::Handlebars;
 use merkql::broker::BrokerRef;
 use merkql::consumer::{ConsumerConfig, OffsetReset};
-use meshql_core::{Envelope, MeshqlError, Result, Searcher, Stash};
+use meshql_core::{Envelope, MeshqlError, Operation, Result, Searcher, Session, Stash};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -112,7 +112,7 @@ impl Searcher for MerksqlSearcher {
         &self,
         template: &str,
         args: &Stash,
-        creds: &[String],
+        session: &dyn Session,
         at: i64,
     ) -> Result<Option<Stash>> {
         let query = self.render_template(template, args)?;
@@ -125,7 +125,7 @@ impl Searcher for MerksqlSearcher {
         let result = records
             .into_iter()
             .find(|(env, raw_json)| {
-                matcher::matches(raw_json, &query) && meshql_core::envelope_visible_to(env, creds)
+                matcher::matches(raw_json, &query) && session.is_authorized(Operation::Read, env)
             })
             .map(|(env, _)| convert::envelope_to_stash(&env));
 
@@ -136,7 +136,7 @@ impl Searcher for MerksqlSearcher {
         &self,
         template: &str,
         args: &Stash,
-        creds: &[String],
+        session: &dyn Session,
         at: i64,
     ) -> Result<Vec<Stash>> {
         let query = self.render_template(template, args)?;
@@ -154,7 +154,7 @@ impl Searcher for MerksqlSearcher {
         let mut results: Vec<Stash> = records
             .into_iter()
             .filter(|(env, raw_json)| {
-                matcher::matches(raw_json, &query) && meshql_core::envelope_visible_to(env, creds)
+                matcher::matches(raw_json, &query) && session.is_authorized(Operation::Read, env)
             })
             .map(|(env, _)| convert::envelope_to_stash(&env))
             .collect();

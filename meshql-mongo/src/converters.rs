@@ -1,6 +1,6 @@
 use bson::{doc, Bson, Document};
 use chrono::DateTime;
-use meshql_core::{Envelope, Stash};
+use meshql_core::{AuthMark, Envelope, Stash};
 use serde_json::{Map, Value};
 
 pub fn stash_to_doc(stash: &Stash) -> Document {
@@ -18,8 +18,11 @@ pub fn doc_to_stash(doc: &Document) -> Stash {
 }
 
 pub fn envelope_to_document(env: &Envelope) -> Document {
+    // The mark is written out verbatim, in the same document as the payload.
+    // Storage does not read it back for any purpose but handing it to a plugin.
     let tokens: Vec<Bson> = env
-        .authorized_tokens
+        .auth
+        .as_parts()
         .iter()
         .map(|s| Bson::String(s.clone()))
         .collect();
@@ -37,7 +40,7 @@ pub fn document_to_envelope(doc: &Document) -> Option<Envelope> {
     let created_at_bson = doc.get_datetime("createdAt").ok()?;
     let created_at: DateTime<chrono::Utc> = created_at_bson.to_chrono();
     let deleted = doc.get_bool("deleted").unwrap_or(false);
-    let authorized_tokens = doc
+    let auth: AuthMark = doc
         .get_array("authorizedTokens")
         .unwrap_or(&vec![])
         .iter()
@@ -51,7 +54,7 @@ pub fn document_to_envelope(doc: &Document) -> Option<Envelope> {
         payload,
         created_at,
         deleted,
-        authorized_tokens,
+        auth,
     })
 }
 

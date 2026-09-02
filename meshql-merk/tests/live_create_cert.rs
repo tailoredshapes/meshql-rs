@@ -119,7 +119,7 @@ async fn create_lands_durably_in_a_real_directory_bucket() {
     assert_eq!(ids, expected);
 
     for env in &read_back {
-        assert_eq!(env.authorized_tokens, star());
+        assert_eq!(env.auth, meshql_core::AuthMark::from(star()));
         assert!(!env.deleted);
         assert!(env.payload.get("body").is_some());
     }
@@ -142,7 +142,9 @@ async fn unique_keys_spread_across_partitions() {
     let batch: Vec<Envelope> = (0..40)
         .map(|i| envelope(&uuid::Uuid::new_v4().to_string(), &format!("b{i}")))
         .collect();
-    repo.create_many(batch, &star()).await.unwrap();
+    repo.create_many(batch, &meshql_core::TokenSession::new(star()))
+        .await
+        .unwrap();
 
     let topic_handle = broker.topic(&topic).unwrap();
     let mut occupied = 0;
@@ -172,13 +174,30 @@ async fn reads_are_refused_against_a_real_bucket_too() {
         TopicPlan::from_toml_str(&format!("[[topic]]\nname=\"{topic}\"\npartitions=1\n")).unwrap();
     meshql_merk::provision(&broker, &plan).unwrap();
     let repo = MerkRepository::new(&broker, &topic);
-    repo.create(envelope("only", "x"), &star()).await.unwrap();
+    repo.create(
+        envelope("only", "x"),
+        &meshql_core::TokenSession::new(star()),
+    )
+    .await
+    .unwrap();
 
-    assert!(repo.read("only", &star(), None).await.is_err());
-    assert!(repo.list(&star()).await.is_err());
     assert!(repo
-        .read_many(&["only".to_string()], &star())
+        .read("only", &meshql_core::TokenSession::new(star()), None)
         .await
         .is_err());
-    assert!(repo.remove("only", &star()).await.is_err());
+    assert!(repo
+        .list(&meshql_core::TokenSession::new(star()))
+        .await
+        .is_err());
+    assert!(repo
+        .read_many(
+            &meshql_core::TokenSession::new(vec!["only".to_string()]),
+            &meshql_core::TokenSession::new(star())
+        )
+        .await
+        .is_err());
+    assert!(repo
+        .remove("only", &meshql_core::TokenSession::new(star()))
+        .await
+        .is_err());
 }

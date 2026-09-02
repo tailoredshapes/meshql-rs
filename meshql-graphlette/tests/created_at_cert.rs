@@ -38,7 +38,10 @@ async fn opted_in_schema_resolves_created_at_as_rfc3339() {
     let mut payload = Stash::new();
     payload.insert("name".to_string(), json!("sprocket"));
     let created = repo
-        .create(meshql_core::Envelope::new("widget-1", payload, vec![]), &[])
+        .create(
+            meshql_core::Envelope::new("widget-1", payload, vec![]),
+            &meshql_core::TokenSession::new(Vec::new()),
+        )
         .await
         .unwrap();
 
@@ -57,7 +60,14 @@ async fn opted_in_schema_resolves_created_at_as_rfc3339() {
         r#"{{ getWidget(id: "{}") {{ name createdAt }} }}"#,
         created.id
     );
-    let resp = schema.execute(query).await;
+    // The session is named explicitly. There is no unset session: a graphlette
+    // resolver with none fails closed, so a test that drives the schema
+    // directly has to say who is asking, exactly as the HTTP route does.
+    let session: std::sync::Arc<dyn meshql_core::Session> =
+        meshql_core::token_session(&["*".to_string()]);
+    let resp = schema
+        .execute(async_graphql::Request::new(query).data(session))
+        .await;
     assert!(resp.errors.is_empty(), "GraphQL errors: {:?}", resp.errors);
 
     let data = serde_json::to_value(resp.data).unwrap();

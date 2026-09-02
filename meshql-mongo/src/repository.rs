@@ -2,7 +2,9 @@ use crate::converters::{document_to_envelope, envelope_to_document};
 use bson::{doc, Bson, Document};
 use chrono::{DateTime, Utc};
 use meshql_core::versions::{version_order, version_token, VersionRef};
-use meshql_core::{envelope_visible_to, Auth, Envelope, MeshqlError, Repository, Result};
+use meshql_core::{
+    Auth, Envelope, MeshqlError, Operation, Repository, Result, Session, SystemSession,
+};
 use mongodb::Collection;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -59,11 +61,14 @@ impl MongoRepository {
 
 #[async_trait::async_trait]
 impl Repository for MongoRepository {
-    async fn create(&self, mut envelope: Envelope, tokens: &[String]) -> Result<Envelope> {
+    async fn create(&self, envelope: Envelope, session: &dyn Session) -> Result<Envelope> {
+        // The plugin owns the mark. Storage hands it the envelope and
+        // persists whatever comes back, verbatim, in the same write as the
+        // payload — so authorization can never become a dual write.
+        let mut envelope = session.stamp(envelope);
         if envelope.id.is_empty() {
             envelope.id = uuid::Uuid::new_v4().to_string();
         }
-        envelope.authorized_tokens = tokens.to_vec();
 
         let doc = envelope_to_document(&envelope);
         self.collection
@@ -77,12 +82,12 @@ impl Repository for MongoRepository {
     async fn read(
         &self,
         id: &str,
-        tokens: &[String],
+        session: &dyn Session,
         at: Option<DateTime<Utc>>,
     ) -> Result<Option<Envelope>> {
         let at_bson = bson::DateTime::from_chrono(at.unwrap_or_else(Utc::now));
 
-        // Visibility (meshql_core::envelope_visible_to) is applied in Rust to
+        // Authorization is applied in Rust, by asking the session, to
         // the resolved version, below — matching on authorizedTokens here
         // would both mis-state the convention (empty tokens are public, "*" is
         // visible to everyone) and resurface an older visible version of a
@@ -113,13 +118,13 @@ impl Repository for MongoRepository {
                 .deserialize_current()
                 .map_err(|e| MeshqlError::Storage(e.to_string()))?;
             let env = document_to_envelope(&doc);
-            Ok(env.filter(|e| !e.deleted && envelope_visible_to(e, tokens)))
+            Ok(env.filter(|e| !e.deleted && session.is_authorized(Operation::Read, e)))
         } else {
             Ok(None)
         }
     }
 
-    async fn list(&self, tokens: &[String]) -> Result<Vec<Envelope>> {
+    async fn list(&self, session: &dyn Session) -> Result<Vec<Envelope>> {
         let now = bson::DateTime::now();
 
         let pipeline = vec![
@@ -156,7 +161,7 @@ impl Repository for MongoRepository {
                 .map_err(|e| MeshqlError::Storage(e.to_string()))?;
             if let Some(env) = document_to_envelope(&doc) {
                 // Visibility applied after $group, on the latest version only.
-                if envelope_visible_to(&env, tokens) {
+                if session.is_authorized(Operation::Read, &env) {
                     results.push(env);
                 }
             }
@@ -165,10 +170,14 @@ impl Repository for MongoRepository {
         Ok(results)
     }
 
-    async fn remove(&self, id: &str, tokens: &[String]) -> Result<bool> {
-        let current = self.read(id, tokens, None).await?;
+    async fn remove(&self, id: &str, session: &dyn Session) -> Result<bool> {
+        // Resolve the record first, then ask the plugin about `Remove`
+        // specifically. Reusing the authorized `read` would silently make
+        // remove a synonym for read.
+        let current = self.read(id, &SystemSession, None).await?;
         match current {
             None => Ok(false),
+            Some(env) if !session.is_authorized(Operation::Remove, &env) => Ok(false),
             Some(mut env) => {
                 env.deleted = true;
                 env.created_at = Utc::now();
@@ -203,7 +212,7 @@ impl Repository for MongoRepository {
     async fn create_many(
         &self,
         envelopes: Vec<Envelope>,
-        tokens: &[String],
+        session: &dyn Session,
     ) -> Result<Vec<Envelope>> {
         // `insert_many` rejects an empty document list outright. An empty batch
         // is a no-op, not a failure.
@@ -211,14 +220,14 @@ impl Repository for MongoRepository {
             return Ok(Vec::new());
         }
 
-        // Same assignments `create` makes: a generated id for an empty one, and
-        // the caller's tokens replacing whatever the envelope arrived with.
+        // Same assignments `create` makes: the plugin's stamp, then a
+        // generated id for an empty one.
         let mut prepared = Vec::with_capacity(envelopes.len());
-        for mut env in envelopes {
+        for env in envelopes {
+            let mut env = session.stamp(env);
             if env.id.is_empty() {
                 env.id = uuid::Uuid::new_v4().to_string();
             }
-            env.authorized_tokens = tokens.to_vec();
             prepared.push(env);
         }
 
@@ -248,7 +257,7 @@ impl Repository for MongoRepository {
         Ok(prepared)
     }
 
-    async fn read_many(&self, ids: &[String], tokens: &[String]) -> Result<Vec<Envelope>> {
+    async fn read_many(&self, ids: &[String], session: &dyn Session) -> Result<Vec<Envelope>> {
         let bson_ids: Vec<Bson> = ids.iter().map(|s| Bson::String(s.clone())).collect();
         let now = bson::DateTime::now();
 
@@ -287,7 +296,7 @@ impl Repository for MongoRepository {
                 .map_err(|e| MeshqlError::Storage(e.to_string()))?;
             if let Some(env) = document_to_envelope(&doc) {
                 // Visibility applied after $group, on the latest version only.
-                if envelope_visible_to(&env, tokens) {
+                if session.is_authorized(Operation::Read, &env) {
                     results.push(env);
                 }
             }
@@ -299,21 +308,21 @@ impl Repository for MongoRepository {
     async fn remove_many(
         &self,
         ids: &[String],
-        tokens: &[String],
+        session: &dyn Session,
     ) -> Result<HashMap<String, bool>> {
         let mut results = HashMap::new();
         for id in ids {
-            let deleted = self.remove(id, tokens).await?;
+            let deleted = self.remove(id, session).await?;
             results.insert(id.clone(), deleted);
         }
         Ok(results)
     }
-    async fn list_versions(&self, id: &str, tokens: &[String]) -> Result<Vec<VersionRef>> {
+    async fn list_versions(&self, id: &str, session: &dyn Session) -> Result<Vec<VersionRef>> {
         let envelopes = self.all_versions(id).await?;
         Ok(envelopes
             .iter()
             .map(|e| {
-                if envelope_visible_to(e, tokens) {
+                if session.is_authorized(Operation::Read, e) {
                     VersionRef::visible(e)
                 } else {
                     VersionRef::tombstone(e)
@@ -326,14 +335,14 @@ impl Repository for MongoRepository {
         &self,
         id: &str,
         token: &str,
-        tokens: &[String],
+        session: &dyn Session,
     ) -> Result<Option<Envelope>> {
         for env in self.all_versions(id).await? {
             if version_token(&env) != token {
                 continue;
             }
             // Unauthorized is not absent: the listing already reported it.
-            if !envelope_visible_to(&env, tokens) {
+            if !session.is_authorized(Operation::Read, &env) {
                 return Err(MeshqlError::Unauthorized);
             }
             return Ok(Some(env));

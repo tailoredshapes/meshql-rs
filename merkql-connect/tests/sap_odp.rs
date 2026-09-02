@@ -50,7 +50,7 @@ fn options(server_uri: &str, auth: SapAuthConfig) -> SapOdpOptions {
         entity: "sales_order".to_string(),
         key_properties: vec!["SalesOrder".to_string()],
         changed_at_property: Some("LastChangeDateTime".to_string()),
-        authorized_tokens: vec!["sap".to_string()],
+        auth: vec!["sap".to_string()].into(),
         page_size: 100,
         auth,
         // Short, because several tests wait for the next cycle. The idle path is
@@ -279,7 +279,10 @@ async fn an_odp_row_becomes_an_envelope_carrying_its_own_provenance() {
     assert!(!envelope.deleted);
     // Authorisation is configured, not invented per record: SAP carries no
     // meshql tokens.
-    assert_eq!(envelope.authorized_tokens, vec!["sap".to_string()]);
+    assert_eq!(
+        envelope.auth,
+        meshql_core::AuthMark::from(vec!["sap".to_string()])
+    );
     assert_eq!(envelope.payload["NetAmount"], json!("99.50"));
 
     // The queue's control columns are bookkeeping, not business data, and a fold
@@ -868,7 +871,7 @@ impl CertStore for OdpCert {
 
     async fn source(&self) -> anyhow::Result<Box<dyn CommitSource>> {
         let options = SapOdpOptions {
-            authorized_tokens: vec!["cert".to_string()],
+            auth: vec!["cert".to_string()].into(),
             // The suite's envelopes carry no timestamp, so `created_at` comes
             // from the monotonic observation clock — which is exactly the
             // production shape for an ODP with no last-changed field.

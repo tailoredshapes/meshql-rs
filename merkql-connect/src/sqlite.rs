@@ -221,7 +221,7 @@ impl SqliteSource {
             payload,
             created_at: DateTime::from_timestamp_millis(created_at_ms).unwrap_or_default(),
             deleted: deleted != 0,
-            authorized_tokens,
+            auth: authorized_tokens.into(),
         };
 
         let record = ChangeRecord::new(

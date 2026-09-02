@@ -4,12 +4,18 @@
 //! events. Every `ChangeSource` impl must pass all of these before merging.
 
 use crate::{ChangeEvent, ChangeSource};
-use meshql_core::{Envelope, Repository, Stash};
+use meshql_core::{Envelope, Repository, Stash, TokenSession};
 use serde_json::json;
 use std::time::Duration;
 
-fn wildcard() -> Vec<String> {
-    vec!["*".to_string()]
+/// The certification harness stands in for the auth plugin, exactly as a
+/// lette does. These suites drive the default token plugin.
+fn sess(tokens: &[&str]) -> TokenSession {
+    TokenSession::new(tokens.iter().map(|t| t.to_string()).collect())
+}
+
+fn wildcard() -> TokenSession {
+    sess(&["*"])
 }
 
 fn payload(name: &str) -> Stash {
@@ -32,13 +38,13 @@ fn unique_id() -> String {
 pub async fn test_detects_create(source: &dyn ChangeSource, repo: &dyn Repository) {
     drain(source).await; // settle any pre-existing state
 
-    // NB: Repository::create tags the envelope with its `tokens` argument
-    // (the caller's credentials become the ACL — the restlette convention),
-    // overwriting whatever Envelope::new was given.
+    // NB: Repository::create hands the envelope to the session's `stamp`, and
+    // the token plugin's stamp writes the caller's tokens onto it, overwriting
+    // whatever Envelope::new was given.
     let env = repo
         .create(
             Envelope::new(unique_id(), payload("henrietta"), vec![]),
-            &["farm-team".to_string()],
+            &sess(&["farm-team"]),
         )
         .await
         .expect("create");
@@ -51,7 +57,7 @@ pub async fn test_detects_create(source: &dyn ChangeSource, repo: &dyn Repositor
     assert!(!ev.deleted);
     assert_eq!(ev.entity, source.entity());
     assert_eq!(ev.created_at, env.created_at.timestamp_millis());
-    assert_eq!(ev.authorized_tokens, vec!["farm-team".to_string()]);
+    assert_eq!(ev.auth.as_parts(), ["farm-team".to_string()]);
 }
 
 /// An update (new version, same id, changed payload) is emitted.
@@ -114,7 +120,7 @@ pub async fn test_detects_delete(source: &dyn ChangeSource, repo: &dyn Repositor
     let id = unique_id();
     repo.create(
         Envelope::new(id.clone(), payload("doomed"), vec![]),
-        &["farm-team".to_string()],
+        &sess(&["farm-team"]),
     )
     .await
     .expect("create");
@@ -128,7 +134,7 @@ pub async fn test_detects_delete(source: &dyn ChangeSource, repo: &dyn Repositor
         .find(|e| e.id == id)
         .expect("delete event emitted");
     assert!(ev.deleted);
-    assert_eq!(ev.authorized_tokens, vec!["farm-team".to_string()]);
+    assert_eq!(ev.auth.as_parts(), ["farm-team".to_string()]);
 }
 
 /// Create+update+delete strictly between polls collapses to a delete.

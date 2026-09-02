@@ -306,10 +306,13 @@ impl RepositorySink {
             return Ok(());
         }
         let envelopes = std::mem::take(run);
-        let tokens = tokens.take().unwrap_or_default();
+        let _ = tokens.take();
         let count = envelopes.len();
+        // A connector writes outside any request, so it names an explicit
+        // system session. `SystemSession::stamp` leaves the envelope as given,
+        // which is what makes the mark the source already put on it survive.
         self.repository
-            .create_many(envelopes, &tokens)
+            .create_many(envelopes, &meshql_core::SystemSession)
             .await
             .with_context(|| {
                 format!("appending {count} records to queue topic '{}'", self.topic)
@@ -330,13 +333,11 @@ impl TopicSink for RepositorySink {
             )
         })?;
 
-        // The envelope's own tokens are the authority. Passing them back as
-        // the caller credentials is what a restlette POST does, and it keeps
-        // an adapter that filters on write from rejecting the connector's
-        // append.
-        let tokens = envelope.authorized_tokens.clone();
+        // The envelope's own mark is the authority. A connector writes outside
+        // any request, so it names an explicit system session, whose `stamp`
+        // leaves the envelope exactly as the source built it.
         self.repository
-            .create(envelope.clone(), &tokens)
+            .create(envelope.clone(), &meshql_core::SystemSession)
             .await
             .with_context(|| format!("appending to queue topic '{}'", self.topic))?;
         Ok(())
@@ -349,12 +350,10 @@ impl TopicSink for RepositorySink {
     /// round trips, which over a network is the whole cost of a bulk load.
     /// Adapters that still loop internally are no worse off than before.
     ///
-    /// All records must share one token set, which they do: the tokens come
-    /// from the envelope, and an ingress connector stamps every envelope from
-    /// the same configured list. A batch whose envelopes disagree is split
-    /// rather than being sent under one envelope's tokens — passing the wrong
-    /// caller credentials to an adapter that filters on write would either
-    /// reject the append or, worse, store rows nobody can read back.
+    /// Batched by authorization mark: an ingress connector stamps every
+    /// envelope from the same configured list, so in practice this is one run.
+    /// The grouping is kept because it keeps a batch homogeneous, which is what
+    /// an adapter that ever needs to route by mark would rely on.
     async fn append_batch(&self, records: &[ChangeRecord]) -> Result<()> {
         if records.is_empty() {
             return Ok(());
@@ -374,12 +373,13 @@ impl TopicSink for RepositorySink {
                 )
             })?;
 
+            let mark = envelope.auth.as_parts().to_vec();
             match &run_tokens {
-                Some(tokens) if tokens == &envelope.authorized_tokens => {}
-                None => run_tokens = Some(envelope.authorized_tokens.clone()),
+                Some(tokens) if tokens == &mark => {}
+                None => run_tokens = Some(mark),
                 Some(_) => {
                     self.flush(&mut run, &mut run_tokens).await?;
-                    run_tokens = Some(envelope.authorized_tokens.clone());
+                    run_tokens = Some(mark);
                 }
             }
             run.push(envelope.clone());
@@ -895,50 +895,50 @@ mod tests {
         async fn create(
             &self,
             envelope: Envelope,
-            tokens: &[String],
+            _session: &dyn meshql_core::Session,
         ) -> meshql_core::Result<Envelope> {
             self.seen
                 .lock()
                 .unwrap()
-                .push((envelope.id.clone(), tokens.to_vec()));
+                .push((envelope.id.clone(), envelope.auth.as_parts().to_vec()));
             Ok(envelope)
         }
         async fn read(
             &self,
             _: &str,
-            _: &[String],
+            _: &dyn meshql_core::Session,
             _: Option<chrono::DateTime<chrono::Utc>>,
         ) -> meshql_core::Result<Option<Envelope>> {
             unreachable!("a sink never reads")
         }
-        async fn list(&self, _: &[String]) -> meshql_core::Result<Vec<Envelope>> {
+        async fn list(&self, _: &dyn meshql_core::Session) -> meshql_core::Result<Vec<Envelope>> {
             unreachable!("a sink never reads")
         }
-        async fn remove(&self, _: &str, _: &[String]) -> meshql_core::Result<bool> {
+        async fn remove(&self, _: &str, _: &dyn meshql_core::Session) -> meshql_core::Result<bool> {
             unreachable!("a sink never removes")
         }
         async fn create_many(
             &self,
             envelopes: Vec<Envelope>,
-            tokens: &[String],
+            _session: &dyn meshql_core::Session,
         ) -> meshql_core::Result<Vec<Envelope>> {
             let mut seen = self.seen.lock().unwrap();
             for envelope in &envelopes {
-                seen.push((envelope.id.clone(), tokens.to_vec()));
+                seen.push((envelope.id.clone(), envelope.auth.as_parts().to_vec()));
             }
             Ok(envelopes)
         }
         async fn read_many(
             &self,
             _: &[String],
-            _: &[String],
+            _: &dyn meshql_core::Session,
         ) -> meshql_core::Result<Vec<Envelope>> {
             unreachable!("a sink never reads")
         }
         async fn remove_many(
             &self,
             _: &[String],
-            _: &[String],
+            _: &dyn meshql_core::Session,
         ) -> meshql_core::Result<std::collections::HashMap<String, bool>> {
             unreachable!("a sink never removes")
         }
@@ -947,7 +947,7 @@ mod tests {
         async fn list_versions(
             &self,
             _id: &str,
-            _tokens: &[String],
+            _session: &dyn meshql_core::Session,
         ) -> meshql_core::Result<Vec<meshql_core::versions::VersionRef>> {
             Ok(Vec::new())
         }
@@ -956,7 +956,7 @@ mod tests {
             &self,
             _id: &str,
             _token: &str,
-            _tokens: &[String],
+            _session: &dyn meshql_core::Session,
         ) -> meshql_core::Result<Option<meshql_core::Envelope>> {
             Ok(None)
         }
@@ -983,8 +983,8 @@ mod tests {
         assert_eq!(seen[0].0, "hen-1");
     }
 
-    /// The envelope's own tokens are passed back as the caller credentials, so
-    /// an adapter that filters on write does not reject the connector.
+    /// The envelope's own mark reaches storage untouched: the sink writes
+    /// under the system session, whose `stamp` leaves the envelope alone.
     #[tokio::test]
     async fn a_repository_sink_presents_the_envelopes_own_tokens() {
         let repo = Arc::new(RecordingRepo {
@@ -993,7 +993,7 @@ mod tests {
         let sink = RepositorySink::new("lay_report", Arc::clone(&repo) as Arc<dyn Repository>);
 
         let mut rec = record("hen-1", "1", Snapshot::False);
-        rec.after.as_mut().unwrap().authorized_tokens = vec!["farm-1".to_string()];
+        rec.after.as_mut().unwrap().auth = vec!["farm-1".to_string()].into();
         sink.append(&rec).await.unwrap();
 
         assert_eq!(repo.seen.lock().unwrap()[0].1, vec!["farm-1".to_string()]);
@@ -1163,8 +1163,9 @@ mod tests {
         );
     }
 
-    /// A `RepositorySink` batch is split where the token set changes, so no
-    /// envelope is ever written under another envelope's credentials.
+    /// A `RepositorySink` batch is split where the authorization mark changes,
+    /// so a batch is always homogeneous and no envelope's mark is ever
+    /// overwritten by its neighbour's.
     #[tokio::test]
     async fn a_repository_batch_splits_where_tokens_change() {
         let repo = Arc::new(RecordingRepo {
@@ -1173,11 +1174,11 @@ mod tests {
         let sink = RepositorySink::new("lay_report", Arc::clone(&repo) as Arc<dyn Repository>);
 
         let mut a = record("hen-1", "1", Snapshot::False);
-        a.after.as_mut().unwrap().authorized_tokens = vec!["farm-a".into()];
+        a.after.as_mut().unwrap().auth = vec!["farm-a".into()].into();
         let mut b = record("hen-2", "2", Snapshot::False);
-        b.after.as_mut().unwrap().authorized_tokens = vec!["farm-a".into()];
+        b.after.as_mut().unwrap().auth = vec!["farm-a".into()].into();
         let mut c = record("hen-3", "3", Snapshot::False);
-        c.after.as_mut().unwrap().authorized_tokens = vec!["farm-b".into()];
+        c.after.as_mut().unwrap().auth = vec!["farm-b".into()].into();
 
         sink.append_batch(&[a, b, c]).await.unwrap();
 

@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use handlebars::Handlebars;
 use meshql_core::{
-    envelope_order, envelope_visible_to, Envelope, MeshqlError, Result, Searcher, Stash,
+    envelope_order, Envelope, MeshqlError, Operation, Result, Searcher, Session, Stash,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -48,11 +48,13 @@ impl KsqlSearcher {
     /// ksqlDB pull queries accept no ORDER BY, and Kafka gives no ordering
     /// across partitions, so the sort has to happen client-side. Rows that fail
     /// to parse are dropped with a warning, as before.
-    fn ordered_visible(rows: &[HashMap<String, Value>], creds: &[String]) -> Vec<Envelope> {
+    fn ordered_visible(rows: &[HashMap<String, Value>], session: &dyn Session) -> Vec<Envelope> {
         let mut envelopes: Vec<Envelope> = rows
             .iter()
             .filter_map(|row| match row_to_envelope(row) {
-                Ok(env) if !env.deleted && envelope_visible_to(&env, creds) => Some(env),
+                Ok(env) if !env.deleted && session.is_authorized(Operation::Read, &env) => {
+                    Some(env)
+                }
                 Ok(_) => None,
                 Err(e) => {
                     warn!("Failed to parse row: {}", e);
@@ -71,7 +73,7 @@ impl Searcher for KsqlSearcher {
         &self,
         template: &str,
         args: &Stash,
-        creds: &[String],
+        session: &dyn Session,
         _at: i64,
     ) -> Result<Option<Stash>> {
         let query_obj = self.render_template(template, args)?;
@@ -95,7 +97,7 @@ impl Searcher for KsqlSearcher {
         match self.client.pull_query(&query).await {
             // First in canonical result order, not first in whatever order
             // ksqlDB happened to return the rows.
-            Ok(rows) => Ok(Self::ordered_visible(&rows, creds)
+            Ok(rows) => Ok(Self::ordered_visible(&rows, session)
                 .first()
                 .map(envelope_to_stash)),
             Err(e) => {
@@ -109,7 +111,7 @@ impl Searcher for KsqlSearcher {
         &self,
         template: &str,
         args: &Stash,
-        creds: &[String],
+        session: &dyn Session,
         _at: i64,
     ) -> Result<Vec<Stash>> {
         let query_obj = self.render_template(template, args)?;
@@ -133,7 +135,7 @@ impl Searcher for KsqlSearcher {
 
         match self.client.pull_query(&query).await {
             Ok(rows) => {
-                let mut results: Vec<Stash> = Self::ordered_visible(&rows, creds)
+                let mut results: Vec<Stash> = Self::ordered_visible(&rows, session)
                     .iter()
                     .map(envelope_to_stash)
                     .collect();

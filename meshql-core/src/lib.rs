@@ -3,7 +3,10 @@ pub mod config;
 pub mod error;
 pub mod testing;
 
-pub use auth::{envelope_visible_to, tokens_visible_to, Auth, AuthContext, NoAuth, StashKeyAuth};
+pub use auth::{
+    system_session, token_session, Auth, AuthContext, AuthMark, Identity, NoAuth, Operation,
+    Session, StashKeyAuth, SystemSession, TokenSession,
+};
 pub use config::{
     GraphletteConfig, InternalSingletonResolverConfig, InternalVectorResolverConfig, QueryConfig,
     RestletteConfig, RootConfig, RootConfigBuilder, ServerConfig, SingletonResolverConfig,
@@ -25,17 +28,22 @@ pub struct Envelope {
     pub payload: Stash,
     pub created_at: DateTime<Utc>,
     pub deleted: bool,
-    pub authorized_tokens: Vec<String>,
+    /// The plugin-owned authorization mark. Storage persists it verbatim and
+    /// never reads it; only a `Session` interprets it.
+    ///
+    /// Serialized under its historical name so stored rows need no migration.
+    #[serde(rename = "authorized_tokens", default)]
+    pub auth: AuthMark,
 }
 
 impl Envelope {
-    pub fn new(id: impl Into<String>, payload: Stash, tokens: Vec<String>) -> Self {
+    pub fn new(id: impl Into<String>, payload: Stash, auth: impl Into<AuthMark>) -> Self {
         Self {
             id: id.into(),
             payload,
             created_at: Utc::now(),
             deleted: false,
-            authorized_tokens: tokens,
+            auth: auth.into(),
         }
     }
 }
@@ -72,23 +80,26 @@ pub fn envelope_order(a: &Envelope, b: &Envelope) -> std::cmp::Ordering {
 
 #[async_trait::async_trait]
 pub trait Repository: Send + Sync {
-    async fn create(&self, envelope: Envelope, tokens: &[String]) -> Result<Envelope>;
+    async fn create(&self, envelope: Envelope, session: &dyn Session) -> Result<Envelope>;
     async fn read(
         &self,
         id: &str,
-        tokens: &[String],
+        session: &dyn Session,
         at: Option<DateTime<Utc>>,
     ) -> Result<Option<Envelope>>;
-    async fn list(&self, tokens: &[String]) -> Result<Vec<Envelope>>;
-    async fn remove(&self, id: &str, tokens: &[String]) -> Result<bool>;
+    async fn list(&self, session: &dyn Session) -> Result<Vec<Envelope>>;
+    async fn remove(&self, id: &str, session: &dyn Session) -> Result<bool>;
     async fn create_many(
         &self,
         envelopes: Vec<Envelope>,
-        tokens: &[String],
+        session: &dyn Session,
     ) -> Result<Vec<Envelope>>;
-    async fn read_many(&self, ids: &[String], tokens: &[String]) -> Result<Vec<Envelope>>;
-    async fn remove_many(&self, ids: &[String], tokens: &[String])
-        -> Result<HashMap<String, bool>>;
+    async fn read_many(&self, ids: &[String], session: &dyn Session) -> Result<Vec<Envelope>>;
+    async fn remove_many(
+        &self,
+        ids: &[String],
+        session: &dyn Session,
+    ) -> Result<HashMap<String, bool>>;
 
     /// Every version of one document, oldest first.
     ///
@@ -99,7 +110,7 @@ pub trait Repository: Send + Sync {
     /// Required. An adapter that cannot answer this fails its certification,
     /// which is the signal — a default returning "unsupported" would let an
     /// adapter fall out of conformance without anything saying so.
-    async fn list_versions(&self, id: &str, tokens: &[String]) -> Result<Vec<VersionRef>>;
+    async fn list_versions(&self, id: &str, session: &dyn Session) -> Result<Vec<VersionRef>>;
 
     /// Resolve one version by its token. Applies the same authorization as
     /// `read`.
@@ -107,7 +118,7 @@ pub trait Repository: Send + Sync {
         &self,
         id: &str,
         token: &str,
-        tokens: &[String],
+        session: &dyn Session,
     ) -> Result<Option<Envelope>>;
 }
 
@@ -117,14 +128,69 @@ pub trait Searcher: Send + Sync {
         &self,
         template: &str,
         args: &Stash,
-        creds: &[String],
+        session: &dyn Session,
         at: i64,
     ) -> Result<Option<Stash>>;
     async fn find_all(
         &self,
         template: &str,
         args: &Stash,
-        creds: &[String],
+        session: &dyn Session,
         at: i64,
     ) -> Result<Vec<Stash>>;
+}
+
+#[cfg(test)]
+mod envelope_wire_tests {
+    use super::*;
+
+    /// The mark changed type but not its persisted shape, which is what lets
+    /// existing rows migrate by doing nothing. Every adapter that serializes an
+    /// `Envelope` — merkql, merksql, ksql, dynamo — writes the same bytes it
+    /// wrote before, under the same key.
+    #[test]
+    fn the_mark_still_serializes_as_the_authorized_tokens_array() {
+        let env = Envelope::new("id-1", Stash::new(), vec!["alice".to_string()]);
+        let json = serde_json::to_value(&env).expect("an Envelope is serializable");
+        assert_eq!(
+            json.get("authorized_tokens"),
+            Some(&serde_json::json!(["alice"])),
+            "the mark must persist under its historical key, as a bare array"
+        );
+        assert!(
+            json.get("auth").is_none(),
+            "the Rust field name must not leak into the stored shape"
+        );
+    }
+
+    /// A row written before this change deserializes into the new type.
+    #[test]
+    fn a_pre_existing_row_still_reads_back() {
+        let stored = serde_json::json!({
+            "id": "id-1",
+            "payload": {"name": "sprocket"},
+            "created_at": "2026-01-01T00:00:00Z",
+            "deleted": false,
+            "authorized_tokens": ["alice", "bob"],
+        });
+        let env: Envelope = serde_json::from_value(stored).expect("an old row still parses");
+        assert_eq!(
+            env.auth.as_parts(),
+            ["alice".to_string(), "bob".to_string()]
+        );
+    }
+
+    /// And a row written before `authorized_tokens` existed at all is an empty
+    /// mark, not a parse error.
+    #[test]
+    fn a_row_with_no_mark_at_all_is_an_empty_mark() {
+        let stored = serde_json::json!({
+            "id": "id-1",
+            "payload": {},
+            "created_at": "2026-01-01T00:00:00Z",
+            "deleted": false,
+        });
+        let env: Envelope = serde_json::from_value(stored).expect("a mark-less row still parses");
+        assert!(env.auth.is_empty());
+    }
 }

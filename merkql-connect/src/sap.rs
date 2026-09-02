@@ -1012,7 +1012,7 @@ impl SapSource {
                 version,
                 key_properties: key_properties.to_vec(),
                 changed_at_property: changed_at_property.map(str::to_string),
-                authorized_tokens: authorized_tokens.to_vec(),
+                auth: authorized_tokens.to_vec().into(),
                 poll_interval,
             }),
         })

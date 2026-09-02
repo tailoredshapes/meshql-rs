@@ -14,24 +14,35 @@ Certification is still the contract for the parts they implement. An adapter nar
 ```rust
 #[async_trait::async_trait]
 pub trait Repository: Send + Sync {
-    async fn create(&self, envelope: Envelope, tokens: &[String]) -> Result<Envelope>;
-    async fn read(&self, id: &str, tokens: &[String], at: Option<DateTime<Utc>>)
+    async fn create(&self, envelope: Envelope, session: &dyn Session) -> Result<Envelope>;
+    async fn read(&self, id: &str, session: &dyn Session, at: Option<DateTime<Utc>>)
         -> Result<Option<Envelope>>;
-    async fn list(&self, tokens: &[String]) -> Result<Vec<Envelope>>;
-    async fn remove(&self, id: &str, tokens: &[String]) -> Result<bool>;
-    async fn create_many(&self, envelopes: Vec<Envelope>, tokens: &[String]) -> Result<Vec<Envelope>>;
-    async fn read_many(&self, ids: &[String], tokens: &[String]) -> Result<Vec<Envelope>>;
-    async fn remove_many(&self, ids: &[String], tokens: &[String]) -> Result<HashMap<String, bool>>;
+    async fn list(&self, session: &dyn Session) -> Result<Vec<Envelope>>;
+    async fn remove(&self, id: &str, session: &dyn Session) -> Result<bool>;
+    async fn create_many(&self, envelopes: Vec<Envelope>, session: &dyn Session) -> Result<Vec<Envelope>>;
+    async fn read_many(&self, ids: &[String], session: &dyn Session) -> Result<Vec<Envelope>>;
+    async fn remove_many(&self, ids: &[String], session: &dyn Session) -> Result<HashMap<String, bool>>;
+    async fn list_versions(&self, id: &str, session: &dyn Session) -> Result<Vec<VersionRef>>;
+    async fn read_version(&self, id: &str, token: &str, session: &dyn Session)
+        -> Result<Option<Envelope>>;
 }
 
 #[async_trait::async_trait]
 pub trait Searcher: Send + Sync {
-    async fn find(&self, template: &str, args: &Stash, creds: &[String], at: i64)
+    async fn find(&self, template: &str, args: &Stash, session: &dyn Session, at: i64)
         -> Result<Option<Stash>>;
-    async fn find_all(&self, template: &str, args: &Stash, creds: &[String], at: i64)
+    async fn find_all(&self, template: &str, args: &Stash, session: &dyn Session, at: i64)
         -> Result<Vec<Stash>>;
 }
 ```
+
+**Storage holds no credentials.** `tokens` used to be a parameter on every one
+of these methods, and handing every adapter author the credentials made
+answering the authorization question their job — eleven adapters answered it
+eleven ways and nothing detected the difference, because a wrong answer looks
+exactly like a correct one from outside. What an adapter gets now is a
+`Session` it can only ask, never interpret. See
+`meshql-cert/tests/features/contract/specs/auth-plugin-owns-authorization.md`.
 
 ## Semantics every adapter MUST honor
 
@@ -40,10 +51,11 @@ These are the contract, enforced by the certification suite:
 1. **Append-only versioning.** `create` with an existing `id` appends a new version (newer `created_at`); it never overwrites. Reads return the latest version per id.
 2. **Temporal reads.** `read(.., at: Some(t))` / `find(.., at)` return the latest version with `created_at <= t`. `at: None` (or current-time millis) means "now". The canonical query shape is a window per id: `ROW_NUMBER() OVER (PARTITION BY id ORDER BY created_at DESC)` filtered to row 1 (SQL adapters), or the equivalent `$sort`+`$group` aggregation (Mongo) — applied *after* the `created_at <= at` filter.
 3. **Soft delete.** `remove` appends a tombstone version (`deleted: true`). All read paths exclude records whose *latest applicable version* is deleted. A temporal read *before* the deletion still returns the record.
-4. **Token filtering on every read.** A record is visible iff its `authorized_tokens` is empty, contains `"*"`, the caller holds `"*"`, or the sets intersect (see `envelope_visible_to` in `meshql-core/src/auth.rs`). `create` stamps the caller's tokens onto the envelope.
+4. **Ask the plugin on every read; never answer for it.** A record is visible iff `session.is_authorized(Operation::Read, &envelope)` says so. The adapter does not know the rule and must not try to reconstruct one: the envelope's `auth` is an opaque `AuthMark` that storage persists verbatim, inside the same write as the payload, and never reads. `create` hands the envelope to `session.stamp(..)` and stores whatever comes back. `remove` resolves the record under `SystemSession` and then asks `Operation::Remove`, so remove is a real question rather than a synonym for read; the tombstone keeps the mark of the record it buries, so the change feed can still say who was entitled to hear about the deletion. There is **no unset session** — a caller outside a request (a worker, the change feed, a migration, a test inspecting storage) names `meshql_core::SystemSession` explicitly.
 5. **Template rendering.** Searchers render the Handlebars template with `args` into a JSON object, then translate keys. There are exactly **two** recognised key shapes, and a new adapter must honour both: `"id"` → the envelope id column/field, and `"payload.<field>"` → the payload path (Postgres: `(payload::jsonb)->>'breed' = $n`, see `meshql-postgres/src/query.rs`; SQLite: `json_extract(payload, '$.breed') = ?`; merkql: a literal dot-path against the serialized Envelope, `meshql-merkql/src/matcher.rs`). **A payload field written bare, without the `payload.` prefix, is not a supported template** — see SKILL.md, "Query templates: `payload.` is not optional". Existing adapters differ in how they fail on one (skip vs. no-match vs. SQL error), all of them silently; prefer to fail loudly if you are writing a new one. Always parameterize — never splice rendered values into SQL.
 6. **Searcher returns payloads, not envelopes.** `find`/`find_all` return the payload Stash with `id` merged in, ready for GraphQL resolution. Also merge in `createdAt` (RFC3339 string, from the Envelope's `created_at`) right next to `id` — this is what lets a `.graphql` type opt into the "honesty" as-of field (`createdAt: String`) with zero resolver code, since `meshql-graphlette`'s scalar field resolver is a generic `stash.get(&field_name)` lookup. Never merge in `deleted` — search results already exclude deleted/superseded versions, so there's nothing to expose.
-7. **Canonical result ordering.** A result set comes back in insertion order: sort by the *resolved* version's `created_at` (millisecond), tiebroken by envelope `id`, byte-ordered — `meshql_core::envelope_order`, certified by the ordering cases in `meshql-core/src/testing.rs`. Because the key is the resolved version's timestamp rather than the id's first appearance, a `limit` truncates a meaningful prefix instead of an arbitrary subset. Adapters that *do* have a monotonic physical sequence (merkql log offset, SQLite `rowid`) use it only to decide *which version* of an id resolves inside a millisecond — never as the primary sort key, because Postgres/MySQL/Mongo/ksql have no equivalent and cross-adapter equivalence is worth more than sub-millisecond fidelity.
+7. **Authorization is fetch-then-ask, and `limit` comes last.** An opaque mark cannot build a `WHERE` clause, so nothing is pushed into the query — not the visibility filter, and therefore not the `limit` either. Fetch, ask the session about each resolved envelope, *then* truncate, so a limit returns N **authorized** rows rather than being consumed by rows the caller never gets to see. A plugin may offer a translatable pushdown hint as an optimization; none does today, and an adapter that cannot translate a hint must ignore it (ignoring is always correct, misreading is not).
+8. **Canonical result ordering.** A result set comes back in insertion order: sort by the *resolved* version's `created_at` (millisecond), tiebroken by envelope `id`, byte-ordered — `meshql_core::envelope_order`, certified by the ordering cases in `meshql-core/src/testing.rs`. Because the key is the resolved version's timestamp rather than the id's first appearance, a `limit` truncates a meaningful prefix instead of an arbitrary subset. Adapters that *do* have a monotonic physical sequence (merkql log offset, SQLite `rowid`) use it only to decide *which version* of an id resolves inside a millisecond — never as the primary sort key, because Postgres/MySQL/Mongo/ksql have no equivalent and cross-adapter equivalence is worth more than sub-millisecond fidelity.
 
 ## Don't reach underneath the abstraction
 
@@ -74,7 +86,7 @@ Found by deliberately breaking each guard while writing `meshql-dynamo` and watc
 
 2. **The `at` cutoff is only ever exercised on millisecond boundaries.** Every seeded `created_at` in `testing.rs` comes from `DateTime::from_timestamp_millis` or is separated by whole seconds, so an adapter whose cutoff is off by one millisecond passes all of it. The case that would catch it: two versions of one id at `T` and `T + 400µs`, then `read(.., Some(T_ms))` asserting the *second* comes back, since the contract is `created_at_ms <= at_ms`. Worth writing against your own adapter until the shared suite has it.
 
-3. **Tombstone tokens are unspecified, and the adapters disagree.** `remove` appends a `deleted: true` version; nothing says whose `authorized_tokens` it carries. `meshql-merkql`, `meshql-mysql`, `meshql-mongo` and `meshql-ksql` preserve the resolved version's; `meshql-sqlite` and `meshql-postgres` stamp the *caller's* — they build `deleted_env` with the original tokens and then hand it to `create`, which overwrites them, so the code's visible intent is the opposite of its behaviour. No cert notices, because every read path resolves the latest version and then drops it as deleted regardless. It only becomes observable through a temporal read landing on the tombstone. **Do not read this as harmless** — it is unspecified behaviour in a security-relevant field, and the right fix is a cert case plus a decision, not six independent guesses.
+3. **Tombstone marks are now specified: the tombstone keeps the buried record's mark.** This used to be unspecified and the adapters disagreed — `meshql-sqlite` and `meshql-postgres` built `deleted_env` with the original tokens and then handed it to `create`, which overwrote them with the caller's, so the code's visible intent was the opposite of its behaviour. Every adapter now writes the tombstone under `SystemSession`, whose `stamp` leaves the envelope alone. Keep it that way: re-stamping a tombstone answers for the plugin, and the change feed reads that mark to decide who hears about the delete.
 
 ## What does NOT belong in an adapter
 

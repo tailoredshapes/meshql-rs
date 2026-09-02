@@ -146,7 +146,12 @@ async fn bare_payload_key_case(indexing: Indexing) {
     // below is about the prefix and not about an empty table.
     let prefixed = f
         .searcher
-        .find_all(r#"{"payload.type": "typeA"}"#, &Stash::new(), &star, now)
+        .find_all(
+            r#"{"payload.type": "typeA"}"#,
+            &Stash::new(),
+            &meshql_core::TokenSession::new(star.clone()),
+            now,
+        )
         .await
         .unwrap();
     assert_eq!(prefixed.len(), 2, "the prefixed form must work");
@@ -154,7 +159,12 @@ async fn bare_payload_key_case(indexing: Indexing) {
     for template in [r#"{"type": "typeA"}"#, r#"{"kind": "tool"}"#] {
         let results = f
             .searcher
-            .find_all(template, &Stash::new(), &star, now)
+            .find_all(
+                template,
+                &Stash::new(),
+                &meshql_core::TokenSession::new(star.clone()),
+                now,
+            )
             .await
             .unwrap();
         assert!(
@@ -166,7 +176,12 @@ async fn bare_payload_key_case(indexing: Indexing) {
 
         let one = f
             .searcher
-            .find(template, &Stash::new(), &star, now)
+            .find(
+                template,
+                &Stash::new(),
+                &meshql_core::TokenSession::new(star.clone()),
+                now,
+            )
             .await
             .unwrap();
         assert!(one.is_none(), "{template} must find nothing");
@@ -179,7 +194,7 @@ async fn bare_payload_key_case(indexing: Indexing) {
         .find_all(
             r#"{"payload.type": "typeA", "type": "typeA"}"#,
             &Stash::new(),
-            &star,
+            &meshql_core::TokenSession::new(star.clone()),
             now,
         )
         .await
@@ -215,7 +230,7 @@ async fn id_pushdown_case(indexing: Indexing) {
         .find(
             r#"{"id": "{{id}}", "payload.name": "alpha"}"#,
             &args,
-            &star,
+            &meshql_core::TokenSession::new(star.clone()),
             now,
         )
         .await
@@ -227,7 +242,7 @@ async fn id_pushdown_case(indexing: Indexing) {
         .find(
             r#"{"id": "{{id}}", "payload.name": "beta"}"#,
             &args,
-            &star,
+            &meshql_core::TokenSession::new(star.clone()),
             now,
         )
         .await
@@ -285,23 +300,37 @@ async fn the_index_cannot_resurrect_a_superseded_version() {
 
     // "mover" is typeA, then becomes typeB. "stayer" never moves.
     f.repo
-        .create(envelope("mover", "typeA"), &star)
+        .create(
+            envelope("mover", "typeA"),
+            &meshql_core::TokenSession::new(star.clone()),
+        )
         .await
         .unwrap();
     f.repo
-        .create(envelope("stayer", "typeA"), &star)
+        .create(
+            envelope("stayer", "typeA"),
+            &meshql_core::TokenSession::new(star.clone()),
+        )
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     f.repo
-        .create(envelope("mover", "typeB"), &star)
+        .create(
+            envelope("mover", "typeB"),
+            &meshql_core::TokenSession::new(star.clone()),
+        )
         .await
         .unwrap();
 
     let now = chrono::Utc::now().timestamp_millis();
     let found = f
         .searcher
-        .find_all(r#"{"payload.type": "typeA"}"#, &Stash::new(), &star, now)
+        .find_all(
+            r#"{"payload.type": "typeA"}"#,
+            &Stash::new(),
+            &meshql_core::TokenSession::new(star.clone()),
+            now,
+        )
         .await
         .unwrap();
     let ids: Vec<&str> = found.iter().map(|s| s["id"].as_str().unwrap()).collect();
@@ -323,7 +352,12 @@ async fn the_index_cannot_resurrect_a_superseded_version() {
     // that happens to be right.
     let moved = f
         .searcher
-        .find_all(r#"{"payload.type": "typeB"}"#, &Stash::new(), &star, now)
+        .find_all(
+            r#"{"payload.type": "typeB"}"#,
+            &Stash::new(),
+            &meshql_core::TokenSession::new(star.clone()),
+            now,
+        )
         .await
         .unwrap();
     let ids: Vec<&str> = moved.iter().map(|s| s["id"].as_str().unwrap()).collect();
@@ -346,7 +380,12 @@ async fn an_unindexed_field_is_refused_rather_than_scanned() {
 
     let err = indexed
         .searcher
-        .find_all(r#"{"payload.zone": "north"}"#, &Stash::new(), &star, now)
+        .find_all(
+            r#"{"payload.zone": "north"}"#,
+            &Stash::new(),
+            &meshql_core::TokenSession::new(star.clone()),
+            now,
+        )
         .await
         .expect_err("an unindexed field must not silently become an O(V) Scan");
     let message = err.to_string();
@@ -361,7 +400,12 @@ async fn an_unindexed_field_is_refused_rather_than_scanned() {
     let plain = SearcherFixture::seeded(Indexing::Off).await;
     let ok = plain
         .searcher
-        .find_all(r#"{"payload.zone": "north"}"#, &Stash::new(), &star, now)
+        .find_all(
+            r#"{"payload.zone": "north"}"#,
+            &Stash::new(),
+            &meshql_core::TokenSession::new(star.clone()),
+            now,
+        )
         .await
         .expect("the unindexed adapter still scans");
     assert!(ok.is_empty());

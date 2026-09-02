@@ -384,8 +384,16 @@ fn singleton_resolver_field(
                     serde_json::Value::String(id_val.to_string()),
                 );
                 let at = effective_at(parent);
-                let creds: Vec<String> = ctx.data_opt::<Vec<String>>().cloned().unwrap_or_default();
-                match s.find(&tmpl, &args, &creds, at).await {
+                let Some(session) = ctx.data_opt::<std::sync::Arc<dyn meshql_core::Session>>()
+                else {
+                    // There is no unset session. An absent one fails closed —
+                    // "no session means allow" is the bypass the plugin-owns-
+                    // authorization design exists to remove.
+                    return Err(async_graphql::Error::new(
+                        "no auth session on this request: refusing to read",
+                    ));
+                };
+                match s.find(&tmpl, &args, session.as_ref(), at).await {
                     Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stamp_at(stash, at)))),
                     Ok(None) => Ok(FieldValue::NONE),
                     Err(e) => Err(async_graphql::Error::new(e.to_string())),
@@ -459,8 +467,16 @@ fn vector_resolver_field(
                     serde_json::Value::String(id_val.to_string()),
                 );
                 let at = effective_at(parent);
-                let creds: Vec<String> = ctx.data_opt::<Vec<String>>().cloned().unwrap_or_default();
-                match s.find_all(&tmpl, &args, &creds, at).await {
+                let Some(session) = ctx.data_opt::<std::sync::Arc<dyn meshql_core::Session>>()
+                else {
+                    // There is no unset session. An absent one fails closed —
+                    // "no session means allow" is the bypass the plugin-owns-
+                    // authorization design exists to remove.
+                    return Err(async_graphql::Error::new(
+                        "no auth session on this request: refusing to read",
+                    ));
+                };
+                match s.find_all(&tmpl, &args, session.as_ref(), at).await {
                     Ok(stashes) => {
                         let items: Vec<FieldValue> = stashes
                             .into_iter()
@@ -509,8 +525,15 @@ fn internal_singleton_resolver_field(
                 serde_json::Value::String(id_val.to_string()),
             );
             let at = effective_at(parent);
-            let creds: Vec<String> = ctx.data_opt::<Vec<String>>().cloned().unwrap_or_default();
-            match s.find(&tmpl, &args, &creds, at).await {
+            let Some(session) = ctx.data_opt::<std::sync::Arc<dyn meshql_core::Session>>() else {
+                // There is no unset session. An absent one fails closed —
+                // "no session means allow" is the bypass the plugin-owns-
+                // authorization design exists to remove.
+                return Err(async_graphql::Error::new(
+                    "no auth session on this request: refusing to read",
+                ));
+            };
+            match s.find(&tmpl, &args, session.as_ref(), at).await {
                 Ok(Some(stash)) => Ok(Some(FieldValue::owned_any(stamp_at(stash, at)))),
                 Ok(None) => Ok(FieldValue::NONE),
                 Err(e) => Err(async_graphql::Error::new(e.to_string())),
@@ -550,8 +573,15 @@ fn internal_vector_resolver_field(
                 serde_json::Value::String(id_val.to_string()),
             );
             let at = effective_at(parent);
-            let creds: Vec<String> = ctx.data_opt::<Vec<String>>().cloned().unwrap_or_default();
-            match s.find_all(&tmpl, &args, &creds, at).await {
+            let Some(session) = ctx.data_opt::<std::sync::Arc<dyn meshql_core::Session>>() else {
+                // There is no unset session. An absent one fails closed —
+                // "no session means allow" is the bypass the plugin-owns-
+                // authorization design exists to remove.
+                return Err(async_graphql::Error::new(
+                    "no auth session on this request: refusing to read",
+                ));
+            };
+            match s.find_all(&tmpl, &args, session.as_ref(), at).await {
                 Ok(stashes) => {
                     let items: Vec<FieldValue> = stashes
                         .into_iter()
@@ -714,10 +744,18 @@ pub fn build_schema(
                             }
                         }
 
-                        let creds: Vec<String> =
-                            ctx.data_opt::<Vec<String>>().cloned().unwrap_or_default();
+                        let Some(session) =
+                            ctx.data_opt::<std::sync::Arc<dyn meshql_core::Session>>()
+                        else {
+                            // There is no unset session. An absent one fails closed —
+                            // "no session means allow" is the bypass the plugin-owns-
+                            // authorization design exists to remove.
+                            return Err(async_graphql::Error::new(
+                                "no auth session on this request: refusing to read",
+                            ));
+                        };
                         if is_singleton {
-                            match s.find(&tmpl, &args, &creds, at).await {
+                            match s.find(&tmpl, &args, session.as_ref(), at).await {
                                 Ok(Some(stash)) => {
                                     Ok(Some(FieldValue::owned_any(stamp_at(stash, at))))
                                 }
@@ -725,7 +763,7 @@ pub fn build_schema(
                                 Err(e) => Err(async_graphql::Error::new(e.to_string())),
                             }
                         } else {
-                            match s.find_all(&tmpl, &args, &creds, at).await {
+                            match s.find_all(&tmpl, &args, session.as_ref(), at).await {
                                 Ok(stashes) => {
                                     let items: Vec<FieldValue> = stashes
                                         .into_iter()
@@ -844,17 +882,17 @@ pub fn build_schema(
 pub struct GraphletteRouter;
 
 impl GraphletteRouter {
-    /// Build a graphlette route, no auth (all reads see `["*"]` credentials).
+    /// Build a graphlette route with `NoAuth`, which authorizes every read.
     pub fn build(path: &str, schema: Schema) -> Router {
         Self::build_with_auth(path, schema, Arc::new(meshql_core::NoAuth))
     }
 
-    /// Build a graphlette route that resolves the caller's tokens via the
-    /// provided `Auth`. The route reads the request-scoped `AuthContext`
-    /// extension (populated by edge middleware), calls
-    /// `auth.get_auth_token(&stash)`, and threads the resulting tokens
-    /// into the async-graphql execution context. Resolvers then filter
-    /// rows via `meshql_core::envelope_visible_to`.
+    /// Build a graphlette route that establishes a request-scoped auth
+    /// session via the provided `Auth`. The route reads the request-scoped
+    /// `AuthContext` extension (populated by edge middleware), calls
+    /// `auth.authenticate`, and threads the resulting `Session` into the
+    /// async-graphql execution context. Resolvers hand it to the searcher,
+    /// which asks it about every envelope it resolved.
     pub fn build_with_auth(path: &str, schema: Schema, auth: Arc<dyn meshql_core::Auth>) -> Router {
         let schema = Arc::new(schema);
         Router::new().route(
@@ -866,7 +904,8 @@ impl GraphletteRouter {
                     let auth = Arc::clone(&auth);
                     async move {
                         let stash = auth_ctx.map(|e| e.0 .0).unwrap_or_default();
-                        let tokens: Vec<String> = auth.get_auth_token(&stash);
+                        let session: Arc<dyn meshql_core::Session> =
+                            auth.authenticate(&meshql_core::AuthContext::new(stash));
                         let mut request: async_graphql::Request =
                             match serde_json::from_slice(&body) {
                                 Ok(r) => r,
@@ -880,7 +919,7 @@ impl GraphletteRouter {
                                         .into_response();
                                 }
                             };
-                        request = request.data(tokens);
+                        request = request.data(session);
                         let response = schema.execute(request).await;
                         let body = serde_json::json!({
                             "data": response.data,

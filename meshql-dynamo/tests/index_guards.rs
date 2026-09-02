@@ -100,9 +100,12 @@ async fn indexing_a_populated_table_is_refused_until_it_is_migrated() {
     let repo = DynamoRepository::new_with_client(client.clone(), &table)
         .await
         .expect("the plain table");
-    repo.create(envelope("old", "typeA"), &["*".to_string()])
-        .await
-        .unwrap();
+    repo.create(
+        envelope("old", "typeA"),
+        &meshql_core::TokenSession::new(vec!["*".to_string()]),
+    )
+    .await
+    .unwrap();
 
     // Now it adds `byType`. The index would not see "old".
     let message = refusal(
@@ -137,7 +140,7 @@ async fn indexing_a_populated_table_is_refused_until_it_is_migrated() {
         .find_all(
             r#"{"payload.type": "typeA"}"#,
             &Stash::new(),
-            &["*".to_string()],
+            &meshql_core::TokenSession::new(vec!["*".to_string()]),
             now,
         )
         .await
@@ -181,7 +184,10 @@ async fn indexing_an_empty_table_needs_no_migration() {
     // And it works: a record written after the index exists is found through it.
     collection
         .repository
-        .create(envelope("fresh", "typeA"), &["*".to_string()])
+        .create(
+            envelope("fresh", "typeA"),
+            &meshql_core::TokenSession::new(vec!["*".to_string()]),
+        )
         .await
         .unwrap();
     let now = chrono::Utc::now().timestamp_millis();
@@ -190,7 +196,7 @@ async fn indexing_an_empty_table_needs_no_migration() {
         .find_all(
             r#"{"payload.type": "typeA"}"#,
             &Stash::new(),
-            &["*".to_string()],
+            &meshql_core::TokenSession::new(vec!["*".to_string()]),
             now,
         )
         .await

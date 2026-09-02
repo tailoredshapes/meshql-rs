@@ -1,7 +1,9 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use meshql_core::versions::{version_order, version_token, VersionRef};
-use meshql_core::{envelope_visible_to, Envelope, MeshqlError, Repository, Result};
+use meshql_core::{
+    AuthMark, Envelope, MeshqlError, Operation, Repository, Result, Session, SystemSession,
+};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashMap;
 
@@ -63,7 +65,7 @@ impl SqliteRepository {
             .map_err(|e| MeshqlError::Storage(e.to_string()))?;
 
         let created_at = DateTime::from_timestamp_millis(created_at_ms).unwrap_or_default();
-        let authorized_tokens: Vec<String> =
+        let auth: AuthMark =
             serde_json::from_str(&tokens_json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
         let payload: meshql_core::Stash =
             serde_json::from_str(&payload_json).map_err(|e| MeshqlError::Parse(e.to_string()))?;
@@ -73,24 +75,26 @@ impl SqliteRepository {
             payload,
             created_at,
             deleted: deleted_i != 0,
-            authorized_tokens,
+            auth,
         })
     }
 }
 
 #[async_trait]
 impl Repository for SqliteRepository {
-    async fn create(&self, envelope: Envelope, tokens: &[String]) -> Result<Envelope> {
-        let mut env = envelope;
+    async fn create(&self, envelope: Envelope, session: &dyn Session) -> Result<Envelope> {
+        // The plugin owns the mark. Storage hands it the envelope and
+        // persists whatever comes back, verbatim, in the same INSERT as the
+        // payload — so authorization can never become a dual write.
+        let mut env = session.stamp(envelope);
         if env.id.is_empty() {
             env.id = uuid::Uuid::new_v4().to_string();
         }
-        env.authorized_tokens = tokens.to_vec();
 
         let created_at_ms = env.created_at.timestamp_millis();
         let deleted_i: i64 = if env.deleted { 1 } else { 0 };
-        let tokens_json = serde_json::to_string(&env.authorized_tokens)
-            .map_err(|e| MeshqlError::Parse(e.to_string()))?;
+        let tokens_json =
+            serde_json::to_string(&env.auth).map_err(|e| MeshqlError::Parse(e.to_string()))?;
         let payload_json =
             serde_json::to_string(&env.payload).map_err(|e| MeshqlError::Parse(e.to_string()))?;
 
@@ -112,7 +116,7 @@ impl Repository for SqliteRepository {
     async fn read(
         &self,
         id: &str,
-        tokens: &[String],
+        session: &dyn Session,
         at: Option<DateTime<Utc>>,
     ) -> Result<Option<Envelope>> {
         let cutoff_ms = match at {
@@ -149,7 +153,7 @@ impl Repository for SqliteRepository {
         match newest {
             None => Ok(None),
             Some(env) => {
-                if env.deleted || !envelope_visible_to(&env, tokens) {
+                if env.deleted || !session.is_authorized(Operation::Read, &env) {
                     Ok(None)
                 } else {
                     Ok(Some(env))
@@ -158,7 +162,7 @@ impl Repository for SqliteRepository {
         }
     }
 
-    async fn list(&self, tokens: &[String]) -> Result<Vec<Envelope>> {
+    async fn list(&self, session: &dyn Session) -> Result<Vec<Envelope>> {
         let rows = sqlx::query(
             "WITH latest AS (
                 SELECT id, created_at_ms, deleted, authorized_tokens, payload,
@@ -175,26 +179,33 @@ impl Repository for SqliteRepository {
         let mut results = Vec::new();
         for row in rows {
             let env = Self::row_to_envelope(&row)?;
-            if envelope_visible_to(&env, tokens) {
+            if session.is_authorized(Operation::Read, &env) {
                 results.push(env);
             }
         }
         Ok(results)
     }
 
-    async fn remove(&self, id: &str, tokens: &[String]) -> Result<bool> {
-        let current = self.read(id, tokens, None).await?;
+    async fn remove(&self, id: &str, session: &dyn Session) -> Result<bool> {
+        // Resolve the record first, then ask the plugin about `Remove`
+        // specifically. Reusing the authorized `read` would silently make
+        // remove a synonym for read.
+        let current = self.read(id, &SystemSession, None).await?;
         match current {
             None => Ok(false),
+            Some(env) if !session.is_authorized(Operation::Remove, &env) => Ok(false),
             Some(env) => {
                 let deleted_env = Envelope {
                     id: env.id,
                     payload: env.payload,
                     created_at: Utc::now(),
                     deleted: true,
-                    authorized_tokens: env.authorized_tokens,
+                    auth: env.auth,
                 };
-                self.create(deleted_env, tokens).await?;
+                // A tombstone keeps the mark of the record it buries, so the
+                // change feed can still say who is entitled to hear about the
+                // deletion. Re-stamping it would answer for the plugin.
+                self.create(deleted_env, &SystemSession).await?;
                 Ok(true)
             }
         }
@@ -203,19 +214,19 @@ impl Repository for SqliteRepository {
     async fn create_many(
         &self,
         envelopes: Vec<Envelope>,
-        tokens: &[String],
+        session: &dyn Session,
     ) -> Result<Vec<Envelope>> {
         let mut results = Vec::new();
         for env in envelopes {
-            results.push(self.create(env, tokens).await?);
+            results.push(self.create(env, session).await?);
         }
         Ok(results)
     }
 
-    async fn read_many(&self, ids: &[String], tokens: &[String]) -> Result<Vec<Envelope>> {
+    async fn read_many(&self, ids: &[String], session: &dyn Session) -> Result<Vec<Envelope>> {
         let mut results = Vec::new();
         for id in ids {
-            if let Some(env) = self.read(id, tokens, None).await? {
+            if let Some(env) = self.read(id, session, None).await? {
                 results.push(env);
             }
         }
@@ -225,11 +236,11 @@ impl Repository for SqliteRepository {
     async fn remove_many(
         &self,
         ids: &[String],
-        tokens: &[String],
+        session: &dyn Session,
     ) -> Result<HashMap<String, bool>> {
         let mut results = HashMap::new();
         for id in ids {
-            let deleted = self.remove(id, tokens).await?;
+            let deleted = self.remove(id, session).await?;
             results.insert(id.clone(), deleted);
         }
         Ok(results)
@@ -241,7 +252,7 @@ impl Repository for SqliteRepository {
     /// cannot port to Postgres or Mongo, which is why those two break ties not
     /// at all. Sorting in memory by `version_order` gives every adapter the
     /// same answer.
-    async fn list_versions(&self, id: &str, tokens: &[String]) -> Result<Vec<VersionRef>> {
+    async fn list_versions(&self, id: &str, session: &dyn Session) -> Result<Vec<VersionRef>> {
         let rows = sqlx::query(
             "SELECT id, created_at_ms, deleted, authorized_tokens, payload
              FROM envelopes WHERE id = ?",
@@ -260,7 +271,7 @@ impl Repository for SqliteRepository {
         Ok(envelopes
             .iter()
             .map(|e| {
-                if envelope_visible_to(e, tokens) {
+                if session.is_authorized(Operation::Read, e) {
                     VersionRef::visible(e)
                 } else {
                     VersionRef::tombstone(e)
@@ -273,7 +284,7 @@ impl Repository for SqliteRepository {
         &self,
         id: &str,
         token: &str,
-        tokens: &[String],
+        session: &dyn Session,
     ) -> Result<Option<Envelope>> {
         let rows = sqlx::query(
             "SELECT id, created_at_ms, deleted, authorized_tokens, payload
@@ -291,7 +302,7 @@ impl Repository for SqliteRepository {
             }
             // Unauthorized is not the same as absent: the listing already told
             // the caller this version exists.
-            if !envelope_visible_to(&env, tokens) {
+            if !session.is_authorized(Operation::Read, &env) {
                 return Err(MeshqlError::Unauthorized);
             }
             return Ok(Some(env));

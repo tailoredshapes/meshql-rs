@@ -158,7 +158,7 @@ async fn a_mounted_streamlette_streams_a_write_over_http() {
         .repo
         .create(
             Envelope::new("hen-1", payload("henrietta"), vec![]),
-            &["*".to_string()],
+            &meshql_core::TokenSession::new(vec!["*".to_string()]),
         )
         .await
         .unwrap();
@@ -193,9 +193,9 @@ async fn a_mounted_streamlette_streams_a_write_over_http() {
 ///
 /// If it delegated to `build_app_ext` instead of `build_app_with_auth`, the
 /// streamlette would get the caller's real `Auth` while every restlette and
-/// graphlette silently ran on `NoAuth`. `NoAuth::get_auth_token` returns
-/// `["*"]`, which sees every envelope — so bob would read alice's record and
-/// this test fails. It passes only when the real `Auth` reached the lettes.
+/// graphlette silently ran on `NoAuth`, whose session authorizes every read —
+/// so bob would read alice's record and this test fails. It passes only when
+/// the real `Auth` reached the lettes.
 #[tokio::test]
 async fn streamlettes_do_not_downgrade_the_lettes_to_noauth() {
     let server = start(Arc::new(StashKeyAuth::new("user"))).await;
@@ -205,7 +205,7 @@ async fn streamlettes_do_not_downgrade_the_lettes_to_noauth() {
         .repo
         .create(
             Envelope::new("secret-hen", payload("classified"), vec![]),
-            &["alice".to_string()],
+            &meshql_core::TokenSession::new(vec!["alice".to_string()]),
         )
         .await
         .unwrap();
@@ -256,7 +256,7 @@ async fn a_mounted_streamlette_filters_by_the_same_auth_as_the_lettes() {
         .repo
         .create(
             Envelope::new("secret-hen", payload("classified"), vec![]),
-            &["alice".to_string()],
+            &meshql_core::TokenSession::new(vec!["alice".to_string()]),
         )
         .await
         .unwrap();
@@ -264,7 +264,10 @@ async fn a_mounted_streamlette_filters_by_the_same_auth_as_the_lettes() {
     // timeout, proving the stream was live throughout.
     server
         .repo
-        .create(Envelope::new("public-hen", payload("open"), vec![]), &[])
+        .create(
+            Envelope::new("public-hen", payload("open"), vec![]),
+            &meshql_core::TokenSession::new(vec![]),
+        )
         .await
         .unwrap();
 

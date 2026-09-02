@@ -145,7 +145,7 @@ fn envelope_with_pad(id: &str, pad: usize) -> Envelope {
         payload,
         created_at: Utc::now(),
         deleted: false,
-        authorized_tokens: vec!["*".to_string()],
+        auth: vec!["*".to_string()].into(),
     }
 }
 
@@ -163,7 +163,7 @@ fn comparable(env: &Envelope) -> (String, String, bool, Vec<String>, Stash) {
         env.id.clone(),
         env.created_at.to_rfc3339(),
         env.deleted,
-        env.authorized_tokens.clone(),
+        env.auth.as_parts().to_vec(),
         env.payload.clone(),
     )
 }
@@ -208,7 +208,9 @@ async fn write_units_at_the_kilobyte_boundary(client: &Client, checks: &mut Chec
     for target in [200u64, 1023, 1024, 1025, 2048, 2049, 3000, 4096] {
         let (env, size) = envelope_of_size(&format!("w-{target}"), target);
         let before = meter.snapshot();
-        repo.create(env, &["*".to_string()]).await.expect("write");
+        repo.create(env, &meshql_core::TokenSession::new(vec!["*".to_string()]))
+            .await
+            .expect("write");
         let delta = meter.snapshot().minus(&before);
 
         checks.eq(
@@ -250,7 +252,10 @@ async fn a_temporal_read_is_half_an_rru_however_many_versions_exist(
     let mut stamps: Vec<DateTime<Utc>> = Vec::new();
     for _ in 0..50 {
         let (env, _) = envelope_of_size("hot", 300);
-        let written = repo.create(env, &["*".to_string()]).await.expect("write");
+        let written = repo
+            .create(env, &meshql_core::TokenSession::new(vec!["*".to_string()]))
+            .await
+            .expect("write");
         stamps.push(written.created_at);
         tokio::time::sleep(std::time::Duration::from_millis(3)).await;
     }
@@ -263,7 +268,11 @@ async fn a_temporal_read_is_half_an_rru_however_many_versions_exist(
     ] {
         let before = meter.snapshot();
         let found = repo
-            .read("hot", &["*".to_string()], at)
+            .read(
+                "hot",
+                &meshql_core::TokenSession::new(vec!["*".to_string()]),
+                at,
+            )
             .await
             .expect("read");
         let delta = meter.snapshot().minus(&before);
@@ -291,12 +300,17 @@ async fn a_temporal_read_is_half_an_rru_however_many_versions_exist(
     let ids: Vec<String> = (0..100).map(|i| format!("m-{i:04}")).collect();
     for id in &ids {
         let (env, _) = envelope_of_size(id, 300);
-        repo.create(env, &["*".to_string()]).await.expect("write");
+        repo.create(env, &meshql_core::TokenSession::new(vec!["*".to_string()]))
+            .await
+            .expect("write");
     }
     for k in [1usize, 10, 100] {
         let before = meter.snapshot();
         let found = repo
-            .read_many(&ids[..k], &["*".to_string()])
+            .read_many(
+                &ids[..k],
+                &meshql_core::TokenSession::new(vec!["*".to_string()]),
+            )
             .await
             .expect("read_many");
         let delta = meter.snapshot().minus(&before);
@@ -360,7 +374,9 @@ async fn a_search_costs_the_aggregate_bytes_examined(client: &Client, checks: &m
             let item = meshql_dynamo::store::envelope_to_item(&env);
             total_bytes += item_size_bytes(&item);
             let _ = size;
-            repo.create(env, &["*".to_string()]).await.expect("write");
+            repo.create(env, &meshql_core::TokenSession::new(vec!["*".to_string()]))
+                .await
+                .expect("write");
         }
     }
     let v_total = (m * versions_per_id) as u64;
@@ -377,7 +393,7 @@ async fn a_search_costs_the_aggregate_bytes_examined(client: &Client, checks: &m
         .find_all(
             r#"{"payload.kind": "bench"}"#,
             &Stash::new(),
-            &["*".to_string()],
+            &meshql_core::TokenSession::new(vec!["*".to_string()]),
             Utc::now().timestamp_millis(),
         )
         .await
@@ -413,7 +429,7 @@ async fn a_search_costs_the_aggregate_bytes_examined(client: &Client, checks: &m
         .find_all(
             r#"{"payload.kind": "bench"}"#,
             &Stash::new(),
-            &["*".to_string()],
+            &meshql_core::TokenSession::new(vec!["*".to_string()]),
             Utc.with_ymd_and_hms(2000, 1, 1, 0, 0, 0)
                 .unwrap()
                 .timestamp_millis(),
@@ -442,7 +458,7 @@ async fn a_search_costs_the_aggregate_bytes_examined(client: &Client, checks: &m
         .find_all(
             r#"{"payload.kind": "bench"}"#,
             &limited,
-            &["*".to_string()],
+            &meshql_core::TokenSession::new(vec!["*".to_string()]),
             Utc::now().timestamp_millis(),
         )
         .await
@@ -463,7 +479,7 @@ async fn a_search_costs_the_aggregate_bytes_examined(client: &Client, checks: &m
         .find_all(
             r#"{"id": "s-0007"}"#,
             &Stash::new(),
-            &["*".to_string()],
+            &meshql_core::TokenSession::new(vec!["*".to_string()]),
             Utc::now().timestamp_millis(),
         )
         .await
@@ -535,14 +551,23 @@ async fn metering_does_not_change_results(client: &Client, checks: &mut Checks) 
 
     for i in 0..20 {
         let (env, _) = envelope_of_size(&format!("n-{i:03}"), 400);
-        plain.create(env, &["*".to_string()]).await.expect("write");
+        plain
+            .create(env, &meshql_core::TokenSession::new(vec!["*".to_string()]))
+            .await
+            .expect("write");
     }
     // A tombstone and a superseded version, so the comparison covers the two
     // cases where version resolution actually has to decide something.
     let (env, _) = envelope_of_size("n-000", 500);
-    plain.create(env, &["*".to_string()]).await.expect("write");
     plain
-        .remove("n-001", &["*".to_string()])
+        .create(env, &meshql_core::TokenSession::new(vec!["*".to_string()]))
+        .await
+        .expect("write");
+    plain
+        .remove(
+            "n-001",
+            &meshql_core::TokenSession::new(vec!["*".to_string()]),
+        )
         .await
         .expect("remove");
 
@@ -555,8 +580,14 @@ async fn metering_does_not_change_results(client: &Client, checks: &mut Checks) 
     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
     let tokens = ["*".to_string()];
-    let a = plain.list(&tokens).await.expect("list");
-    let b = metered.list(&tokens).await.expect("list");
+    let a = plain
+        .list(&meshql_core::TokenSession::new(tokens.to_vec()))
+        .await
+        .expect("list");
+    let b = metered
+        .list(&meshql_core::TokenSession::new(tokens.to_vec()))
+        .await
+        .expect("list");
     checks.assert_true(
         "list() agrees with and without a meter",
         comparable_all(&a) == comparable_all(&b),
@@ -565,16 +596,36 @@ async fn metering_does_not_change_results(client: &Client, checks: &mut Checks) 
     // A pinned cutoff, not `None`: `None` means "now", and the two calls have
     // different nows.
     let pinned = Some(Utc::now());
-    let a = plain.read("n-000", &tokens, pinned).await.expect("read");
-    let b = metered.read("n-000", &tokens, pinned).await.expect("read");
+    let a = plain
+        .read(
+            "n-000",
+            &meshql_core::TokenSession::new(tokens.to_vec()),
+            pinned,
+        )
+        .await
+        .expect("read");
+    let b = metered
+        .read(
+            "n-000",
+            &meshql_core::TokenSession::new(tokens.to_vec()),
+            pinned,
+        )
+        .await
+        .expect("read");
     checks.assert_true(
         "read() agrees with and without a meter",
         a.as_ref().map(comparable) == b.as_ref().map(comparable),
     );
 
     let ids: Vec<String> = (0..20).map(|i| format!("n-{i:03}")).collect();
-    let a = plain.read_many(&ids, &tokens).await.expect("read_many");
-    let b = metered.read_many(&ids, &tokens).await.expect("read_many");
+    let a = plain
+        .read_many(&ids, &meshql_core::TokenSession::new(tokens.to_vec()))
+        .await
+        .expect("read_many");
+    let b = metered
+        .read_many(&ids, &meshql_core::TokenSession::new(tokens.to_vec()))
+        .await
+        .expect("read_many");
     checks.assert_true(
         "read_many() agrees with and without a meter",
         comparable_all(&a) == comparable_all(&b),
@@ -582,21 +633,41 @@ async fn metering_does_not_change_results(client: &Client, checks: &mut Checks) 
 
     let now = Utc::now().timestamp_millis();
     let a = plain_search
-        .find_all(r#"{"payload.kind": "bench"}"#, &Stash::new(), &tokens, now)
+        .find_all(
+            r#"{"payload.kind": "bench"}"#,
+            &Stash::new(),
+            &meshql_core::TokenSession::new(tokens.to_vec()),
+            now,
+        )
         .await
         .expect("search");
     let b = metered_search
-        .find_all(r#"{"payload.kind": "bench"}"#, &Stash::new(), &tokens, now)
+        .find_all(
+            r#"{"payload.kind": "bench"}"#,
+            &Stash::new(),
+            &meshql_core::TokenSession::new(tokens.to_vec()),
+            now,
+        )
         .await
         .expect("search");
     checks.assert_true("find_all() agrees with and without a meter", a == b);
 
     let a = plain_search
-        .find(r#"{"id": "n-005"}"#, &Stash::new(), &tokens, now)
+        .find(
+            r#"{"id": "n-005"}"#,
+            &Stash::new(),
+            &meshql_core::TokenSession::new(tokens.to_vec()),
+            now,
+        )
         .await
         .expect("find");
     let b = metered_search
-        .find(r#"{"id": "n-005"}"#, &Stash::new(), &tokens, now)
+        .find(
+            r#"{"id": "n-005"}"#,
+            &Stash::new(),
+            &meshql_core::TokenSession::new(tokens.to_vec()),
+            now,
+        )
         .await
         .expect("find");
     checks.assert_true("find() agrees with and without a meter", a == b);
@@ -638,7 +709,9 @@ async fn a_scan_pages_at_one_mebibyte(client: &Client, checks: &mut Checks) {
         total_bytes += item_size_bytes(&meshql_dynamo::store::envelope_to_item(&env));
         let repo = repo.clone();
         batch.push(tokio::spawn(async move {
-            repo.create(env, &["*".to_string()]).await.expect("write");
+            repo.create(env, &meshql_core::TokenSession::new(vec!["*".to_string()]))
+                .await
+                .expect("write");
         }));
         if batch.len() == 100 {
             for t in batch.drain(..) {
@@ -653,7 +726,10 @@ async fn a_scan_pages_at_one_mebibyte(client: &Client, checks: &mut Checks) {
     let expected_pages = total_bytes.div_ceil(1024 * 1024);
     let started = std::time::Instant::now();
     let before = meter.snapshot();
-    let listed = repo.list(&["*".to_string()]).await.expect("list");
+    let listed = repo
+        .list(&meshql_core::TokenSession::new(vec!["*".to_string()]))
+        .await
+        .expect("list");
     let elapsed = started.elapsed();
     let delta = meter.snapshot().minus(&before);
 
@@ -720,14 +796,19 @@ async fn calibrate_the_read_side_of_the_size_model(client: &Client, checks: &mut
                 payload,
                 created_at: fixed,
                 deleted: false,
-                authorized_tokens: vec!["*".to_string()],
+                auth: vec!["*".to_string()].into(),
             };
             per_item = item_size_bytes(&meshql_dynamo::store::envelope_to_item(&env));
-            repo.create(env, &["*".to_string()]).await.expect("write");
+            repo.create(env, &meshql_core::TokenSession::new(vec!["*".to_string()]))
+                .await
+                .expect("write");
         }
 
         let before = meter.snapshot();
-        let listed = repo.list(&["*".to_string()]).await.expect("list");
+        let listed = repo
+            .list(&meshql_core::TokenSession::new(vec!["*".to_string()]))
+            .await
+            .expect("list");
         let delta = meter.snapshot().minus(&before);
         assert_eq!(listed.len(), n, "calibration table is the wrong size");
 

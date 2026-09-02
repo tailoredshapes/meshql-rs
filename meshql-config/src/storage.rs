@@ -74,6 +74,9 @@ pub async fn open(def: &StorageDef, auth: Arc<dyn Auth>) -> Result<Store, Config
 
 /// Which storage types this build can open. Reported in the error so an
 /// operator learns what is possible rather than only what failed.
+// Each push is cfg-gated, so `vec![..]` cannot express this: which elements
+// exist is decided at compile time, not at the literal.
+#[allow(clippy::vec_init_then_push)]
 pub fn available() -> Vec<&'static str> {
     #[allow(unused_mut)]
     let mut v: Vec<&'static str> = Vec::new();

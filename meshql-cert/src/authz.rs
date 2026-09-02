@@ -16,8 +16,8 @@
 use axum::middleware::{self, Next};
 use axum::Router;
 use meshql_core::{
-    Auth, AuthContext, GraphletteConfig, Repository, RestletteConfig, RootConfig, Searcher,
-    ServerConfig, Stash, StashKeyAuth,
+    Auth, AuthContext, GraphletteConfig, Identity, Repository, RestletteConfig, RootConfig,
+    Searcher, ServerConfig, Stash, StashKeyAuth,
 };
 use std::sync::Arc;
 
@@ -49,18 +49,18 @@ type Query {
 "#;
 
 /// The `Auth` the certified server runs on: identity comes out of the
-/// request-scoped stash the edge populated. Deliberately *not* `NoAuth` —
-/// `NoAuth` resolves every caller to `["*"]`, which is the blind spot this
-/// whole suite exists to close.
+/// request-scoped stash the edge populated, and the token rules are the
+/// plugin's. Deliberately *not* `NoAuth` — `NoAuth` authorizes everything,
+/// which is the blind spot this whole suite exists to close.
 pub fn edge_auth() -> Arc<dyn Auth> {
     Arc::new(StashKeyAuth::new(IDENTITY_KEY))
 }
 
-/// Tokens the configured `Auth` resolves for a caller — the same computation
-/// the restlette performs when stamping an envelope, so a test can assert the
-/// stored tokens against it rather than against a hand-written literal.
+/// Tokens the configured plugin resolves for a caller — the same computation
+/// its session performs when stamping an envelope, so a test can assert the
+/// stored mark against it rather than against a hand-written literal.
 pub fn tokens_for(caller: &str) -> Vec<String> {
-    edge_auth().get_auth_token(&stash_for(caller))
+    StashKeyAuth::new(IDENTITY_KEY).identify(&stash_for(caller))
 }
 
 /// The stash the edge middleware would build for a caller. `None` identity
@@ -126,6 +126,19 @@ pub fn root_config() -> RootConfig {
 /// that still exercises the whole identity path: request header → `Auth` →
 /// envelope tokens → storage → searcher → response.
 pub async fn start_server(repo: Arc<dyn Repository>, searcher: Arc<dyn Searcher>) -> String {
+    start_server_with_auth(repo, searcher, edge_auth()).await
+}
+
+/// [`start_server`], with the auth plugin named explicitly.
+///
+/// `auth_plugin.feature` stands the same server up behind plugins no adapter
+/// can second-guess, which is the whole point of that suite: an implementation
+/// passes only if every surface actually asks.
+pub async fn start_server_with_auth(
+    repo: Arc<dyn Repository>,
+    searcher: Arc<dyn Searcher>,
+    auth: Arc<dyn Auth>,
+) -> String {
     let root_config = root_config();
 
     let server_config = ServerConfig {
@@ -143,7 +156,7 @@ pub async fn start_server(repo: Arc<dyn Repository>, searcher: Arc<dyn Searcher>
         }],
     };
 
-    let app = meshql_server::build_app_with_auth(server_config, edge_auth(), Router::new())
+    let app = meshql_server::build_app_with_auth(server_config, auth, Router::new())
         .await
         .expect("build authz cert app")
         .layer(middleware::from_fn(edge_identity));

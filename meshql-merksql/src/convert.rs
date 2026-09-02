@@ -1,5 +1,5 @@
 use chrono::{DateTime, TimeZone, Utc};
-use meshql_core::{Envelope, Stash};
+use meshql_core::{AuthMark, Envelope, Stash};
 use serde_json::{json, Value};
 
 /// Flatten an Envelope into a flat JSON object for storage in merkql topic.
@@ -14,7 +14,7 @@ pub fn envelope_to_flat_json(envelope: &Envelope) -> Value {
     map.insert("_deleted".to_string(), json!(envelope.deleted));
     map.insert(
         "_tokens".to_string(),
-        json!(serde_json::to_string(&envelope.authorized_tokens).unwrap_or_default()),
+        json!(serde_json::to_string(&envelope.auth).unwrap_or_default()),
     );
 
     // Flatten payload fields into top-level
@@ -33,7 +33,7 @@ pub fn flat_json_to_envelope(json: &Value) -> Option<Envelope> {
     let created_at_ms = obj.get("_created_at")?.as_i64()?;
     let deleted = obj.get("_deleted")?.as_bool().unwrap_or(false);
     let tokens_str = obj.get("_tokens").and_then(|v| v.as_str()).unwrap_or("[]");
-    let authorized_tokens: Vec<String> = serde_json::from_str(tokens_str).unwrap_or_default();
+    let auth: AuthMark = serde_json::from_str(tokens_str).unwrap_or_default();
     let created_at: DateTime<Utc> = Utc.timestamp_millis_opt(created_at_ms).single()?;
 
     // Extract payload: all fields except _prefixed metadata
@@ -49,7 +49,7 @@ pub fn flat_json_to_envelope(json: &Value) -> Option<Envelope> {
         payload,
         created_at,
         deleted,
-        authorized_tokens,
+        auth,
     })
 }
 
@@ -78,7 +78,7 @@ mod tests {
             payload,
             created_at: Utc::now(),
             deleted: false,
-            authorized_tokens: vec!["*".to_string()],
+            auth: vec!["*".to_string()].into(),
         };
 
         let flat = envelope_to_flat_json(&env);
@@ -87,7 +87,7 @@ mod tests {
         assert_eq!(restored.id, env.id);
         assert_eq!(restored.payload, env.payload);
         assert_eq!(restored.deleted, env.deleted);
-        assert_eq!(restored.authorized_tokens, env.authorized_tokens);
+        assert_eq!(restored.auth, env.auth);
         // Millisecond precision comparison
         assert_eq!(
             restored.created_at.timestamp_millis(),
