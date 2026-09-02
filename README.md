@@ -1,36 +1,44 @@
-# MeshQL-RS
+# meshql-rs
 
-Define schemas. Wire resolvers. Get a full data API with REST, GraphQL, and federation — no boilerplate.
+The Rust implementation of **[meshql](https://git.tildarc.com/tailoredshapes/meshql)**.
 
-MeshQL-RS is the Rust implementation of [MeshQL](https://tailoredshapes.github.io/meshql/), a framework for building data services where every entity gets its own REST endpoint, its own GraphQL endpoint, and federation resolvers that connect them. You write configuration, not plumbing.
+What meshql *is* — the model, the envelope, temporal reads, honesty, how
+authorization works, and the Gherkin contract every storage plugin is certified
+against — is defined once in the [contract repository][contract], which this
+repository runs as a git submodule at `meshql-cert/tests/features/contract`.
+Read that first. This README is the *how*: what is specific to running meshql on
+Tokio and Axum.
 
-## What You Get
+[contract]: https://git.tildarc.com/tailoredshapes/meshql
 
-- **GraphQL** endpoints with queries, mutations, and federated resolvers
-- **REST** endpoints with `POST`, `GET`, `PUT`, `DELETE` and bulk operations
-- **JSON Schema validation** on REST writes
-- **Temporal queries** — every query supports point-in-time reads
-- **Health checks** at `/health` and `/ready`
+## What is specific to Rust
 
-## Core Concepts
+- **Async throughout**, on Tokio and Axum.
+- **The widest set of storage plugins**: MongoDB, PostgreSQL, MySQL, SQLite,
+  MerkQL, MerkSQL, ksqlDB, DynamoDB, and merk-cloud.
+- **`meshql-changes`**, an SSE change feed so a client gets read-your-writes
+  without polling. Neither other implementation has one.
+- **`meshql-mcp`**, an MCP server derived from the configuration, so an agent
+  can query a deployment without bespoke tooling.
+- **`meshql-lambda`**, which runs a server on `lambda_http`.
+- **`/<id>/versions`**, a REST endpoint listing a document's version history.
+  Java and TypeScript do not have this yet; nothing in the contract certifies
+  it, which is why the gap went unnoticed.
 
-| Concept | What It Does |
-|:--------|:-------------|
-| **Graphlette** | GraphQL endpoint for an entity — queries, federation resolvers |
-| **Restlette** | REST endpoint for an entity — CRUD, bulk ops, JSON Schema validation |
-| **Resolver** | Connects entities across graphlettes (singleton for 1:1, vector for 1:N) |
-| **Envelope** | Internal wrapper: `{id, payload, created_at, deleted}` — stays internal except for opt-in "honesty" fields (see below) |
+### Certifying the ksqlDB adapter
 
-## Features
+It needs a real Kafka and ksqlDB, not a mock. `scripts/ksql-local.sh` starts
+both and prints the environment:
 
-- **Dual APIs**: REST and GraphQL from the same entity definition
-- **Federation**: Resolvers connect entities across graphlettes via HTTP or in-process calls
-- **Multiple datastores**: MongoDB, PostgreSQL, MySQL, SQLite, MerkQL, DynamoDB, merk-cloud — mix and match
-- **Temporal queries**: Point-in-time reads on any query
-- **"Honesty" as-of freshness**: REST responses carry `X-Meshql-Created-At`/`X-Meshql-Deleted` headers; GraphQL types can opt into a `createdAt` field — so the FE always knows how fresh a payload is
-- **Change feed**: `meshql-changes` streams SSE change notifications so clients don't have to poll for read-your-writes
-- **Async throughout**: Built on Tokio and Axum for efficient async I/O
-- **Type-safe**: Rust's type system catches configuration errors at compile time
+```bash
+eval "$(scripts/ksql-local.sh)"
+cargo test -p meshql-ksql
+```
+
+The suite **fails** rather than skips when no backend is reachable. It used to
+return early, which exits 0, so the adapter reported success on every machine
+that had never configured Confluent Cloud — hiding a temporal read that returned
+the present and a searcher that ignored `at` entirely.
 
 ## Workspace Crates
 
