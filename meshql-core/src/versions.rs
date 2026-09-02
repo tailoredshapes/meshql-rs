@@ -63,11 +63,6 @@ impl VersionRef {
 /// The payload is serialized with its keys sorted, so the token does not depend
 /// on map iteration order.
 pub fn version_token(env: &Envelope) -> String {
-    let mut sorted: std::collections::BTreeMap<&String, &serde_json::Value> =
-        std::collections::BTreeMap::new();
-    for (k, v) in &env.payload {
-        sorted.insert(k, v);
-    }
     let mut tokens: Vec<&String> = env.auth.as_parts().iter().collect();
     tokens.sort();
 
@@ -80,24 +75,80 @@ pub fn version_token(env: &Envelope) -> String {
     h.update(b"\x1f");
     h.update(serde_json::to_vec(&tokens).unwrap_or_default());
     h.update(b"\x1f");
-    h.update(serde_json::to_vec(&sorted).unwrap_or_default());
+    h.update(canonical_payload(&env.payload).as_bytes());
     hex(&h.finalize())
+}
+
+/// The payload as JSON with every object's keys sorted, at every depth.
+///
+/// Sorting cannot be left to `serde_json::Map`. Whether that type sorts or
+/// preserves insertion order is decided by the `preserve_order` feature, and
+/// Cargo unifies features across a build: `meshql-core` on its own gets a
+/// sorted map, and the same code inside a workspace binary gets an
+/// insertion-ordered one. A token that changed depending on who else was linked
+/// in would address the same version two different ways.
+///
+/// Arrays keep their order. Order inside an array is data — `[1,2]` is not
+/// `[2,1]` — where order between an object's keys is not.
+fn canonical_payload(payload: &crate::Stash) -> String {
+    let mut out = String::new();
+    write_canonical(&serde_json::Value::Object(payload.clone()), &mut out);
+    out
+}
+
+fn write_canonical(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (i, k) in keys.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                // Through serde, so escaping matches the rest of the encoding.
+                out.push_str(&serde_json::to_string(k).unwrap_or_default());
+                out.push(':');
+                write_canonical(&map[*k], out);
+            }
+            out.push('}');
+        }
+        serde_json::Value::Array(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_canonical(item, out);
+            }
+            out.push(']');
+        }
+        scalar => out.push_str(&serde_json::to_string(scalar).unwrap_or_default()),
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Order versions of one document: oldest first, ties broken by token.
+/// Order versions of one document: oldest first.
 ///
-/// The tiebreak is arbitrary but identical on every adapter and stable across
-/// replays, which is what makes a version list reproducible. Today SQLite
-/// breaks ties on `rowid` while Postgres and Mongo break them not at all, so
-/// `read(id, at:)` resolves nondeterministically on two of them.
+/// Three keys, in order:
+///
+/// 1. `created_at` in milliseconds. Millisecond precision is the floor every
+///    adapter can meet; merkql keeps nanoseconds, Postgres and Mongo do not.
+/// 2. The deletion flag, undeleted first. A write and the delete that buries it
+///    can land in the same millisecond — merkql does it routinely — and a
+///    deletion is by definition later than the version it deletes. Without this
+///    key the tombstone sorts by hash and lands anywhere, which made "the last
+///    version is the deletion" true only by luck.
+/// 3. The token. Arbitrary, but identical on every adapter and stable across
+///    replays, which is what makes a version list reproducible.
 pub fn version_order(a: &Envelope, b: &Envelope) -> std::cmp::Ordering {
     a.created_at
         .timestamp_millis()
         .cmp(&b.created_at.timestamp_millis())
+        .then_with(|| a.deleted.cmp(&b.deleted))
         .then_with(|| version_token(a).cmp(&version_token(b)))
 }
 
@@ -187,5 +238,82 @@ mod tests {
         assert!(!t.authorized());
         assert!(t.token.is_none());
         assert_eq!(t.created_at, e.created_at);
+    }
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    use super::*;
+    use crate::Envelope;
+
+    fn env(deleted: bool, payload: serde_json::Value) -> Envelope {
+        let mut e = Envelope::new(
+            "d1".to_string(),
+            payload.as_object().cloned().unwrap_or_default(),
+            vec!["*".to_string()],
+        );
+        e.created_at = chrono::TimeZone::timestamp_millis_opt(&Utc, 1000).unwrap();
+        e.deleted = deleted;
+        e
+    }
+
+    /// The case merkql hits routinely: a write and the delete that buries it in
+    /// the same millisecond. A deletion is later than what it deletes, whatever
+    /// the hashes say.
+    #[test]
+    fn a_deletion_sorts_after_the_version_it_deletes() {
+        let created = env(false, serde_json::json!({"kind": "tool"}));
+        let tombstone = env(true, serde_json::json!({"kind": "tool"}));
+        assert_eq!(
+            version_order(&created, &tombstone),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            version_order(&tombstone, &created),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn two_live_versions_in_one_millisecond_still_have_a_total_order() {
+        let a = env(false, serde_json::json!({"kind": "tool"}));
+        let b = env(false, serde_json::json!({"kind": "gadget"}));
+        assert_ne!(version_order(&a, &b), std::cmp::Ordering::Equal);
+        assert_eq!(version_order(&a, &b), version_order(&a, &b));
+        assert_eq!(version_order(&b, &a), version_order(&a, &b).reverse());
+    }
+}
+
+#[cfg(test)]
+mod canonicalization_tests {
+    use super::*;
+    use crate::{Envelope, Stash};
+
+    fn env_with(payload: Stash) -> Envelope {
+        let mut e = Envelope::new("d1".to_string(), payload, vec!["*".to_string()]);
+        e.created_at = chrono::TimeZone::timestamp_millis_opt(&Utc, 1000).unwrap();
+        e
+    }
+
+    /// The same version written with a nested object's keys in a different
+    /// order must address the same, or a version URL stops resolving after a
+    /// round trip through anything that reorders a map.
+    #[test]
+    fn nested_key_order_does_not_change_the_token() {
+        let mut a = Stash::new();
+        a.insert("meta".into(), serde_json::json!({"x": 1, "y": 2}));
+        let mut b = Stash::new();
+        b.insert("meta".into(), serde_json::json!({"y": 2, "x": 1}));
+        assert_eq!(version_token(&env_with(a)), version_token(&env_with(b)));
+    }
+
+    /// Order inside an array is data, not incidental: [1,2] is not [2,1].
+    #[test]
+    fn array_order_does_change_the_token() {
+        let mut a = Stash::new();
+        a.insert("tags".into(), serde_json::json!(["x", "y"]));
+        let mut b = Stash::new();
+        b.insert("tags".into(), serde_json::json!(["y", "x"]));
+        assert_ne!(version_token(&env_with(a)), version_token(&env_with(b)));
     }
 }

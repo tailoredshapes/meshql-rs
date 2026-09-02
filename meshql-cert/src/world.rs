@@ -59,6 +59,8 @@ pub struct CertWorld {
     pub authz_status: Option<u16>,
     /// body of the last GraphQL singleton read
     pub authz_response: Option<serde_json::Value>,
+    /// entries from the last `GET /<entity>/api/<id>/versions`
+    pub version_list: Vec<serde_json::Value>,
 }
 
 impl Default for CertWorld {
@@ -92,6 +94,7 @@ impl CertWorld {
             authz_stamps: HashMap::new(),
             authz_status: None,
             authz_response: None,
+            version_list: Vec::new(),
         };
         world.init_templates();
         world
@@ -162,6 +165,7 @@ impl CertWorld {
         self.authz_stamps.clear();
         self.authz_status = None;
         self.authz_response = None;
+        self.version_list.clear();
     }
 
     pub fn repo(&self) -> &dyn Repository {
