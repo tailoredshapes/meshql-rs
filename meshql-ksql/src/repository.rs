@@ -55,6 +55,11 @@ impl KsqlRepository {
     /// Run DDL to create the ksqlDB stream and materialized table.
     /// Idempotent — uses IF NOT EXISTS.
     pub async fn initialize(&self) -> anyhow::Result<()> {
+        // The topic has to exist before ksqlDB will define a stream over it.
+        // One partition, because the log for one entity is a single ordered
+        // history and a reader folds it in order.
+        self.client.ensure_topic(&self.topic, 1).await?;
+
         let create_stream = format!(
             "CREATE STREAM IF NOT EXISTS {} (\
              id VARCHAR KEY, \
@@ -137,24 +142,47 @@ impl Repository for KsqlRepository {
     ) -> Result<Option<Envelope>> {
         let escaped_id = Self::escape_id(id);
 
-        if at.is_some() {
-            // Temporal read: query the STREAM for all versions, filter client-side.
-            // ksqlDB stream pull queries may not support key-based lookup on
-            // Confluent Cloud, so we fall back to TABLE read (latest only).
+        if let Some(cutoff) = at {
+            // Temporal read: the history lives in the STREAM. The materialized
+            // table is a LATEST_BY_OFFSET rollup holding one version per id, so
+            // reading it at a past instant returns the present — which is what
+            // this used to do, on the guess that a stream could not be queried
+            // by key. It can. The certification that would have caught it never
+            // ran, because the suite skipped itself when no cluster was
+            // configured.
             let query = format!(
                 "SELECT * FROM {} WHERE id = '{}';",
-                self.table_name, escaped_id
+                self.stream_name, escaped_id
             );
 
             for _ in 0..self.max_retries {
-                match self.client.pull_query(&query).await {
+                match self.client.pull_query_from_earliest(&query).await {
                     Ok(rows) if !rows.is_empty() => {
-                        let env = row_to_envelope(&rows[0])
-                            .map_err(|e| MeshqlError::Parse(e.to_string()))?;
-                        if env.deleted || !session.is_authorized(Operation::Read, &env) {
-                            return Ok(None);
+                        let mut versions: Vec<Envelope> = Vec::with_capacity(rows.len());
+                        for row in &rows {
+                            versions.push(
+                                row_to_envelope(row)
+                                    .map_err(|e| MeshqlError::Parse(e.to_string()))?,
+                            );
                         }
-                        return Ok(Some(env));
+
+                        // The newest version at or before the cutoff decides,
+                        // including when that version is a tombstone: a delete
+                        // is a version, not an erasure, so a read before it
+                        // still finds the record and a read after it does not.
+                        let resolved = versions
+                            .into_iter()
+                            .filter(|e| e.created_at <= cutoff)
+                            .max_by(meshql_core::envelope_order);
+
+                        return Ok(match resolved {
+                            Some(env)
+                                if !env.deleted && session.is_authorized(Operation::Read, &env) =>
+                            {
+                                Some(env)
+                            }
+                            _ => None,
+                        });
                     }
                     Ok(_) => {
                         tokio::time::sleep(tokio::time::Duration::from_millis(self.retry_delay_ms))

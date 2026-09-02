@@ -32,3 +32,7 @@ harness = false
 [[test]]
 name = "searcher_cert"
 harness = false
+
+[[test]]
+name = "auth_plugin_cert"
+harness = false

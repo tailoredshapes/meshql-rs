@@ -80,6 +80,53 @@ impl ConfluentClient {
         Ok(())
     }
 
+    /// Ensure a topic exists, creating it if it does not.
+    ///
+    /// ksqlDB refuses to define a stream over a topic that is absent unless the
+    /// DDL names a partition count, so a deployment that does not auto-create
+    /// topics could not initialize at all. Confluent Cloud hid this by
+    /// auto-creating; a plain Kafka does not, which is why the adapter could
+    /// never be certified against one.
+    ///
+    /// An already-existing topic is success: two servers initializing the same
+    /// entity concurrently is normal, not an error.
+    pub async fn ensure_topic(&self, topic: &str, partitions: u32) -> anyhow::Result<()> {
+        let url = format!(
+            "{}/kafka/v3/clusters/{}/topics",
+            self.kafka_rest_url, self.kafka_cluster_id
+        );
+
+        let body = json!({
+            "topic_name": topic,
+            "partitions_count": partitions,
+            "replication_factor": 1,
+        });
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Authorization", format!("Basic {}", self.kafka_auth))
+            .json(&body)
+            .send()
+            .await?;
+
+        let status = resp.status();
+        if status.is_success() {
+            debug!("Created topic {}", topic);
+            return Ok(());
+        }
+
+        let body_text = resp.text().await.unwrap_or_default();
+        if body_text.contains("already exists") || status.as_u16() == 409 {
+            debug!("Topic {} already exists", topic);
+            return Ok(());
+        }
+
+        error!("Kafka REST create topic failed ({}): {}", status, body_text);
+        anyhow::bail!("Kafka REST create topic failed ({}): {}", status, body_text);
+    }
+
     /// Execute a ksqlDB DDL statement (CREATE STREAM, CREATE TABLE, etc.).
     pub async fn execute_statement(&self, ksql: &str) -> anyhow::Result<()> {
         let url = format!("{}/ksql", self.ksqldb_url);
@@ -114,11 +161,36 @@ impl ConfluentClient {
 
     /// Execute a ksqlDB pull query, returning parsed rows.
     pub async fn pull_query(&self, ksql: &str) -> anyhow::Result<Vec<HashMap<String, Value>>> {
+        self.query_with(ksql, json!({})).await
+    }
+
+    /// A pull query over a *stream*, reading from the start of the log.
+    ///
+    /// The materialized table is a `LATEST_BY_OFFSET` rollup and holds exactly
+    /// one version per id, so it cannot answer a temporal read. The stream is
+    /// the history, and it needs `auto.offset.reset=earliest` or the query
+    /// starts at the tail and returns nothing.
+    pub async fn pull_query_from_earliest(
+        &self,
+        ksql: &str,
+    ) -> anyhow::Result<Vec<HashMap<String, Value>>> {
+        self.query_with(
+            ksql,
+            json!({ "ksql.streams.auto.offset.reset": "earliest" }),
+        )
+        .await
+    }
+
+    async fn query_with(
+        &self,
+        ksql: &str,
+        streams_properties: Value,
+    ) -> anyhow::Result<Vec<HashMap<String, Value>>> {
         let url = format!("{}/query", self.ksqldb_url);
 
         let body = json!({
             "ksql": ksql,
-            "streamsProperties": {}
+            "streamsProperties": streams_properties
         });
 
         debug!("Executing ksqlDB query: {}", ksql);

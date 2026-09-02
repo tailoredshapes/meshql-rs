@@ -20,10 +20,14 @@ async fn main() {
         panic!(
             "ksql searcher certification cannot run: CONFLUENT_KAFKA_REST_URL is not set.\n\
              This is a FAILURE, not a skip. The adapter is uncertified until a \n\
-             Confluent Cloud cluster is configured — set CONFLUENT_KAFKA_REST_URL, \n\
-             CONFLUENT_KAFKA_CLUSTER_ID, CONFLUENT_KAFKA_API_KEY, \n\
-             CONFLUENT_KAFKA_API_SECRET, CONFLUENT_KSQLDB_URL, \n\
-             CONFLUENT_KSQLDB_API_KEY and CONFLUENT_KSQLDB_API_SECRET."
+             Kafka REST endpoint and ksqlDB are reachable. For a local stack:\n\
+             \n\
+                 eval \"$(scripts/ksql-local.sh)\"\n\
+             \n\
+             or point CONFLUENT_KAFKA_REST_URL, CONFLUENT_KAFKA_CLUSTER_ID, \n\
+             CONFLUENT_KAFKA_API_KEY, CONFLUENT_KAFKA_API_SECRET, \n\
+             CONFLUENT_KSQLDB_URL, CONFLUENT_KSQLDB_API_KEY and \n\
+             CONFLUENT_KSQLDB_API_SECRET at a Confluent Cloud cluster."
         );
     }
 

@@ -46,6 +46,54 @@ pub fn build_where(query_obj: &serde_json::Map<String, serde_json::Value>) -> Qu
     }
 }
 
+/// Does a resolved envelope satisfy the same query object `build_where`
+/// compiles into SQL?
+///
+/// A temporal search cannot push the predicate into the query and stop there:
+/// the stream holds every version, so an *older* version can match a predicate
+/// the resolved version does not. The predicate has to be re-applied to the
+/// version that actually resolves, which means evaluating it here, against the
+/// same two key shapes `build_where` understands.
+pub fn matches_query(
+    envelope: &meshql_core::Envelope,
+    query_obj: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+    query_obj.iter().all(|(key, val)| {
+        let expected = match val {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+
+        if key == "id" {
+            return envelope.id == expected;
+        }
+
+        match key.strip_prefix("payload.") {
+            // `EXTRACTJSONFIELD` returns the value as text, so compare as
+            // text. Comparing the `Value` directly would make a number never
+            // match the string the template rendered, which is why the owned
+            // rendering here is deliberate rather than wasteful.
+            #[allow(clippy::cmp_owned)]
+            Some(field) => match envelope.payload.get(field) {
+                Some(serde_json::Value::String(s)) => *s == expected,
+                Some(other) => other.to_string() == expected,
+                None => false,
+            },
+            // Unknown key — `build_where` skips it, so skip it here too.
+            None => true,
+        }
+    })
+}
+
+/// An `id IN (...)` predicate, written as an OR chain because ksqlDB pull
+/// queries do not accept `IN`.
+pub fn ids_clause(ids: &[String]) -> String {
+    ids.iter()
+        .map(|id| format!("id = '{}'", escape_sql_string(id)))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
 /// Escape single quotes for ksqlDB SQL strings.
 fn escape_sql_string(s: &str) -> String {
     s.replace('\'', "''")
