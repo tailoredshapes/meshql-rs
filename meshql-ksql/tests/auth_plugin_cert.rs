@@ -18,19 +18,23 @@ async fn main() {
     // A skip is a failure. See the note in `repo_cert.rs`: this adapter used to
     // return early when no cluster was configured, which exits 0, so it
     // reported success on every machine that had never configured one.
-    if std::env::var("CONFLUENT_KAFKA_REST_URL").is_err() {
+    // A skip is a failure. This used to `return` when no cluster was
+    // configured, which exits 0 — so the adapter reported success on every
+    // machine that had never configured one, and hid two real defects.
+    //
+    // `for_certification` defaults to the local stack and refuses any
+    // endpoint that is not loopback, so a developer with CONFLUENT_* already
+    // exported for a real cluster cannot have `cargo test` quietly create and
+    // drop topics on it.
+    let config = KsqlConfig::for_certification().unwrap_or_else(|e| {
         panic!(
-            "ksql auth-plugin certification cannot run: CONFLUENT_KAFKA_REST_URL is not set.\n\
-             This is a FAILURE, not a skip. The adapter is uncertified until a \n\
-             Kafka REST endpoint and ksqlDB are reachable. For a local stack:\n\
+            "ksql auth-plugin certification cannot run.\n\
+             This is a FAILURE, not a skip; the adapter is uncertified until it \n\
+             passes.\n\
              \n\
-                 eval \"$(scripts/ksql-local.sh)\"\n\
-             \n\
-             or set the CONFLUENT_* variables at a Confluent Cloud cluster."
-        );
-    }
-
-    let config = KsqlConfig::from_env().expect("missing ksqlDB env vars");
+             {e}"
+        )
+    });
 
     CertWorld::cucumber()
         .max_concurrent_scenarios(1)

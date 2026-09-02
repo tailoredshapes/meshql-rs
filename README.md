@@ -40,6 +40,11 @@ return early, which exits 0, so the adapter reported success on every machine
 that had never configured Confluent Cloud — hiding a temporal read that returned
 the present and a searcher that ignored `at` entirely.
 
+It also **refuses to run against anything but loopback**. The certification
+creates and drops topics, and a developer with `CONFLUENT_*` already exported
+for a real cluster would otherwise have `cargo test` do that to it without ever
+saying so. No test in this repository talks to Confluent Cloud.
+
 ## Workspace Crates
 
 ```

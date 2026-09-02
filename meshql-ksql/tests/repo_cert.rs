@@ -15,22 +15,23 @@ async fn main() {
     // `.fail_on_skipped()` below never got the chance to see a thing. Every
     // other adapter fails when its backend is missing (Postgres, MySQL and
     // Mongo need Docker; DynamoDB needs DynamoDB Local); ksql now says so too.
-    if std::env::var("CONFLUENT_KAFKA_REST_URL").is_err() {
+    // A skip is a failure. This used to `return` when no cluster was
+    // configured, which exits 0 — so the adapter reported success on every
+    // machine that had never configured one, and hid two real defects.
+    //
+    // `for_certification` defaults to the local stack and refuses any
+    // endpoint that is not loopback, so a developer with CONFLUENT_* already
+    // exported for a real cluster cannot have `cargo test` quietly create and
+    // drop topics on it.
+    let config = KsqlConfig::for_certification().unwrap_or_else(|e| {
         panic!(
-            "ksql repository certification cannot run: CONFLUENT_KAFKA_REST_URL is not set.\n\
-             This is a FAILURE, not a skip. The adapter is uncertified until a \n\
-             Kafka REST endpoint and ksqlDB are reachable. For a local stack:\n\
+            "ksql repository certification cannot run.\n\
+             This is a FAILURE, not a skip; the adapter is uncertified until it \n\
+             passes.\n\
              \n\
-                 eval \"$(scripts/ksql-local.sh)\"\n\
-             \n\
-             or point CONFLUENT_KAFKA_REST_URL, CONFLUENT_KAFKA_CLUSTER_ID, \n\
-             CONFLUENT_KAFKA_API_KEY, CONFLUENT_KAFKA_API_SECRET, \n\
-             CONFLUENT_KSQLDB_URL, CONFLUENT_KSQLDB_API_KEY and \n\
-             CONFLUENT_KSQLDB_API_SECRET at a Confluent Cloud cluster."
-        );
-    }
-
-    let config = KsqlConfig::from_env().expect("missing Confluent Cloud env vars");
+             {e}"
+        )
+    });
 
     run_auth_cert(&config).await;
 
