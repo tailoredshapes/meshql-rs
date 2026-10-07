@@ -74,5 +74,9 @@ name = "auth_plugin_cert"
 harness = false
 
 [[test]]
+name = "schema_cert"
+harness = false
+
+[[test]]
 name = "versions_cert"
 harness = false

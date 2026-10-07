@@ -139,6 +139,20 @@ pub async fn start_server_with_auth(
     searcher: Arc<dyn Searcher>,
     auth: Arc<dyn Auth>,
 ) -> String {
+    start_server_with_schema(repo, searcher, auth, serde_json::json!({})).await
+}
+
+/// [`start_server_with_auth`], with the widget restlette's JSON Schema given.
+///
+/// `schema.feature` hands every implementation the same schema. It goes in as
+/// configuration (`RestletteConfig::schema_json`), so the restlette enforces it
+/// exactly as a deployed one does; `{}` accepts every document.
+pub async fn start_server_with_schema(
+    repo: Arc<dyn Repository>,
+    searcher: Arc<dyn Searcher>,
+    auth: Arc<dyn Auth>,
+    schema_json: serde_json::Value,
+) -> String {
     let root_config = root_config();
 
     let server_config = ServerConfig {
@@ -151,7 +165,7 @@ pub async fn start_server_with_auth(
         }],
         restlettes: vec![RestletteConfig {
             path: RESTLETTE_PATH.into(),
-            schema_json: serde_json::json!({}),
+            schema_json,
             repository: repo,
         }],
     };
