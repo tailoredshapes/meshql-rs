@@ -2,7 +2,6 @@ use axum::Router;
 use meshql_changes::{ChangeHub, ChangeSource, StreamSource, StreamletteConfig};
 use meshql_core::{Auth, NoAuth, ServerConfig};
 use meshql_graphlette::{build_schema, GraphletteRouter, ResolverRegistry};
-use meshql_restlette::build_restlette_router;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -58,7 +57,20 @@ pub async fn build_app_with_auth(
 
     // Add restlette routes
     for r in config.restlettes {
-        let router = build_restlette_router(&r.path, r.repository, Arc::clone(&auth));
+        // The restlette's JSON Schema is enforced on every write, as in
+        // meshql-java and meshobj; a schema that does not compile stops the
+        // build instead of quietly accepting every document.
+        let validator = meshql_restlette::schema_validator(&r.schema_json)
+            .map_err(|e| anyhow::anyhow!("restlette {}: {e}", r.path))?;
+        let router = build_restlette_router_ext(
+            &r.path,
+            r.repository,
+            Arc::clone(&auth),
+            None,
+            validator,
+            None,
+            None,
+        );
         app = app.merge(router);
     }
 

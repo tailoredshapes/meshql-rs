@@ -311,6 +311,20 @@ async fn update_handler(
         _ => payload,
     };
 
+    // The document that will be stored is the one that must conform: a PUT
+    // merges into the current version, so a partial body is checked as the
+    // whole it completes, and a body that would break a stored document is
+    // refused before anything is written.
+    if let Some(validator) = &state.validator {
+        if let Err(msg) = validator(&merged, &ValidatorContext::default()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": msg})),
+            )
+                .into_response();
+        }
+    }
+
     let envelope = Envelope::new(id, merged, meshql_core::AuthMark::empty());
     if !session.is_authorized(Operation::Create, &envelope) {
         return (

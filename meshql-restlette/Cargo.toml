@@ -15,6 +15,7 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+jsonschema = { version = "0.26", default-features = false }
 
 [dev-dependencies]
 meshql-sqlite = { version = "0.1.0", path = "../meshql-sqlite" }
