@@ -166,6 +166,17 @@ async fn hen_lays(world: &mut CertWorld, hen: String, eggs: i64, quality: String
     }
 }
 
+#[when(regex = r#"^the coop "([^"]+)" is renamed "([^"]+)"$"#)]
+async fn coop_renamed(world: &mut CertWorld, coop: String, name: String) {
+    let id = id_named(world, "coop", &coop);
+    let path = format!("/coop/api/{id}");
+    let (status, mut doc) = front_end(world, reqwest::Method::GET, &path, None).await;
+    assert_eq!(status, 200, "GET {path} answered {status}");
+    doc["name"] = json!(name);
+    let (status, body) = front_end(world, reqwest::Method::PUT, &path, Some(doc)).await;
+    assert_eq!(status, 200, "PUT {path} answered {status}: {body}");
+}
+
 #[when(regex = r#"^the front end writes a hen_productivity of (\d+) total eggs$"#)]
 async fn front_end_writes_projection(world: &mut CertWorld, total: i64) {
     let hen_id = id_named(world, "hen", "Ada");

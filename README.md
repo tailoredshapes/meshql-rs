@@ -119,7 +119,7 @@ cargo test -p meshql-sqlite --test egg_economy_cert
 
 It runs the contract's `egg_economy.feature` (events are create-only, a
 projection is closed to the front end and open to its worker, the graph federates
-and answers `at:`) and `meshql-cert/tests/features/egg_graph.feature` (this
+and answers `at:`; the contract's `egg_graph.feature` follows references and reads updated actors as they were) and `meshql-cert/tests/features/egg_graph_full.feature` (this
 repository's scenarios over all fourteen graphlettes). The CDC and the reference
 hen worker (`egg_economy/worker.rs`) belong to the harness and are not under
 test: they let the surfaces have data to serve.

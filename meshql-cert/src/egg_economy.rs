@@ -124,7 +124,8 @@ type Query {
   getByCoop(id: ID, at: Float): [Hen]
   getAll(at: Float): [Hen]
 }
-type Coop { id: ID name: String! capacity: Int }
+type Farm { id: ID name: String! }
+type Coop { id: ID name: String! capacity: Int farm: Farm }
 type Hen {
   id: ID
   name: String!
@@ -601,14 +602,16 @@ pub async fn deploy(mut stores: HashMap<String, Store>) -> (String, tokio::task:
 }
 
 
-/// The contract's egg economy feature: the surfaces, certified.
-pub const CONTRACT_FEATURE: &str =
-    "../meshql-cert/tests/features/contract/features/proposed/egg-economy/egg_economy.feature";
+/// The contract's egg economy features: the surfaces, and the graph of actors.
+pub const CONTRACT_FEATURES: [&str; 2] = [
+    "../meshql-cert/tests/features/contract/features/proposed/egg-economy/egg_economy.feature",
+    "../meshql-cert/tests/features/contract/features/proposed/egg-economy/egg_graph.feature",
+];
 
 /// This repository's own feature over the same deployment: the graph of all
 /// fourteen entities (federation, `at:` through actors) that the contract's does
 /// not exercise.
-pub const GRAPH_FEATURE: &str = "../meshql-cert/tests/features/egg_graph.feature";
+pub const GRAPH_FEATURE: &str = "../meshql-cert/tests/features/egg_graph_full.feature";
 
 /// Run both features against a fresh economy per scenario, over the stores
 /// `make_stores` hands out, and exit non-zero if anything failed or was skipped.
@@ -621,7 +624,7 @@ where
     use cucumber::{writer::Stats, World as _};
     let make_stores = Arc::new(make_stores);
     let mut failed = false;
-    for feature in [CONTRACT_FEATURE, GRAPH_FEATURE] {
+    for feature in CONTRACT_FEATURES.iter().copied().chain([GRAPH_FEATURE]) {
         let make = Arc::clone(&make_stores);
         let writer = crate::CertWorld::cucumber()
             .max_concurrent_scenarios(1)

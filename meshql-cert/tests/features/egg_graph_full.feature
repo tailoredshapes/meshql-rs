@@ -1,4 +1,4 @@
-Feature: The graph of the egg economy
+Feature: The full graph of the egg economy
 
   This repository's own scenarios over the same fourteen-entity deployment the contract's egg_economy.feature uses: every entity's graphlette,
   federation to the entities it refers to, and `at:` through actors updated since. Projections are created by the named worker's credentials (the
