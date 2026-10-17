@@ -61,6 +61,14 @@ pub struct CertWorld {
     pub authz_response: Option<serde_json::Value>,
     /// entries from the last `GET /<entity>/api/<id>/versions`
     pub version_list: Vec<serde_json::Value>,
+
+    // Egg economy cert state (see `crate::egg_economy`)
+    /// HTTP status of the last request the front end made
+    pub egg_status: Option<u16>,
+    /// id of the last lay report the front end posted and the economy accepted
+    pub egg_lay_report: Option<String>,
+    /// the economy's server and the harness's CDC and worker, stopped when the scenario ends
+    pub egg_stop: Vec<tokio::task::AbortHandle>,
 }
 
 impl Default for CertWorld {
@@ -95,6 +103,9 @@ impl CertWorld {
             authz_status: None,
             authz_response: None,
             version_list: Vec::new(),
+            egg_status: None,
+            egg_lay_report: None,
+            egg_stop: Vec::new(),
         };
         world.init_templates();
         world

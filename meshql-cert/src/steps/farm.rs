@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::world::CertWorld;
 
 /// Resolve <ids.entity_type.name> references in a string
-fn resolve_ids(s: &str, ids: &HashMap<String, HashMap<String, String>>) -> String {
+pub(crate) fn resolve_ids(s: &str, ids: &HashMap<String, HashMap<String, String>>) -> String {
     let mut result = s.to_string();
     // Iterate until no more substitutions needed
     for _ in 0..10 {
@@ -85,7 +85,7 @@ async fn post_entity(
     panic!("Could not find {entity_type} after creation");
 }
 
-async fn graphql_query(
+pub(crate) async fn graphql_query(
     client: &reqwest::Client,
     server_addr: &str,
     entity_type: &str,
@@ -112,23 +112,6 @@ fn json_at_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
         current = current.get(key)?;
     }
     Some(current)
-}
-
-#[given("a MeshQL farm server is running")]
-async fn server_running(world: &mut CertWorld) {
-    // The server addr is injected by the test runner before hook
-    assert!(
-        world.server_addr.is_some(),
-        "server_addr must be set before this step"
-    );
-}
-
-#[given("a MeshQL egg economy server is running")]
-async fn egg_economy_server_running(world: &mut CertWorld) {
-    assert!(
-        world.server_addr.is_some(),
-        "server_addr must be set before this step"
-    );
 }
 
 #[given(regex = r#"^I have created "([^"]+)" entities:$"#)]
@@ -252,7 +235,7 @@ async fn assert_path_array_count(world: &mut CertWorld, path: String, count: usi
 /// Navigate a dot-separated path, fanning out across arrays: when the current
 /// value is an array, the key is looked up on each element and list results
 /// are flattened. "data.getById.coops.hens" yields every hen of every coop.
-fn collect_at_path(value: &Value, path: &str) -> Vec<Value> {
+pub(crate) fn collect_at_path(value: &Value, path: &str) -> Vec<Value> {
     let mut current = vec![value.clone()];
     for key in path.split('.') {
         let mut next = Vec::new();

@@ -44,7 +44,11 @@ Many crates have a `tests/` directory with `*_cert.rs` files. these use the `mes
 ```bash
 # Example: Run repository certification for SQLite
 cargo test -p meshql-sqlite --test repo_cert
+# The one e2e (egg economy: 14 entities; events, actors, projections), SQLite only;
+# storage agnosticism is proven by each store's storage-contract certs, not by repeating the e2e:
+cargo test -p meshql-sqlite --test egg_economy_cert
 ```
+The egg economy replaced the farm as the certified example. `meshql-cert/src/egg_economy.rs` is the deployment (one `Store` per entity from the backend), `egg_economy/worker.rs` the harness's CDC and reference hen worker (not under test), `steps/egg.rs` the steps. An event restlette is declared `WriteMode::Event` (PUT/DELETE answer 405) and a projection `WriteMode::ProducedBy(workers)` (403 unless `Session::is_principal`), via `meshql_server::build_app_with_modes`. Library code never starts or knows CDC.
 
 ## Development Conventions
 

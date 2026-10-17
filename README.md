@@ -74,6 +74,56 @@ meshql-rs/
     └── egg-economy-salesforce/  # Anti-corruption layer over Salesforce
 ```
 
+### Events, projections and workers
+
+Entities are of three kinds (contract: `specs/egg-economy.md`), and a restlette is
+told which when the server is built. The default is an ordinary entity (an actor).
+
+| kind | declared | what the HTTP surface does |
+|---|---|---|
+| actor | `WriteMode::Open` (the default) | create, replace, delete, as the auth plugin allows |
+| event | `WriteMode::Event` | `POST` creates it; `PUT` and `DELETE` answer 405 |
+| projection | `WriteMode::ProducedBy(vec!["hen-worker".into()])` | `POST`, `PUT`, `DELETE` answer 403 unless the session is one of the named principals |
+
+```rust
+let mut modes = WriteModes::new();               // restlette path -> mode
+modes.insert("/lay_report/api".into(), WriteMode::Event);
+modes.insert("/hen_productivity/api".into(), WriteMode::ProducedBy(vec!["hen-worker".into()]));
+let app = meshql_server::build_app_with_modes(config, auth, Router::new(), modes).await?;
+```
+
+`build_app_with_auth` is `build_app_with_modes` with no modes, so existing
+servers are unchanged. "Is the caller the principal `hen-worker`" is answered by
+the auth plugin, as every authorization question is: `Session::is_principal`
+(the token plugin answers yes when one of the caller's tokens is that name; a
+plugin that does not implement it leaves a produced entity closed to every HTTP
+caller, never open). The worker writes through the restlette with its own
+credentials, so its writes pass the same checks and leave the same versions as
+any other. How an event gets to a worker (Debezium and Kafka, `merkql-connect`, a
+trigger and a queue table) is the deployment's: the library neither starts nor
+knows any of it. The names follow meshql-fib's `(:event)` and `(:produced-by ..)`.
+
+### Certification
+
+Storage is certified per plugin by the storage contract (repository, searcher,
+versions, authorization: `cargo test -p meshql-<store> --test repo_cert` and
+friends). The end to end example is not repeated per store: meshql is storage
+agnostic and that is what those certs prove, so the pyramid has one e2e, on the
+cheapest store, SQLite. It is the **egg economy**
+(`meshql-cert/src/egg_economy.rs`: fourteen entities, five actors, five events,
+four projections), which replaced the farm:
+
+```bash
+cargo test -p meshql-sqlite --test egg_economy_cert
+```
+
+It runs the contract's `egg_economy.feature` (events are create-only, a
+projection is closed to the front end and open to its worker, the graph federates
+and answers `at:`) and `meshql-cert/tests/features/egg_graph.feature` (this
+repository's scenarios over all fourteen graphlettes). The CDC and the reference
+hen worker (`egg_economy/worker.rs`) belong to the harness and are not under
+test: they let the surfaces have data to serve.
+
 ## Quick Start
 
 ### Prerequisites

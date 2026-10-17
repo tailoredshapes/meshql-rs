@@ -1,7 +1,11 @@
-Feature: Egg Economy E2E Certification
+Feature: The graph of the egg economy
+
+  This repository's own scenarios over the same fourteen-entity deployment the contract's egg_economy.feature uses: every entity's graphlette,
+  federation to the entities it refers to, and `at:` through actors updated since. Projections are created by the named worker's credentials (the
+  front end cannot); the contract's feature lets the harness's worker make them.
 
   Background:
-    Given a MeshQL egg economy server is running
+    Given an egg economy deployment is running
     # Actors
     And I have created "farm" entities:
       | name        | data                                                                                          |
@@ -101,7 +105,7 @@ Feature: Egg Economy E2E Certification
   # ===== PROJECTION CREATION AND FEDERATION =====
 
   Scenario: Hen productivity links to hen
-    Given I have created "hen_productivity" entities:
+    Given the worker "hen-worker" has created "hen_productivity" entities:
       | name  | data                                                                                                                                                                                               |
       | prod1 | {"hen_id": "<ids.hen.Henrietta>", "farm_id": "<ids.farm.Green Acres>", "eggs_today": 3, "eggs_week": 18, "eggs_month": 72, "avg_per_week": 18.0, "total_eggs": 500, "quality_rate": 0.95} |
     When I query the "hen_productivity" graph with: { getByHen(id: "<ids.hen.Henrietta>") { eggs_today eggs_week hen { name breed } } }
@@ -109,7 +113,7 @@ Feature: Egg Economy E2E Certification
     And the response at "data.getByHen" should have 1 item
 
   Scenario: Hen federates to productivity
-    Given I have created "hen_productivity" entities:
+    Given the worker "hen-worker" has created "hen_productivity" entities:
       | name  | data                                                                                                                                                                                               |
       | prod2 | {"hen_id": "<ids.hen.Clucky>", "farm_id": "<ids.farm.Green Acres>", "eggs_today": 2, "eggs_week": 12, "eggs_month": 48, "avg_per_week": 12.0, "total_eggs": 300, "quality_rate": 0.90}    |
     When I query the "hen" graph with: { getById(id: "<ids.hen.Clucky>") { name productivity { eggs_today eggs_week } } }
@@ -118,7 +122,7 @@ Feature: Egg Economy E2E Certification
     And the response at "data.getById.productivity" should have 1 item
 
   Scenario: Container inventory links to container
-    Given I have created "container_inventory" entities:
+    Given the worker "container-worker" has created "container_inventory" entities:
       | name | data                                                                                                                                                                                                                               |
       | inv1 | {"container_id": "<ids.container.Cold Store>", "current_eggs": 50, "total_deposits": 100, "total_withdrawals": 30, "total_transfers_in": 10, "total_transfers_out": 20, "total_consumed": 10, "utilization_pct": 10.0} |
     When I query the "container" graph with: { getById(id: "<ids.container.Cold Store>") { name inventory { current_eggs total_deposits } } }
@@ -127,7 +131,7 @@ Feature: Egg Economy E2E Certification
     And the response at "data.getById.inventory" should have 1 item
 
   Scenario: Farm output links to farm
-    Given I have created "farm_output" entities:
+    Given the worker "farm-worker" has created "farm_output" entities:
       | name    | data                                                                                                                                                                                                             |
       | output1 | {"farm_id": "<ids.farm.Green Acres>", "farm_type": "free_range", "eggs_today": 8, "eggs_week": 48, "eggs_month": 192, "active_hens": 3, "total_hens": 3, "avg_per_hen_per_week": 16.0}              |
     When I query the "farm" graph with: { getById(id: "<ids.farm.Green Acres>") { name farmOutput { eggs_today eggs_week active_hens } } }

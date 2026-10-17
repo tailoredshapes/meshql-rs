@@ -91,7 +91,7 @@ pub fn identity_of(caller: &str) -> Option<String> {
 
 /// Edge middleware: lift the trusted identity header into an `AuthContext`.
 /// This is the production shape — see `meshql-changes/tests/sse_integration.rs`.
-async fn edge_identity(mut req: axum::extract::Request, next: Next) -> axum::response::Response {
+pub(crate) async fn edge_identity(mut req: axum::extract::Request, next: Next) -> axum::response::Response {
     let mut stash = Stash::new();
     if let Some(user) = req
         .headers()

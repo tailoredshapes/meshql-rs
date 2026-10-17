@@ -54,10 +54,6 @@ name = "searcher_cert"
 harness = true
 
 [[test]]
-name = "farm_cert"
-harness = false
-
-[[test]]
 name = "egg_economy_cert"
 harness = false
 

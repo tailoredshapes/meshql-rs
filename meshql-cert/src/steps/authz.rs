@@ -182,6 +182,7 @@ async fn read_at(world: &mut CertWorld, caller: String, name: String, stamp: Str
     world.authz_response = Some(resp);
 }
 
+#[given(regex = r#"^the current instant is captured as "([^"]+)"$"#)]
 #[when(regex = r#"^the current instant is captured as "([^"]+)"$"#)]
 async fn capture_instant(world: &mut CertWorld, key: String) {
     // Timestamps are millisecond-precision, so separate the captured instant
