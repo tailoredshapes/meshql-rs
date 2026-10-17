@@ -5,7 +5,9 @@ use axum::{
     routing::{get, post},
     Extension, Json, Router,
 };
-use meshql_core::{Auth, AuthContext, Envelope, Operation, Repository, Session, Stash};
+use meshql_core::{
+    Auth, AuthContext, Envelope, Operation, Repository, Session, Stash, WriteMode,
+};
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -74,6 +76,45 @@ struct RestletteState {
     validator: Option<ValidatorFn>,
     post_create: Option<PostCreateFn>,
     side_effect_ctx: Option<SideEffectContext>,
+    mode: WriteMode,
+}
+
+/// The refusal a write gets when the entity's [`WriteMode`] forbids it for this
+/// caller, or `None` when it may proceed to the auth plugin's own checks.
+///
+/// `replaces` is true for `PUT` and `DELETE`, which an event never admits (405);
+/// a produced entity admits no write from a session that is not one of its
+/// producers (403), whichever verb.
+fn refuse_by_mode(
+    mode: &WriteMode,
+    replaces: bool,
+    session: &dyn Session,
+) -> Option<axum::response::Response> {
+    match mode {
+        WriteMode::Open => None,
+        WriteMode::Event if replaces => Some(
+            (
+                StatusCode::METHOD_NOT_ALLOWED,
+                [(axum::http::header::ALLOW, "GET, POST")],
+                Json(serde_json::json!({"error": "an event is created and never changed"})),
+            )
+                .into_response(),
+        ),
+        WriteMode::Event => None,
+        WriteMode::ProducedBy(producers) => {
+            if producers.iter().any(|p| session.is_principal(p)) {
+                None
+            } else {
+                Some(
+                    (
+                        StatusCode::FORBIDDEN,
+                        Json(serde_json::json!({"error": "written only by its producer"})),
+                    )
+                        .into_response(),
+                )
+            }
+        }
+    }
 }
 
 pub fn build_restlette_router(
@@ -93,7 +134,33 @@ pub fn build_restlette_router_ext(
     post_create: Option<PostCreateFn>,
     side_effect_ctx: Option<SideEffectContext>,
 ) -> Router {
+    build_restlette_router_mode(
+        path,
+        repo,
+        auth,
+        defaults,
+        validator,
+        post_create,
+        side_effect_ctx,
+        WriteMode::Open,
+    )
+}
+
+/// [`build_restlette_router_ext`] for an entity with a declared [`WriteMode`]:
+/// an event (create-only) or a projection (written only by its producers).
+#[allow(clippy::too_many_arguments)]
+pub fn build_restlette_router_mode(
+    path: &str,
+    repo: Arc<dyn Repository>,
+    auth: Arc<dyn Auth>,
+    defaults: Option<Stash>,
+    validator: Option<ValidatorFn>,
+    post_create: Option<PostCreateFn>,
+    side_effect_ctx: Option<SideEffectContext>,
+    mode: WriteMode,
+) -> Router {
     let state = RestletteState {
+        mode,
         repo,
         auth,
         defaults,
@@ -123,6 +190,11 @@ async fn create_handler(
     auth_ctx: Option<Extension<AuthContext>>,
     Json(mut payload): Json<Stash>,
 ) -> impl IntoResponse {
+    let session = session_for(&state.auth, auth_ctx);
+    if let Some(refused) = refuse_by_mode(&state.mode, false, session.as_ref()) {
+        return refused;
+    }
+
     // Apply defaults for missing fields
     if let Some(defaults) = &state.defaults {
         for (k, v) in defaults {
@@ -145,7 +217,6 @@ async fn create_handler(
     }
 
     let id = Uuid::new_v4().to_string();
-    let session = session_for(&state.auth, auth_ctx);
     // The framework no longer copies the caller's tokens onto the envelope.
     // `create` hands it to `Session::stamp`, which is the plugin's job.
     let envelope = Envelope::new(id, payload, meshql_core::AuthMark::empty());
@@ -298,6 +369,9 @@ async fn update_handler(
     Json(payload): Json<Stash>,
 ) -> impl IntoResponse {
     let session = session_for(&state.auth, auth_ctx);
+    if let Some(refused) = refuse_by_mode(&state.mode, true, session.as_ref()) {
+        return refused;
+    }
 
     // Merge: read existing, overlay new fields
     let merged = match state.repo.read(&id, session.as_ref(), None).await {
@@ -350,6 +424,9 @@ async fn delete_handler(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let session = session_for(&state.auth, auth_ctx);
+    if let Some(refused) = refuse_by_mode(&state.mode, true, session.as_ref()) {
+        return refused;
+    }
     match state.repo.remove(&id, session.as_ref()).await {
         Ok(true) => {
             let body = serde_json::json!({"id": id, "status": "deleted"});

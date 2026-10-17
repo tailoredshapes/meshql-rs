@@ -10,7 +10,7 @@ pub use auth::{
 pub use config::{
     GraphletteConfig, InternalSingletonResolverConfig, InternalVectorResolverConfig, QueryConfig,
     RestletteConfig, RootConfig, RootConfigBuilder, ServerConfig, SingletonResolverConfig,
-    VectorResolverConfig,
+    VectorResolverConfig, WriteMode, WriteModes,
 };
 pub mod versions;
 pub use error::{MeshqlError, Result};

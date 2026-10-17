@@ -2,7 +2,7 @@ pub mod routes;
 pub mod schema;
 
 pub use routes::{
-    build_restlette_router, build_restlette_router_ext, PostCreateFn, SideEffectContext,
+    build_restlette_router, build_restlette_router_ext, build_restlette_router_mode, PostCreateFn, SideEffectContext,
     ValidatorContext, ValidatorFn,
 };
 pub use schema::schema_validator;

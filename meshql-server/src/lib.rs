@@ -1,6 +1,6 @@
 use axum::Router;
 use meshql_changes::{ChangeHub, ChangeSource, StreamSource, StreamletteConfig};
-use meshql_core::{Auth, NoAuth, ServerConfig};
+use meshql_core::{Auth, NoAuth, ServerConfig, WriteMode, WriteModes};
 use meshql_graphlette::{build_schema, GraphletteRouter, ResolverRegistry};
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -38,6 +38,23 @@ pub async fn build_app_with_auth(
     auth: Arc<dyn Auth>,
     extra: Router,
 ) -> anyhow::Result<Router> {
+    build_app_with_modes(config, auth, extra, WriteModes::new()).await
+}
+
+/// [`build_app_with_auth`], with a [`WriteMode`] for the restlettes that are
+/// not ordinary entities, keyed by restlette path (`"/lay_report/api"`).
+///
+/// `WriteMode::Event` makes a restlette create-only (PUT and DELETE answer
+/// 405). `WriteMode::ProducedBy(workers)` closes it to every HTTP write whose
+/// session is not one of those principals (403, `Session::is_principal`).
+/// A path with no entry is open, as before. Nothing here knows how a worker
+/// learns of an event: that is the mesh around the meshlettes.
+pub async fn build_app_with_modes(
+    config: ServerConfig,
+    auth: Arc<dyn Auth>,
+    extra: Router,
+    modes: WriteModes,
+) -> anyhow::Result<Router> {
     let mut registry = ResolverRegistry::new();
 
     // First pass: register all graphlette searchers in the registry
@@ -62,7 +79,8 @@ pub async fn build_app_with_auth(
         // build instead of quietly accepting every document.
         let validator = meshql_restlette::schema_validator(&r.schema_json)
             .map_err(|e| anyhow::anyhow!("restlette {}: {e}", r.path))?;
-        let router = build_restlette_router_ext(
+        let mode: WriteMode = modes.get(&r.path).cloned().unwrap_or_default();
+        let router = meshql_restlette::build_restlette_router_mode(
             &r.path,
             r.repository,
             Arc::clone(&auth),
@@ -70,6 +88,7 @@ pub async fn build_app_with_auth(
             validator,
             None,
             None,
+            mode,
         );
         app = app.merge(router);
     }

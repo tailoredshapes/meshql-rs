@@ -185,6 +185,10 @@ impl Session for CasbinSession {
             Operation::Create | Operation::Remove => self.may_write && visible,
         }
     }
+
+    fn is_principal(&self, name: &str) -> bool {
+        self.roles.iter().any(|r| r == name)
+    }
 }
 
 #[cfg(test)]

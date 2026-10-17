@@ -102,6 +102,16 @@ pub trait Session: Send + Sync {
 
     /// Can this caller perform `operation` on this envelope?
     fn is_authorized(&self, operation: Operation, envelope: &Envelope) -> bool;
+
+    /// Is the caller the named principal (a worker, a producer)?
+    ///
+    /// Asked by a restlette declared [`WriteMode::ProducedBy`](crate::WriteMode):
+    /// only a caller this answers `true` for may write it. The default is
+    /// `false`, so a plugin that does not know principals leaves a produced
+    /// entity closed to every HTTP caller; it fails closed, never open.
+    fn is_principal(&self, _name: &str) -> bool {
+        false
+    }
 }
 
 /// The plugin surface. One method.
@@ -150,6 +160,12 @@ impl Session for SystemSession {
     }
 
     fn is_authorized(&self, _operation: Operation, _envelope: &Envelope) -> bool {
+        true
+    }
+
+    /// The system session is every principal: it is the caller outside a
+    /// request (a worker in the same process), which owns no credentials.
+    fn is_principal(&self, _name: &str) -> bool {
         true
     }
 }
@@ -230,6 +246,11 @@ impl Session for TokenSession {
             return true;
         }
         marks.iter().any(|t| self.tokens.iter().any(|c| c == t))
+    }
+
+    /// A caller is a principal when one of its tokens is the principal's name.
+    fn is_principal(&self, name: &str) -> bool {
+        self.tokens.iter().any(|t| t == name)
     }
 }
 

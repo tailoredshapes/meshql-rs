@@ -179,3 +179,26 @@ pub struct ServerConfig {
     pub graphlettes: Vec<GraphletteConfig>,
     pub restlettes: Vec<RestletteConfig>,
 }
+
+/// What a restlette lets the HTTP surface do to its entity. Authorization of
+/// *who* stays with the auth plugin; this says what *kind* of entity it is.
+///
+/// Declared per restlette path to `meshql_server::build_app_with_modes`. A
+/// path with no entry is `Open`. The names follow meshql-fib's
+/// `(:event)` and `(:produced-by ..)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum WriteMode {
+    /// An ordinary entity: create, replace and delete, as the auth plugin allows.
+    #[default]
+    Open,
+    /// An event: a fact that happened. `POST` creates it; `PUT` and `DELETE`
+    /// answer 405. Nothing about who may read or create it changes.
+    Event,
+    /// A projection: written only by the named producers (its workers). A
+    /// `POST`, `PUT` or `DELETE` from a session that is none of them answers 403
+    /// (`Session::is_principal`); reads are as for any entity.
+    ProducedBy(Vec<String>),
+}
+
+/// Restlette path (`"/lay_report/api"`) to its [`WriteMode`].
+pub type WriteModes = std::collections::HashMap<String, WriteMode>;
