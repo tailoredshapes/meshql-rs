@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Pre-push hook: cargo fmt, clippy, build, and tests.
 #
-# The testcontainer-backed DB adapter certs (meshql-mongo / meshql-mysql /
-# meshql-postgres) are excluded here — each spins up real Docker containers
-# and the full set adds several minutes, which is too slow for a local
-# pre-push gate. CI (.github/workflows/ci.yml) runs the complete suite,
-# including those, on every push/PR to main. Run them locally with
-# `cargo test -p meshql-mongo -p meshql-mysql -p meshql-postgres` before
-# pushing a change that touches those adapters.
+# The DB adapter certs (meshql-mongo / meshql-mysql / meshql-postgres, which
+# start their own Docker containers, and meshql-dynamo / meshql-ksql, which need
+# DynamoDB Local on :8123 and the Kafka + ksqlDB stack of scripts/ksql-local.sh)
+# are excluded here — the containers and services make the full set too slow
+# for a local pre-push gate. CI (.github/workflows/ci.yml) runs the complete
+# suite, including those, on every push/PR to main. Run them locally with
+# `cargo test -p meshql-mongo -p meshql-mysql -p meshql-postgres` (and, with the
+# services up, `-p meshql-dynamo -p meshql-ksql`) before pushing a change that
+# touches those adapters.
 set -e
 
 echo "==> Checking formatting..."
@@ -23,6 +25,8 @@ echo "==> Running tests..."
 cargo test --workspace --no-fail-fast \
   --exclude meshql-mongo \
   --exclude meshql-mysql \
-  --exclude meshql-postgres
+  --exclude meshql-postgres \
+  --exclude meshql-dynamo \
+  --exclude meshql-ksql
 
 echo "==> All checks passed."
