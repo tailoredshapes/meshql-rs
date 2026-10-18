@@ -2,9 +2,9 @@
 //! `egg_economy.feature` and this repository's graph feature over the
 //! fourteen-entity deployment in `meshql_cert::egg_economy`. Each scenario gets
 //! a fresh in-memory database per entity.
+use meshql_cert::egg_economy::{self, Store};
 #[allow(unused_imports)]
 use meshql_cert::steps;
-use meshql_cert::egg_economy::{self, Store};
 use meshql_sqlite::{SqliteRepository, SqliteSearcher};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use std::collections::HashMap;

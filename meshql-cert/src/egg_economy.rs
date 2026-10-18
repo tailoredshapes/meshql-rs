@@ -346,7 +346,6 @@ type FarmOutput {
 }
 "#;
 
-
 const REJECTION_GRAPHQL: &str = r#"
 scalar Date
 type Query {
@@ -397,18 +396,22 @@ fn root_config(entity: &str) -> RootConfig {
             .internal_singleton_resolver("coop", Some("coop_id"), "getById", "/coop/graph")
             .internal_vector_resolver("layReports", None, "getByHen", "/lay_report/graph")
             .internal_vector_resolver("productivity", None, "getByHen", "/hen_productivity/graph"),
-        "container" => by_id().vector("getByZone", zone()).internal_vector_resolver(
-            "inventory",
-            None,
-            "getByContainer",
-            "/container_inventory/graph",
-        ),
-        "consumer" => by_id().vector("getByZone", zone()).internal_vector_resolver(
-            "consumptionReports",
-            None,
-            "getByConsumer",
-            "/consumption_report/graph",
-        ),
+        "container" => by_id()
+            .vector("getByZone", zone())
+            .internal_vector_resolver(
+                "inventory",
+                None,
+                "getByContainer",
+                "/container_inventory/graph",
+            ),
+        "consumer" => by_id()
+            .vector("getByZone", zone())
+            .internal_vector_resolver(
+                "consumptionReports",
+                None,
+                "getByConsumer",
+                "/consumption_report/graph",
+            ),
         "lay_report" => by_id()
             .vector("getByHen", by("hen_id"))
             .vector("getByFarm", by("farm_id"))
@@ -598,9 +601,11 @@ pub async fn deploy(mut stores: HashMap<String, Store>) -> (String, tokio::task:
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
-    (format!("http://127.0.0.1:{}", addr.port()), server.abort_handle())
+    (
+        format!("http://127.0.0.1:{}", addr.port()),
+        server.abort_handle(),
+    )
 }
-
 
 /// The contract's egg economy features: the surfaces, and the graph of actors.
 pub const CONTRACT_FEATURES: [&str; 2] = [
@@ -645,7 +650,10 @@ where
                 Box::pin(async move {
                     // Stop the worker and the server, so a scenario's connection
                     // pools do not pile up over the run.
-                    for handle in world.map(|w| std::mem::take(&mut w.egg_stop)).unwrap_or_default() {
+                    for handle in world
+                        .map(|w| std::mem::take(&mut w.egg_stop))
+                        .unwrap_or_default()
+                    {
                         handle.abort();
                     }
                 })

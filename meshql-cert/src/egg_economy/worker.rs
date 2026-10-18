@@ -112,9 +112,10 @@ async fn fold_hen(
         .into_iter()
         .find(|p| p.get("hen_id").and_then(Value::as_str) == Some(hen));
     let request = match &existing {
-        Some(p) if p.get("total_eggs") == doc.get("total_eggs")
-            && p.get("quality_rate") == doc.get("quality_rate")
-            && p.get("farm_id") == doc.get("farm_id") =>
+        Some(p)
+            if p.get("total_eggs") == doc.get("total_eggs")
+                && p.get("quality_rate") == doc.get("quality_rate")
+                && p.get("farm_id") == doc.get("farm_id") =>
         {
             return Ok(());
         }

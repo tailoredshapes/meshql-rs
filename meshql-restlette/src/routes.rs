@@ -5,9 +5,7 @@ use axum::{
     routing::{get, post},
     Extension, Json, Router,
 };
-use meshql_core::{
-    Auth, AuthContext, Envelope, Operation, Repository, Session, Stash, WriteMode,
-};
+use meshql_core::{Auth, AuthContext, Envelope, Operation, Repository, Session, Stash, WriteMode};
 use std::sync::Arc;
 use uuid::Uuid;
 

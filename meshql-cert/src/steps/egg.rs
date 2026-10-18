@@ -56,7 +56,10 @@ async fn make(world: &mut CertWorld, entity: &str, name: &str, doc: Value) {
         Some(doc),
     )
     .await;
-    assert_eq!(status, 201, "POST {entity} {name} answered {status}: {body}");
+    assert_eq!(
+        status, 201,
+        "POST {entity} {name} answered {status}: {body}"
+    );
     let id = body["id"].as_str().expect("created id").to_string();
     world
         .ids
@@ -66,7 +69,8 @@ async fn make(world: &mut CertWorld, entity: &str, name: &str, doc: Value) {
 }
 
 async fn list(world: &mut CertWorld, entity: &str) -> Vec<Value> {
-    let (status, body) = front_end(world, reqwest::Method::GET, &format!("/{entity}/api"), None).await;
+    let (status, body) =
+        front_end(world, reqwest::Method::GET, &format!("/{entity}/api"), None).await;
     assert_eq!(status, 200, "GET {entity} answered {status}");
     body.as_array().cloned().unwrap_or_default()
 }
@@ -79,11 +83,21 @@ async fn deployment_running(world: &mut CertWorld) {
     );
     // Fourteen entities, each with a restlette and a graphlette.
     for entity in crate::egg_economy::entities() {
-        let (status, _) = front_end(world, reqwest::Method::GET, &format!("/{entity}/api"), None).await;
+        let (status, _) =
+            front_end(world, reqwest::Method::GET, &format!("/{entity}/api"), None).await;
         assert_eq!(status, 200, "/{entity}/api is not served");
         let url = format!("{}/{entity}/graph", world.server_addr());
-        let resp = graphql_query(&reqwest::Client::new(), world.server_addr(), entity, "{ getAll { id } }").await;
-        assert!(resp.get("errors").is_none_or(Value::is_null), "/{entity}/graph: {resp} ({url})");
+        let resp = graphql_query(
+            &reqwest::Client::new(),
+            world.server_addr(),
+            entity,
+            "{ getAll { id } }",
+        )
+        .await;
+        assert!(
+            resp.get("errors").is_none_or(Value::is_null),
+            "/{entity}/graph: {resp} ({url})"
+        );
     }
 }
 
@@ -136,10 +150,18 @@ async fn worker_creates(
             .send()
             .await
             .unwrap();
-        assert_eq!(resp.status().as_u16(), 201, "{worker} could not write {entity}");
+        assert_eq!(
+            resp.status().as_u16(),
+            201,
+            "{worker} could not write {entity}"
+        );
         let body: Value = resp.json().await.unwrap();
         let id = body["id"].as_str().unwrap().to_string();
-        world.ids.entry(entity.clone()).or_default().insert(name, id);
+        world
+            .ids
+            .entry(entity.clone())
+            .or_default()
+            .insert(name, id);
     }
 }
 
@@ -147,10 +169,28 @@ async fn worker_creates(
 async fn hen_lays(world: &mut CertWorld, hen: String, eggs: i64, quality: String, at: String) {
     let hen_id = id_named(world, "hen", &hen);
     // The hen's coop and farm, as the front end knows them.
-    let (_, hen_doc) = front_end(world, reqwest::Method::GET, &format!("/hen/api/{hen_id}"), None).await;
-    let coop_id = hen_doc["coop_id"].as_str().expect("hen has a coop").to_string();
-    let (_, coop_doc) = front_end(world, reqwest::Method::GET, &format!("/coop/api/{coop_id}"), None).await;
-    let farm_id = coop_doc["farm_id"].as_str().expect("coop has a farm").to_string();
+    let (_, hen_doc) = front_end(
+        world,
+        reqwest::Method::GET,
+        &format!("/hen/api/{hen_id}"),
+        None,
+    )
+    .await;
+    let coop_id = hen_doc["coop_id"]
+        .as_str()
+        .expect("hen has a coop")
+        .to_string();
+    let (_, coop_doc) = front_end(
+        world,
+        reqwest::Method::GET,
+        &format!("/coop/api/{coop_id}"),
+        None,
+    )
+    .await;
+    let farm_id = coop_doc["farm_id"]
+        .as_str()
+        .expect("coop has a farm")
+        .to_string();
     let (status, body) = front_end(
         world,
         reqwest::Method::POST,
@@ -185,20 +225,29 @@ async fn front_end_writes_projection(world: &mut CertWorld, total: i64) {
         world,
         reqwest::Method::POST,
         "/hen_productivity/api",
-        Some(json!({"hen_id": hen_id, "farm_id": farm_id, "total_eggs": total, "quality_rate": 1.0})),
+        Some(
+            json!({"hen_id": hen_id, "farm_id": farm_id, "total_eggs": total, "quality_rate": 1.0}),
+        ),
     )
     .await;
 }
 
 #[then("the posting was accepted")]
 async fn posting_accepted(world: &mut CertWorld) {
-    assert_eq!(world.egg_status, Some(201), "the last POST did not answer 201");
+    assert_eq!(
+        world.egg_status,
+        Some(201),
+        "the last POST did not answer 201"
+    );
 }
 
 fn lay_report_path(world: &CertWorld) -> String {
     format!(
         "/lay_report/api/{}",
-        world.egg_lay_report.as_deref().expect("no lay report was accepted")
+        world
+            .egg_lay_report
+            .as_deref()
+            .expect("no lay report was accepted")
     )
 }
 
@@ -208,16 +257,30 @@ async fn lay_report_readable(world: &mut CertWorld, hen: String) {
     let path = lay_report_path(world);
     let (status, body) = front_end(world, reqwest::Method::GET, &path, None).await;
     assert_eq!(status, 200, "GET {path} answered {status}");
-    assert_eq!(body["hen_id"], json!(hen_id), "that lay report is not the hen's: {body}");
+    assert_eq!(
+        body["hen_id"],
+        json!(hen_id),
+        "that lay report is not the hen's: {body}"
+    );
 }
 
 #[then("replacing that lay report is refused")]
 async fn replacing_refused(world: &mut CertWorld) {
     let path = lay_report_path(world);
-    let (status, _) = front_end(world, reqwest::Method::PUT, &path, Some(json!({"eggs": 99}))).await;
+    let (status, _) = front_end(
+        world,
+        reqwest::Method::PUT,
+        &path,
+        Some(json!({"eggs": 99})),
+    )
+    .await;
     assert_eq!(status, 405, "PUT {path} answered {status}, not 405");
     let (_, body) = front_end(world, reqwest::Method::GET, &path, None).await;
-    assert_ne!(body["eggs"], json!(99), "the lay report was changed anyway: {body}");
+    assert_ne!(
+        body["eggs"],
+        json!(99),
+        "the lay report was changed anyway: {body}"
+    );
 }
 
 #[then("deleting that lay report is refused")]
@@ -247,7 +310,10 @@ async fn hen_produced(world: &mut CertWorld, hen: String, eggs: i64) {
                 return;
             }
         }
-        assert!(start.elapsed() <= EVENTUALLY, "never became true within {EVENTUALLY:?}: {what}");
+        assert!(
+            start.elapsed() <= EVENTUALLY,
+            "never became true within {EVENTUALLY:?}: {what}"
+        );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
@@ -261,18 +327,34 @@ async fn no_such_projection(world: &mut CertWorld, total: i64) {
         .into_iter()
         .filter(|p| p["total_eggs"] == json!(total))
         .collect();
-    assert!(found.is_empty(), "the front end wrote a projection: {found:?}");
+    assert!(
+        found.is_empty(),
+        "the front end wrote a projection: {found:?}"
+    );
 }
 
 #[when(regex = r#"^I query the "([^"]+)" graph as of "([^"]+)" with: (.+)$"#)]
-async fn query_graph_as_of(world: &mut CertWorld, entity: String, label: String, raw_query: String) {
+async fn query_graph_as_of(
+    world: &mut CertWorld,
+    entity: String,
+    label: String,
+    raw_query: String,
+) {
     let at = world.authz_stamp(&label);
     let query = resolve_ids(&raw_query, &world.ids);
     // The first query field gets the instant as `at`.
-    let open = query.find('(').expect("a query field with arguments to give `at`");
+    let open = query
+        .find('(')
+        .expect("a query field with arguments to give `at`");
     let query = format!("{}at: {at}, {}", &query[..=open], &query[open + 1..]);
     world.farm_response = Some(
-        graphql_query(&reqwest::Client::new(), world.server_addr(), &entity, &query).await,
+        graphql_query(
+            &reqwest::Client::new(),
+            world.server_addr(),
+            &entity,
+            &query,
+        )
+        .await,
     );
 }
 
