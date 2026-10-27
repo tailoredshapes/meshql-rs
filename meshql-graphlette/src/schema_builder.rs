@@ -596,6 +596,32 @@ fn internal_vector_resolver_field(
 }
 
 /// Null field: returns None (for relation fields with no registered resolver).
+/// An object-typed field with no resolver: the value embedded in the parent
+/// payload, an object or a list of objects. graphql-js (meshobj) and
+/// graphql-java (meshql-java) resolve such a field from the parent by default;
+/// answering null here silently dropped every nested object a payload held.
+fn embedded_field(field_name: String, type_ref: TypeRef) -> Field {
+    Field::new(field_name.clone(), type_ref, move |ctx| {
+        let fname = field_name.clone();
+        FieldFuture::new(async move {
+            let parent = ctx.parent_value.try_downcast_ref::<Stash>()?;
+            Ok(match parent.get(&fname) {
+                Some(serde_json::Value::Object(map)) => Some(FieldValue::owned_any(map.clone())),
+                Some(serde_json::Value::Array(items)) => Some(FieldValue::list(
+                    items
+                        .iter()
+                        .map(|item| match item {
+                            serde_json::Value::Object(map) => FieldValue::owned_any(map.clone()),
+                            _ => FieldValue::NULL,
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+                _ => None,
+            })
+        })
+    })
+}
+
 fn null_field(field_name: String, type_ref: TypeRef) -> Field {
     Field::new(field_name, type_ref, |_ctx| {
         FieldFuture::new(async move { Ok(FieldValue::NONE) })
@@ -863,7 +889,7 @@ pub fn build_schema(
                     // Fall through to registry: check other graphlettes' root_configs
                     // for resolvers that match this field (enables deep federation).
                     find_resolver_in_registry(&field_name, field_type.clone(), registry)
-                        .unwrap_or_else(|| null_field(field_name, field_type))
+                        .unwrap_or_else(|| embedded_field(field_name, field_type))
                 };
 
                 entity_obj = entity_obj.field(field);
