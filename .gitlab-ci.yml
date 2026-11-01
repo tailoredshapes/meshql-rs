@@ -11,6 +11,12 @@ mcplette:
   stage: test
   tags: [shell]
   script:
+    # Cargo resolves the workspace's pinned private merk-cloud dependency even
+    # for this package. Rewrite only its transport, within this job process.
+    - |
+      export GIT_CONFIG_COUNT=1
+      export GIT_CONFIG_KEY_0="url.${CI_SERVER_PROTOCOL}://gitlab-ci-token:${CI_JOB_TOKEN}@${CI_SERVER_URL#*://}/tailoredshapes/merk-cloud.git.insteadOf"
+      export GIT_CONFIG_VALUE_0="ssh://git@github.com/tailoredshapes/merk-cloud.git"
     - scripts/test-mcplette.sh target/mcp-cert/results.json
   artifacts:
     when: always
