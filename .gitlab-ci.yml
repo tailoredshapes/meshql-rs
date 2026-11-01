@@ -1,0 +1,18 @@
+stages: [test]
+
+variables:
+  GIT_SUBMODULE_STRATEGY: recursive
+  CARGO_BUILD_JOBS: "2"
+  CARGO_TERM_COLOR: never
+
+# The existing cross-platform workspace jobs remain in .github/workflows/ci.yml.
+# This required private gate certifies the new MCP surface once on SQLite.
+mcplette:
+  stage: test
+  tags: [shell]
+  script:
+    - scripts/test-mcplette.sh target/mcp-cert/results.json
+  artifacts:
+    when: always
+    paths:
+      - target/mcp-cert/results.json

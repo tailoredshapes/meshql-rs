@@ -1,76 +1,99 @@
 # meshql-mcp
 
-Model Context Protocol server building blocks for meshql-rs deployments.
+The standard MeshQL tools surface uses MCP **2025-06-18 over stdio**. This is
+not an HTTP MCP transport or a claim to implement every MCP capability.
 
-Given a running meshql-rs HTTP server (one or more meshql entities, each with REST + GraphQL surfaces), this crate exposes a stdio JSON-RPC MCP server that an LLM can drive. Catalog operations — list, get-by-id, find-by-name — are auto-derived from the deployment's GraphQL schemas. Custom analytics or write tools layer on top.
+Start the ordinary REST/GraphQL deployment, then point the stdio command at it:
 
-## Quick start
-
-```rust
-use meshql_mcp::{CapabilitiesBuilder, McpServerConfig, MeshqlClient, MeshqlMcpServer};
-use std::sync::Arc;
-
-const DEPLOYABLE_GRAPHQL: &str = include_str!("../config/graph/deployable.graphql");
-const SERVICE_GRAPHQL:    &str = include_str!("../config/graph/service.graphql");
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let client = Arc::new(MeshqlClient::from_env("CATALOG_URL", "http://localhost:3000"));
-
-    let capabilities = CapabilitiesBuilder::new()
-        .auto_from_schemas(&[
-            ("deployable", "/deployable/graph", DEPLOYABLE_GRAPHQL),
-            ("service",    "/service/graph",    SERVICE_GRAPHQL),
-        ])
-        .describe("list_deployables",
-            "List every deployable with federated team metadata. Use for inventory.")
-        .build();
-
-    MeshqlMcpServer::new(McpServerConfig {
-        server_name: "catalog-mcp".into(),
-        server_version: env!("CARGO_PKG_VERSION").into(),
-        client,
-        capabilities,
-    }).serve_stdio().await
-}
+```sh
+meshql-mcp --config config.conf --backend http://127.0.0.1:3000 --identity alice
 ```
 
-That's a complete MCP server. About 30 LOC including the imports and the schema constants.
+The configuration supplies the real GraphQL SDL and REST document schemas.
+The command does not open databases. Each operation uses normal HTTP to the
+running deployment, where its configured authorization plugin and write mode
+remain authoritative. Stdout contains protocol frames only.
 
-## The two layers
+`--identity` is trusted launcher configuration, not an MCP argument. The legacy
+client identity headers remain `X-Manifold-User-Id` and
+`X-Manifold-User-Groups`; the deployment's trusted edge must establish its auth
+context from the chosen headers. Anonymous writes are allowed when `NoAuth`
+allows them. There is no extra nonempty-environment-user gate.
 
-- **Low-level** (`tool` + `transport`): `Tool` is the raw MCP tool struct (name + description + input_schema + closure handler). `MeshqlMcpServer` speaks JSON-RPC 2.0 over stdio and dispatches `tools/call` to the registered handlers. Drop down to this layer when you need full control over a tool's behavior.
+## Library construction
 
-- **High-level** (`capability` + `schema`): `Capability` describes a tool declaratively — its handler is a `CapabilityHandler` enum that says "POST this templated GraphQL query" or "POST this REST path". The `CapabilitiesBuilder` lets you assemble a vec of capabilities from schema files plus optional per-name description overrides plus custom capabilities. This is what most callers want.
+```rust,ignore
+let capabilities = CapabilitiesBuilder::new()
+    .auto_from_schemas(&[("widget", "/widget/graph", WIDGET_SDL)])
+    .with_rest_schema("widget", "/widget/api", actual_rest_schema)
+    .build();
+```
 
-## Auto-derivation conventions
+`auto_from_schemas` derives reads through the complete GraphQL SDL parser used
+by graphlettes. Fields are selected from each operation's actual return type;
+federated objects have one level of scalar selections. Scalar and list query
+arguments are typed. Unsupported input types fail catalogue construction rather
+than silently disappearing. GraphQL values are sent as variables, including
+optional numeric `at` when declared. Tool names retain these conventions:
 
-`CapabilitiesBuilder::auto_from_schemas` parses each schema's `type Query { ... }` block and produces one capability per operation, following these conventions:
+| Operation | Tool |
+|---|---|
+| `getAll` | `list_widgets` |
+| `getById` | `get_widget_by_id` |
+| `getByName` | `find_widgets_by_name` |
+| `getByGroupId(group_id)` | `widgets_for_group` |
 
-| Operation          | Capability name              | Description sketch                          |
-|--------------------|------------------------------|---------------------------------------------|
-| `getAll`           | `list_<entities>`            | "List every <entity>…"                      |
-| `getById(id)`      | `get_<entity>_by_id`         | "Fetch one <entity> by UUID…"               |
-| `getByName(name)`  | `find_<entities>_by_name`    | "Find <entities> whose name matches…"       |
-| `getByXId(x_id)`   | `<entities>_for_<x>`         | "List <entities> related to a given <x>…"   |
+Other query names use `<entity>_<operation>`. The server sorts the catalogue
+and validates each call against its advertised JSON Schema before dispatch.
 
-Pluralization is naive (`<entity>s`). When the default reads wrong, override with `.describe("name", "better description")`.
+Writes require `with_rest_schema`; their payload schemas are never inferred
+from a read projection. Create takes `{ "payload": {...} }`, update takes
+`{ "id": "...", "patch": {...} }`, and delete takes `{ "id": "..." }`.
+Patch properties retain their declared types without requiring omitted fields;
+the REST surface validates the merged document. Payload `id` is ordinary payload
+when the document schema permits it; only the outer `id` selects the route.
+IDs are encoded as one path segment. HTTP redirects are not followed.
 
-Each generated capability's `query_template` selects every field on the entity type, including federated projections expanded one level deep — so the LLM gets rich, federation-aware results in a single round trip.
+## Protocol and bounds
 
-## CapabilityHandler variants
+Initialize with `protocolVersion`, `capabilities`, and `clientInfo`, then send
+`notifications/initialized` before tools. ID-less methods and notifications never
+execute tools. Batch arrays and invalid envelopes are rejected. Invalid tool
+arguments and unknown tool names use JSON-RPC `-32602`; backend failures use
+an `isError` tool result. Successful text JSON and object `structuredContent`
+represent the same value, wrapping nonobjects as `{ "result": value }`.
 
-- `GraphQuery { path, query_template }` — POST a templated GraphQL query to a graphlette. The handler substitutes `{arg}` placeholders from the call's input JSON (string values are GraphQL-escaped). Used by auto-derived catalog capabilities.
-- `RestGet { path_template }` — GET a templated REST path. For computed/aggregated endpoints not yet in the graph schema (e.g. `/org_node/:id/effective_bylaws`).
-- `RestPost { path_template, body_template }` — POST a templated REST path. For writes and commands (e.g. `/change_request/:id/plan`).
-- `Custom(handler)` — escape hatch. Drop in any async closure with the right signature when the templated handlers don't fit.
+The default input-frame bound is 1 MiB. Set `MESHQL_MCP_MAX_FRAME_BYTES` to a
+positive integer; invalid configuration fails at startup. Oversized frames are
+drained through their newline without dispatching and the stream remains usable.
+Calls have a 30-second deadline and HTTP responses a 1-MiB bound. Closing stdin
+drains complete requests and exits. Request handling is serial.
 
-## CQRS
+## Compatibility and certification
 
-Reads go via `/graph` (GraphQL); writes go via `/api` (REST). Auto-derived catalog capabilities use `GraphQuery` handlers. Custom tools that wrap computed-but-unmodeled GET endpoints use `RestGet`. Custom tools that POST commands use `RestPost`.
+The earlier experimental API was not MCP-certified. Its builder and handler
+variants remain available, with these intentional behavior changes: reads-only
+SDL derivation, explicit REST schemas, payload/patch envelopes, typed argument
+validation, initialization state, optional temporal reads, and no environment
+identity gate. Legacy `GraphQuery` templates accept quoted scalar string values;
+compound values or unquoted string placeholders are refused. New custom queries
+should use `GraphQueryVariables`. REST JSON templates preserve typed values.
 
-The `MeshqlClient` exposes both `gql(path, query)` and `get_path(path)` / `post_path(path, body)` / `list(entity)` / `get(entity, id)` — see the client module docs for which to use when.
+The shared required tier is `contract/features/mcplette/` (the Rust checkout uses
+`meshql-cert/tests/features/contract`). It runs once against a real SQLite
+backend and actual stdio processes, independently of the existing store matrix:
 
-## License
+```sh
+cargo build -p meshql-mcp --features cert-fixture --bins
+python3 meshql-cert/tests/features/contract/cert/mcp/run.py \
+  --adapter target/debug/mcp-cert-adapter --output target/mcp-cert/results.json
+```
 
-MIT.
+The fixture adapter's control endpoint exists only for certification. It observes
+and seeds the normal backend; no certified operation is answered by a fake store.
+
+Derived read arguments preserve SDL nullability (including list items), required
+arguments, and argument defaults in GraphQL variable declarations. GraphQL `ID`
+accepts strings or integers; `Int` is bounded to signed 32 bits. Custom scalar,
+enum, and input-object arguments currently require an explicitly configured
+capability and produce a startup diagnostic when encountered during derivation.

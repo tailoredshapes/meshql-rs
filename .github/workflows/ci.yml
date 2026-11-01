@@ -20,6 +20,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -62,6 +64,11 @@ jobs:
 
       - name: Build
         run: cargo build --workspace
+
+      - name: Required MCP surface certification (SQLite, real stdio)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: scripts/test-mcplette.sh target/mcp-cert/results.json
 
       # meshql-dynamo certifies against DynamoDB Local rather than real AWS.
       # Unlike the testcontainers-backed adapters it does not start its own

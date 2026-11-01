@@ -34,7 +34,7 @@ pub fn wrap_text_result(value: &Value) -> Value {
     serde_json::json!({
         "content": [{
             "type": "text",
-            "text": serde_json::to_string_pretty(value).unwrap_or_default(),
+            "text": serde_json::to_string_pretty(&structured).unwrap_or_default(),
         }],
         "structuredContent": structured,
     })

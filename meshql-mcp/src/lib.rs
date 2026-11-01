@@ -78,8 +78,9 @@
 //! use `RestGet`. Custom tools that POST commands (e.g. `/change_request/:id/plan`)
 //! use `RestPost`.
 
-pub mod capability;
+mod capability;
 pub mod client;
+pub mod input_schema;
 pub mod schema;
 pub mod tool;
 pub mod transport;
@@ -91,3 +92,33 @@ pub use schema::{
 };
 pub use tool::{wrap_text_result, Tool, ToolFuture, ToolHandler};
 pub use transport::{McpServerConfig, MeshqlMcpServer};
+
+mod catalogue;
+#[cfg(feature = "cert-fixture")]
+mod cert_auth;
+#[cfg(feature = "cert-fixture")]
+mod cert_backend;
+pub mod cli;
+mod frame;
+mod template;
+#[cfg(feature = "cert-fixture")]
+pub async fn cert_adapter(
+    mode: &str,
+    args: std::collections::HashMap<String, String>,
+) -> anyhow::Result<()> {
+    for key in if mode == "backend" {
+        vec!["--db", "--fixtures", "--ready-file"]
+    } else {
+        vec!["--backend", "--fixtures"]
+    } {
+        anyhow::ensure!(args.contains_key(key), "missing fixture option {key}");
+    }
+    match mode {
+        "backend" => cert_backend::run(&args).await,
+        "stdio" => cli::fixture(&args).await,
+        _ => anyhow::bail!("unknown fixture command"),
+    }
+}
+
+#[cfg(feature = "cert-fixture")]
+mod cert_searcher;

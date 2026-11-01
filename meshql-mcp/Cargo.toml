@@ -13,3 +13,22 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 anyhow = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+async-graphql-parser = "7"
+jsonschema = { version = "0.26", default-features = false }
+percent-encoding = "2"
+meshql-core = { path = "../meshql-core" }
+meshql-config = { path = "../meshql-config" }
+axum = { workspace = true, optional = true }
+meshql-server = { path = "../meshql-server", optional = true }
+meshql-sqlite = { path = "../meshql-sqlite", optional = true }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"], optional = true }
+chrono = { workspace = true, optional = true }
+
+[features]
+cert-fixture = ["dep:axum", "dep:meshql-server", "dep:meshql-sqlite", "dep:sqlx", "dep:chrono"]
+
+[[bin]]
+name = "mcp-cert-adapter"
+path = "src/bin/mcp-cert-adapter.rs"
+required-features = ["cert-fixture"]

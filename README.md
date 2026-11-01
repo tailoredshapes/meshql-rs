@@ -18,12 +18,43 @@ Tokio and Axum.
   MerkQL, MerkSQL, ksqlDB, DynamoDB, and merk-cloud.
 - **`meshql-changes`**, an SSE change feed so a client gets read-your-writes
   without polling. Neither other implementation has one.
-- **`meshql-mcp`**, an MCP server derived from the configuration, so an agent
-  can query a deployment without bespoke tooling.
+- **`meshql-mcp`**, the standard tools surface derived from configuration,
+  using the shared MCP 2025-06-18 stdio profile. It has a required certification
+  tier, alongside the existing storage and HTTP tiers.
 - **`meshql-lambda`**, which runs a server on `lambda_http`.
 - **`/<id>/versions`**, a REST endpoint listing a document's version history.
   Java and TypeScript do not have this yet; nothing in the contract certifies
   it, which is why the gap went unnoticed.
+
+### MCP tools and current certification
+
+Run a normal REST/GraphQL deployment, then launch its standard stdio facade:
+
+```sh
+cargo run -p meshql-mcp --bin meshql-mcp -- \
+  --config config.conf --backend http://127.0.0.1:3000 --identity alice
+```
+
+The command reads the actual GraphQL SDL and REST document schemas; it does not
+open a second database. Tool arguments are validated and read values use GraphQL
+variables. Writes use the normal REST surface, including its authorization plugin
+and write modes. Anonymous writes work when the plugin allows them. This profile
+is tools over stdio, not an HTTP MCP transport or every MCP capability. See
+[meshql-mcp](meshql-mcp/README.md) for APIs and migration notes.
+
+Current full MeshQL certification includes the required shared MCP tier:
+
+```sh
+git submodule update --init --recursive
+scripts/test-mcplette.sh target/mcp-cert/results.json
+```
+
+It builds the fixture adapter and runs all shared `@mcp_001`–`@mcp_018` scenarios
+once against SQLite, actual subprocess stdio and the normal HTTP backend. Missing
+cases, skipped steps, protocol contamination and cleanup failures fail the gate.
+Both private CI and the Linux workspace job require it. Older six-tier results
+remain historical results for their recorded contract pins; they do not certify
+the new MCP tier. Java and TypeScript's MCP certification remains pending.
 
 ### Certifying the ksqlDB adapter
 
