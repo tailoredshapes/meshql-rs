@@ -1,0 +1,26 @@
+name: Check out the pinned certification contract
+description: Fetch the exact gitlink revision with a contract-only read credential.
+inputs:
+  path:
+    description: Contract submodule path in this repository
+    required: true
+  ssh-key:
+    description: Read-only deploy key for tailoredshapes/meshql
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Read the contract pin
+      id: pin
+      shell: bash
+      env:
+        CONTRACT_PATH: ${{ inputs.path }}
+      run: echo "sha=$(git rev-parse "HEAD:${CONTRACT_PATH}")" >> "$GITHUB_OUTPUT"
+    - name: Fetch the pinned contract
+      uses: actions/checkout@v4
+      with:
+        repository: tailoredshapes/meshql
+        ref: ${{ steps.pin.outputs.sha }}
+        path: ${{ inputs.path }}
+        ssh-key: ${{ inputs.ssh-key }}
+        persist-credentials: false

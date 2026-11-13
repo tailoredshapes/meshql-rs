@@ -5,3 +5,6 @@ terraform.tfstate*
 .worktrees/
 
 .claude/
+
+# Private dependency checkout used only by GitHub CI
+/.ci/merk-cloud/

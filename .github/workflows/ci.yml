@@ -20,8 +20,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check out the pinned certification contract
+        uses: ./.github/actions/checkout-contract
         with:
-          submodules: recursive
+          path: meshql-cert/tests/features/contract
+          ssh-key: ${{ secrets.CONTRACT_SSH_KEY }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -37,30 +41,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # meshql-merk depends on merk-cloud, which is a **private** repository, so
-      # cargo cannot resolve it without a credential. `.cargo/config.toml` sets
-      # `net.git-fetch-with-cli = true` so the git CLI does the authenticating;
-      # this rewrites the SSH URL to an HTTPS one carrying a token, which is the
-      # form a runner can supply.
-      #
-      # Fails loudly rather than skipping, because the alternative is a build
-      # that resolves everything except the two new adapters and reports success.
-      # If merk-cloud is made public, this step and the ssh:// URL in Cargo.toml
-      # both go away.
-      - name: Authenticate to the private merk-cloud repository
-        shell: bash
-        env:
-          MERK_CLOUD_TOKEN: ${{ secrets.MERK_CLOUD_TOKEN }}
-        run: |
-          if [ -z "${MERK_CLOUD_TOKEN}" ]; then
-            echo "::error::MERK_CLOUD_TOKEN is not set. meshql-merk depends on the private"
-            echo "::error::tailoredshapes/merk-cloud repository; cargo cannot resolve it without"
-            echo "::error::a credential. Add a repository secret with read access to merk-cloud."
-            exit 1
-          fi
-          git config --global \
-            url."https://x-access-token:${MERK_CLOUD_TOKEN}@github.com/tailoredshapes/merk-cloud".insteadOf \
-            "ssh://git@github.com/tailoredshapes/merk-cloud"
+      - name: Fetch the pinned private workspace dependency
+        uses: ./.github/actions/merk-cloud
+        with:
+          ssh-key: ${{ secrets.MERK_CLOUD_SSH_KEY }}
 
       - name: Build
         run: cargo build --workspace
@@ -127,6 +111,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check out the pinned certification contract
+        uses: ./.github/actions/checkout-contract
+        with:
+          path: meshql-cert/tests/features/contract
+          ssh-key: ${{ secrets.CONTRACT_SSH_KEY }}
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -143,30 +133,10 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # meshql-merk depends on merk-cloud, which is a **private** repository, so
-      # cargo cannot resolve it without a credential. `.cargo/config.toml` sets
-      # `net.git-fetch-with-cli = true` so the git CLI does the authenticating;
-      # this rewrites the SSH URL to an HTTPS one carrying a token, which is the
-      # form a runner can supply.
-      #
-      # Fails loudly rather than skipping, because the alternative is a build
-      # that resolves everything except the two new adapters and reports success.
-      # If merk-cloud is made public, this step and the ssh:// URL in Cargo.toml
-      # both go away.
-      - name: Authenticate to the private merk-cloud repository
-        shell: bash
-        env:
-          MERK_CLOUD_TOKEN: ${{ secrets.MERK_CLOUD_TOKEN }}
-        run: |
-          if [ -z "${MERK_CLOUD_TOKEN}" ]; then
-            echo "::error::MERK_CLOUD_TOKEN is not set. meshql-merk depends on the private"
-            echo "::error::tailoredshapes/merk-cloud repository; cargo cannot resolve it without"
-            echo "::error::a credential. Add a repository secret with read access to merk-cloud."
-            exit 1
-          fi
-          git config --global \
-            url."https://x-access-token:${MERK_CLOUD_TOKEN}@github.com/tailoredshapes/merk-cloud".insteadOf \
-            "ssh://git@github.com/tailoredshapes/merk-cloud"
+      - name: Fetch the pinned private workspace dependency
+        uses: ./.github/actions/merk-cloud
+        with:
+          ssh-key: ${{ secrets.MERK_CLOUD_SSH_KEY }}
 
       - name: Run clippy
         run: cargo clippy --workspace -- -D warnings

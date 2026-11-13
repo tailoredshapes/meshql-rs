@@ -1,0 +1,38 @@
+name: Fetch the pinned merk-cloud dependency
+description: Use a read-only repository deploy key without changing Cargo's pin.
+inputs:
+  ssh-key:
+    description: Read-only deploy key for tailoredshapes/merk-cloud
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Read the locked merk-cloud revision
+      id: pin
+      shell: bash
+      run: |
+        revision=$(sed -n 's|^source = "git+ssh://git@github.com/tailoredshapes/merk-cloud.git?[^#]*#\([0-9a-f]*\)"$|\1|p' Cargo.lock | sort -u)
+        if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::Expected one pinned merk-cloud revision in Cargo.lock"
+          exit 1
+        fi
+        echo "sha=$revision" >> "$GITHUB_OUTPUT"
+    - name: Fetch the locked revision
+      uses: actions/checkout@v4
+      with:
+        repository: tailoredshapes/merk-cloud
+        ref: ${{ steps.pin.outputs.sha }}
+        fetch-depth: 0
+        path: .ci/merk-cloud
+        ssh-key: ${{ inputs.ssh-key }}
+        persist-credentials: false
+    - name: Scope Cargo's Git transport to the fetched repository
+      shell: bash
+      run: |
+        dependency_dir=$(git -C .ci/merk-cloud rev-parse --show-toplevel)
+        {
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true"
+          echo "GIT_CONFIG_COUNT=1"
+          echo "GIT_CONFIG_KEY_0=url.file:///${dependency_dir#/}.insteadOf"
+          echo "GIT_CONFIG_VALUE_0=ssh://git@github.com/tailoredshapes/merk-cloud.git"
+        } >> "$GITHUB_ENV"
