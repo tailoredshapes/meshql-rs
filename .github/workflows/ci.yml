@@ -100,10 +100,11 @@ jobs:
       # container can't start one — meshql-ksql included, now that it certifies
       # against a real Kafka rather than skipping. Run everything else (which
       # still covers the sqlite and merkql adapters, meshql-merk's non-live
-      # tests, and all pure-logic crates cross-platform).
+      # tests, and all pure-logic crates cross-platform). The farm example's
+      # end-to-end tests also start MongoDB containers and stay in the Linux suite.
       - name: Run tests (excluding Docker-backed DB adapter certs)
         if: runner.os != 'Linux'
-        run: cargo test --workspace --exclude meshql-mongo --exclude meshql-mysql --exclude meshql-postgres --exclude meshql-dynamo --exclude meshql-ksql
+        run: cargo test --workspace --exclude meshql-mongo --exclude meshql-mysql --exclude meshql-postgres --exclude meshql-dynamo --exclude meshql-ksql --exclude farm
 
   clippy:
     name: Clippy
